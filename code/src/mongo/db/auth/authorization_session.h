@@ -257,7 +257,9 @@ public:
     bool isImpersonating() const;
 
     bool isAuthWithBuiltinUser() const;
+    bool isAuthWithCustomerOrNoAuthUser() const;
     bool isAuthWithCustomer() const;
+    bool isNoAuthUser() const;
     bool shouldAllowLocalhost() const;
     
 

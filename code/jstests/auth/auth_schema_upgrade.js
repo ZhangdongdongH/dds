@@ -15,7 +15,7 @@ var setupCRUsers = function(conn) {
 
     // Add $external no-op user to verify that it does not affect
     // authSchemaUpgrade SERVER-18475
-    adminDB.getSiblingDB('$external').createUser({user: "evil", roles: [], "passwordDigestor" : "server"});
+    adminDB.getSiblingDB('$external').createUser({user: "evil", roles: []});
 
     jsTest.log("Verifying user documents before upgrading");
 
@@ -25,8 +25,8 @@ var setupCRUsers = function(conn) {
     verifyUserDoc(adminDB, 'user2', true, false);
     verifyUserDoc(adminDB.getSiblingDB('$external'), "evil", false, false, true);
 
-    adminDB.updateUser('user1', {pwd: 'newpass', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
-    verifyAuth(adminDB, 'user1', 'newpass', true, true);
+    adminDB.updateUser('user1', {pwd: 'Github@231', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    verifyAuth(adminDB, 'user1', 'Github@231', true, true);
 
     verifyUserDoc(adminDB, 'user1', true, false);
 };
@@ -38,8 +38,8 @@ var verifySchemaUpgrade = function(adminDB) {
     verifyUserDoc(adminDB.getSiblingDB('$external'), "evil", false, false, true);
 
     // After authSchemaUpgrade MONGODB-CR no longer works.
-    verifyAuth(adminDB, 'user1', 'newpass', false, true);
-    verifyAuth(adminDB, 'user2', 'pass', false, true);
+    verifyAuth(adminDB, 'user1', 'Github@231', false, true);
+    verifyAuth(adminDB, 'user2', 'Github@12', false, true);
 };
 
 var runAndVerifySchemaUpgrade = function(conn) {

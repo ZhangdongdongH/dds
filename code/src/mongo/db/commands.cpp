@@ -496,8 +496,11 @@ static Status _checkAuthForUser(Command* c,
         const std::string& dbname,
         const BSONObj& cmdObj) {
 
-    if (client->isCustomerConnection() && AuthorizationSession::get(client)->isAuthWithCustomer()) { //check if consumer
-//    if (AuthorizationSession::get(client)->isAuthWithCustomer()) { //check if consumer
+    // because user may connect with inner network because some case in our clould instance,
+    // add temp fix that : when user is auth, do not check the connection way.
+    // TODO: when our cloud instance is fix, need fix this back.
+    if (AuthorizationSession::get(client)->isAuthWithCustomer()
+        || (client->isCustomerConnection() && AuthorizationSession::get(client)->isAuthWithCustomerOrNoAuthUser())) { //check if consumer
     
         std::string cmdname = c->name;
         LOG(4) << "Mongodb consumer run command " << dbname << ".$cmd" << ' '

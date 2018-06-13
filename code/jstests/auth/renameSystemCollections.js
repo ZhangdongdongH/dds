@@ -14,6 +14,7 @@ var backdoorUserDoc = {
     roles: ['root']
 };
 
+
 adminDB.createUser({user: 'userAdmin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
 
 adminDB.auth('userAdmin', 'Github@12');
@@ -25,7 +26,6 @@ adminDB.createUser({
     "passwordDigestor" : "server"
 });
 adminDB.createUser({user: 'root', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
-adminDB.createUser({user: 'rootier', pwd: 'Github@12', roles: ['__system'], "passwordDigestor" : "server"});
 adminDB.logout();
 
 jsTestLog("Test that a readWrite user can't rename system.profile to something they can read");
@@ -53,7 +53,7 @@ adminDB.auth('userAdmin', 'Github@12');
 var res = adminDB.system.users.renameCollection("users");
 assert.eq(0, res.ok);
 assert.eq(CodeUnauthorized, res.code);
-assert.eq(5, adminDB.system.users.count());
+assert.eq(4, adminDB.system.users.count());
 
 adminDB.auth('readWriteAndUserAdmin', 'Github@12');
 assert.eq(0, adminDB.users.count());
@@ -62,7 +62,7 @@ jsTestLog("Test that even with userAdmin AND dbAdmin you CANNOT rename to/from s
 var res = adminDB.system.users.renameCollection("users");
 assert.eq(0, res.ok);
 assert.eq(CodeUnauthorized, res.code);
-assert.eq(5, adminDB.system.users.count());
+assert.eq(4, adminDB.system.users.count());
 
 adminDB.users.drop();
 adminDB.users.insert(backdoorUserDoc);
@@ -73,11 +73,6 @@ assert.eq(CodeUnauthorized, res.code);
 assert.eq(null, adminDB.system.users.findOne({user: backdoorUserDoc.user}));
 assert.neq(null, adminDB.system.users.findOne({user: 'userAdmin'}));
 
-adminDB.auth('rootier', 'Github@12');
-
-jsTestLog("Test that with __system you CAN rename to/from system.users");
-var res = adminDB.system.users.renameCollection("users", true);
-assert.eq(1, res.ok, tojson(res));
 
 // At this point, all the user documents are gone, so further activity may be unauthorized,
 // depending on cluster configuration.  So, this is the end of the test.

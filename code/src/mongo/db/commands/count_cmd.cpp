@@ -134,7 +134,7 @@ public:
         }
 
 
-        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
 
             if (request.getValue().getNs().ns() == "admin.system.users" ) {
                 std::set<std::string> buildinUsers;

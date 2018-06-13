@@ -313,6 +313,16 @@ public:
                                               const std::string& dbname,
                                               const BSONObj& cmdObj,
                                               BSONObjBuilder* result) = 0;
+    
+    /**
+     * This is function main function like above, only add a check txn function
+     * if txn is own by customer, then send the cmd to mongod with customer info
+     * if not, just like above function
+     */
+    virtual bool runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                              const std::string& dbname,
+                                              const BSONObj& cmdObj,
+                                              BSONObjBuilder* result) = 0;
 
     /**
      * Applies oplog entries to the config servers.

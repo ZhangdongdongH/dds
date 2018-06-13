@@ -578,7 +578,7 @@ void AuthorizationSession::_buildAuthenticatedRolesVector() {
 bool AuthorizationSession::_isAuthorizedForPrivilege(const Privilege& privilege) {
     const ResourcePattern& target(privilege.getResourcePattern());
 
-    if (cc().isCustomerConnection() && isAuthWithCustomer()) {
+    if (cc().isCustomerConnection() && isAuthWithCustomerOrNoAuthUser()) {
         if (target.isExactNamespacePattern() &&
                 AuthorizationManager::isReservedCollectionForCustomer(target.ns().ns())) {
             return false;
@@ -682,11 +682,22 @@ bool AuthorizationSession::isAuthWithBuiltinUser() const {
     return false;
 }
 
-bool AuthorizationSession::isAuthWithCustomer() const {
+bool AuthorizationSession::isAuthWithCustomerOrNoAuthUser() const {
     if (isAuthWithBuiltinUser() || _authenticatedUsers.isEmpyt()) {
         return false;
     }
     return true;
+}
+
+bool AuthorizationSession::isAuthWithCustomer() const {
+    if (_authenticatedUsers.isEmpyt()) {
+        return false;
+    }
+    return !isAuthWithBuiltinUser();
+}
+
+bool AuthorizationSession::isNoAuthUser() const {
+    return _authenticatedUsers.isEmpyt();
 }
 
 bool AuthorizationSession::shouldAllowLocalhost() const {

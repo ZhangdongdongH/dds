@@ -775,8 +775,15 @@ public:
              BSONObjBuilder& result) {
         auth::CreateOrUpdateUserArgs args;
         Status status = auth::parseCreateOrUpdateUserCommands(cmdObj, "updateUser", dbname, &args);
+
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
+        }
+
+        if(args.userName.isRwUser() && args.hasRoles
+           && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())) {
+
+            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Cannot update rwuser roles"));
         }
 
         if (!args.hasHashedPassword && !args.hasCustomData && !args.hasRoles) {
@@ -896,6 +903,11 @@ public:
             auth::parseAndValidateDropUserCommand(cmdObj, dbname, &userName, &writeConcern);
         if (!status.isOK()) {
             return appendCommandStatus(result, status);
+        }
+
+        if(userName.isRwUser()
+           && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())) {
+            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Cannot remove rwuser account"));
         }
 
         ServiceContext* serviceContext = txn->getClient()->getServiceContext();
@@ -1043,6 +1055,11 @@ public:
         }
 
         UserName userName(userNameString, dbname);
+        if(userName.isRwUser() 
+           && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())) {
+
+            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Cannot grantRolesToUser rwuser"));
+        }
         unordered_set<RoleName> userRoles;
         status = getCurrentUserRoles(txn, authzManager, userName, &userRoles);
         if (!status.isOK()) {
@@ -1118,6 +1135,11 @@ public:
         }
 
         UserName userName(userNameString, dbname);
+        if(userName.isRwUser() 
+           && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())) {
+
+            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Cannot revokeRolesFromUser rwuser"));
+        }
         unordered_set<RoleName> userRoles;
         status = getCurrentUserRoles(txn, authzManager, userName, &userRoles);
         if (!status.isOK()) {
@@ -1203,7 +1225,7 @@ public:
             for (size_t i = 0; i < args.userNames.size(); ++i) {
                 
                 if (args.userNames[i].isBuildinUser() 
-                        && ( AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+                        && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
                         ) {
                     continue;
                 }
@@ -2265,7 +2287,7 @@ public:
 
                 // skip buildin roles
                 if(args.roleNames[i].isBuildinRoles() 
-                        && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+                        && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
                         ) {
                     continue;
                 }

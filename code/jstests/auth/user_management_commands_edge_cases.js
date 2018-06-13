@@ -186,7 +186,7 @@ function runTest(conn) {
         assert.eq(0, db.getUser('user1').roles.length);
         assert.eq(null, db.getUser('user1').customData);
         // Make sure password didn't change
-        assert(new Mongo(db.getMongo().host).getDB(db.getName()).auth('user1', 'pwd'));
+        assert(new Mongo(db.getMongo().host).getDB(db.getName()).auth('user1', 'Github@12'));
     })();
 
     (function testRevokeRolesFromUser() {

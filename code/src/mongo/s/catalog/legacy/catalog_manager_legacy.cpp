@@ -908,6 +908,13 @@ bool CatalogManagerLegacy::runUserManagementReadCommand(OperationContext* txn,
     return _runReadCommand(txn, dbname, cmdObj, result);
 }
 
+bool CatalogManagerLegacy::runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                                        const string& dbname,
+                                                        const BSONObj& cmdObj,
+                                                        BSONObjBuilder* result) {
+    return _runReadCommand(txn, dbname, cmdObj, result);
+}
+
 bool CatalogManagerLegacy::_runReadCommand(OperationContext* txn,
                                            const std::string& dbname,
                                            const BSONObj& cmdObj,

@@ -84,7 +84,7 @@ var AuthReplTest = function(spec) {
 
     var updateUser = function() {
         var res = adminPri.runCommand(
-            {updateUser: testUser, roles: [testRole2], writeConcern: {w: 2, wtimeout: 15000}, "passwordDigestor" : "server"});
+            {updateUser: testUser, roles: [testRole2], writeConcern: {w: 2, wtimeout: 15000} });
         assert.commandWorked(res);
     };
 

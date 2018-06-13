@@ -91,6 +91,12 @@ const BSONObj kReplSecondaryOkMetadata{[] {
     o.appendElements(kReplMetadata);
     return o.obj();
 }()};
+const BSONObj kCustomerReplSecondaryOkMetadata{[] {
+    BSONObjBuilder o;
+    o.appendElements(kSecondaryOkMetadata);
+    o.appendElements(kCustomerReplMetadata);
+    return o.obj();
+}()};
 
 BSONObj appendMaxTimeToCmdObj(long long maxTimeMicros, const BSONObj& cmdObj) {
     Seconds maxTime = kConfigCommandTimeout;
@@ -719,6 +725,29 @@ StatusWith<BSONObj> ShardRegistry::runIdempotentCommandOnConfig(
         dbName,
         cmdObj,
         readPref.pref == ReadPreference::PrimaryOnly ? kReplMetadata : kReplSecondaryOkMetadata,
+        kAllRetriableErrors);
+
+    if (!response.isOK()) {
+        return response.getStatus();
+    }
+
+    return response.getValue().response;
+}
+
+StatusWith<BSONObj> ShardRegistry::runIdempotentCommandOnConfig(
+    OperationContext* txn,
+    const ReadPreferenceSetting& readPref,
+    const std::string& dbName,
+    const BSONObj& cmdObj,
+    bool isCustomerCmd) {
+    auto response = _runCommandWithRetries(
+        txn,
+        _executorPool->getFixedExecutor(),
+        getConfigShard(),
+        readPref,
+        dbName,
+        cmdObj,
+        readPref.pref == ReadPreference::PrimaryOnly ? (isCustomerCmd?kCustomerReplMetadata:kReplMetadata) : (isCustomerCmd?kCustomerReplSecondaryOkMetadata:kReplSecondaryOkMetadata),
         kAllRetriableErrors);
 
     if (!response.isOK()) {

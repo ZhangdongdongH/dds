@@ -194,6 +194,10 @@ private:
                                       const std::string& dbname,
                                       const BSONObj& cmdObj,
                                       BSONObjBuilder* result) override;
+    bool runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                      const std::string& dbname,
+                                      const BSONObj& cmdObj,
+                                      BSONObjBuilder* result) override;
 
     Status applyChunkOpsDeprecated(OperationContext* txn,
                                    const BSONArray& updateOps,

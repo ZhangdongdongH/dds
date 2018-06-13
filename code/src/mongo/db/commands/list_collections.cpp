@@ -114,8 +114,11 @@ void _addWorkingSetMember(OperationContext* txn,
         return;
     }
 
-    if (txn->getClient()->isCustomerConnection()
-        && AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() 
+    // because user may connect with inner network because some case in our clould instance,
+    // add temp fix that : when user is auth, do not check the connection way.
+    // TODO: when our cloud instance is fix, need fix this back.
+    if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()
+         || (txn->getClient()->isCustomerConnection() && AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()))
         && AuthorizationManager::isReservedCollectionForCustomer(collection->ns().toString())) {
         return;
     }

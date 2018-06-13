@@ -278,6 +278,17 @@ public:
                                                      const ReadPreferenceSetting& readPref,
                                                      const std::string& dbname,
                                                      const BSONObj& cmdObj);
+    
+    /**
+     * This is function main function like above, only add a isCustomerCmd paramer, 
+     * when isCustomerCmd is true, the metadata which send to remote mongod will contain 
+     * this customer info.
+     */
+    StatusWith<BSONObj> runIdempotentCommandOnConfig(OperationContext* txn,
+                                                     const ReadPreferenceSetting& readPref,
+                                                     const std::string& dbname,
+                                                     const BSONObj& cmdObj,
+                                                     bool isCustomerCmd);
 
     class ErrorCodesHash {
     public:

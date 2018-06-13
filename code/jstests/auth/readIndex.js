@@ -6,7 +6,7 @@ var testDB = conn.getDB("testdb");
 var indexName = 'idx_a';
 
 adminDB.createUser({user: 'root', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
-adminDB.auth('root', 'password');
+adminDB.auth('root', 'Github@12');
 testDB.foo.insert({a: 1});
 testDB.createUser({user: 'dbAdmin', pwd: 'Github@12', roles: ['dbAdmin'], "passwordDigestor" : "server"});
 adminDB.logout();

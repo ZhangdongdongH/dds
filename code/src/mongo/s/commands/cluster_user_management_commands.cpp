@@ -354,7 +354,7 @@ public:
              int options,
              string& errmsg,
              BSONObjBuilder& result) {
-        return grid.catalogManager(txn)->runUserManagementReadCommand(txn, dbname, cmdObj, &result);
+        return grid.catalogManager(txn)->runUserManagementReadCommandWithCheckTxn(txn, dbname, cmdObj, &result);
     }
 
 } cmdUsersInfo;
@@ -712,7 +712,7 @@ public:
              int options,
              string& errmsg,
              BSONObjBuilder& result) {
-        return grid.catalogManager(txn)->runUserManagementReadCommand(txn, dbname, cmdObj, &result);
+        return grid.catalogManager(txn)->runUserManagementReadCommandWithCheckTxn(txn, dbname, cmdObj, &result);
     }
 
 } cmdRolesInfo;

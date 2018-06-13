@@ -189,7 +189,7 @@ function createUsers(conn) {
 
     assert.commandWorked(adminDb.runCommand({createRole: testRole, privileges: [], roles: []}));
     assert.commandWorked(adminDb.runCommand(
-        {createUser: testUser, pwd: "Github@12", roles: [{role: testRole, db: adminDbName}], "passwordDigestor" : "server"}));
+        {createUser: testUser, pwd: "Github@12", roles: [{role: testRole, db: adminDbName}], "digestPassword" : true}));
 
     adminDb.logout();
 }

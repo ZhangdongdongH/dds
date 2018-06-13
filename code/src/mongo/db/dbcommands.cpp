@@ -197,8 +197,14 @@ public:
                                               "with --configsvr"));
         }
 
-        if (dbname == "admin" && txn->getClient()->isCustomerConnection() &&
-                AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+        // because user may connect with inner network because some case in our clould instance,
+        // add temp fix that : when user is auth, do not check the connection way.
+        // TODO: when our cloud instance is fix, need fix this back.
+        if (dbname == "admin"
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()
+                || (txn->getClient()->isCustomerConnection() && AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser())
+               )
+            ) {
             return appendCommandStatus(result,
                                        Status(ErrorCodes::IllegalOperation,
                                               "Cannot drop 'admin' database"));

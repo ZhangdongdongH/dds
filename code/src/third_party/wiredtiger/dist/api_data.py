@@ -434,6 +434,10 @@ connection_runtime_config = [
         total cache size. This setting only alters behavior if it is lower than
         eviction_trigger''',
         min=1, max=99),
+    Config('eviction_skip_wtnotfound', 'true', r'''
+        configures should skip 
+        wtnotfound in __wt_cache_eviction_worker function''',
+        type='boolean'),
     Config('eviction_target', '80', r'''
         perform eviction in worker threads when the cache contains at least
         this much content, expressed as a percentage of the total cache size.

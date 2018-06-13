@@ -198,7 +198,7 @@ public:
                                         str::stream() << "Invalid collection name: " << nss.ns()});
         }
 
-        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
             bool flag = false;
             BSONObj buildinfilter;
             if (fullns == "admin.system.users") {

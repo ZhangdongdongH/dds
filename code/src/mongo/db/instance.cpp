@@ -437,7 +437,7 @@ static void receivedQuery(OperationContext* txn,
         //        audit::logQueryAuthzCheck(client, nss, q.query, status.code());
         //        uassertStatusOK(status);
         if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
-                &&  (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+                &&  (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
                 && (!txn->isInBuildinMode())) {
 
             bool flag = false;
@@ -772,7 +772,7 @@ void receivedUpdate(OperationContext* txn, const NamespaceString& nsString, Mess
 //    audit::logUpdateAuthzCheck(client, nsString, query, toupdate, upsert, multi, status.code());
 //    uassertStatusOK(status);
     if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
-            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
             ) {
         if (nsString == std::string("admin.system.users")) {
             std::set<std::string> buildinUsers;
@@ -951,12 +951,12 @@ void receivedDelete(OperationContext* txn, const NamespaceString& nsString, Mess
 //    uassertStatusOK(status);
 
     if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
-            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
             ) {
         if (nsString == std::string("admin.system.users")) { 
-            std::set<std::string> buildinUsers;
-            UserName::getBuildinUsers(buildinUsers); 
-            BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+            std::set<std::string> buildinUsersAndRwuser;
+            UserName::getBuildinUsersAndRwuser(buildinUsersAndRwuser); 
+            BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsersAndRwuser);
             BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
             BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
             BSONObj q = BSON("$and" << BSON_ARRAY(pattern << filter));
@@ -1344,7 +1344,7 @@ void receivedInsert(OperationContext* txn, const NamespaceString& nsString, Mess
 //        uassertStatusOK(status);
     }
     if(!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
-            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
             ) {
         if (nsString == std::string("admin.system.users")) {
             for (unsigned int i = 0; i < multi.size(); i++) {

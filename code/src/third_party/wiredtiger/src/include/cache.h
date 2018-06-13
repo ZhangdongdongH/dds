@@ -194,6 +194,8 @@ struct __wt_cache {
 #define	WT_CACHE_POOL_MANAGER	  0x100 /* The active cache pool manager */
 #define	WT_CACHE_POOL_RUN	  0x200 /* Cache pool thread running */
 	uint32_t flags;
+
+    bool eviction_skip_wtnotfound;
 };
 
 #define	WT_WITH_PASS_LOCK(session, op) do {				\

@@ -3187,7 +3187,7 @@ var authCommandsLib = {
     setup: function(conn, t, runOnDb) {
         var adminDb = conn.getDB(adminDbName);
         if (t.setup) {
-            adminDb.auth("admin", "password");
+            adminDb.auth("admin", "Github@12");
             t.setup(runOnDb);
             runOnDb.getLastError();
             adminDb.logout();
@@ -3197,7 +3197,7 @@ var authCommandsLib = {
     teardown: function(conn, t, runOnDb) {
         var adminDb = conn.getDB(adminDbName);
         if (t.teardown) {
-            adminDb.auth("admin", "password");
+            adminDb.auth("admin", "Github@12");
             t.teardown(runOnDb);
             runOnDb.getLastError();
             adminDb.logout();

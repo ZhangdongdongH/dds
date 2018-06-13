@@ -581,7 +581,7 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
         if (opts.arbiter)
             opts.oplogSize = 1;
         
-        if(_laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
+        if(MongoRunner.laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
             opts.adminWhiteListPath = "/tmp/adminWhiteList";
         }
 
@@ -631,7 +631,7 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
             opts.binVersion = MongoRunner.getBinVersionFor(testOptions.mongosBinVersion);
         }
         
-        if(_laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
+        if(MongoRunner.laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
             opts.adminWhiteListPath = "/tmp/adminWhiteList";
         }
 
@@ -851,7 +851,7 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
     };
 
 
-    var _laterThan = function(version1, version2) {
+    MongoRunner.laterThan = function(version1, version2) {
         if(!version1) {
             return true;
         }

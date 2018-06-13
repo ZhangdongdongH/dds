@@ -239,7 +239,7 @@ Status AuthzManagerExternalStateLocal::getRoleDescription(OperationContext* txn,
     // no one will create a user with build in dbs role.
     // DBS: TODO
     if(!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
-            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
             && roleName.isBuildinRoles()) {
         return Status(ErrorCodes::RoleNotFound, "No role named " + roleName.toString());
     }
@@ -309,7 +309,7 @@ Status AuthzManagerExternalStateLocal::getRoleDescriptionsForDB(OperationContext
         if (!showBuiltinRoles && _roleGraph.isBuiltinRole(it.get())) {
             continue;
         }
-        if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn()) 
+        if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
                 && it.get().isBuildinRoles()) {
             continue;
         }

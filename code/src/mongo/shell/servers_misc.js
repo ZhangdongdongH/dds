@@ -20,9 +20,12 @@ ToolTest.prototype.startDB = function(coll) {
         nohttpinterface: "",
         noprealloc: "",
         smallfiles: "",
-        adminWhiteListPath: "/tmp/adminWhiteList",
         bind_ip: "127.0.0.1"
     };
+
+    if(MongoRunner.laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
+        opts.adminWhiteListPath = "/tmp/adminWhiteList";
+    }
 
     Object.extend(options, this.options);
 

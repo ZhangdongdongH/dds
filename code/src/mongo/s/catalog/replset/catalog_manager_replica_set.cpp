@@ -852,8 +852,8 @@ bool CatalogManagerReplicaSet::runUserManagementWriteCommand(OperationContext* t
 
 
     auto response = grid.shardRegistry()->runCommandOnConfigWithRetries(
-        txn, dbname, cmdToRun, 
-        AuthorizationSession::get(txn->getClient())->isAuthWithCustomer(),
+        txn, dbname, cmdToRun,
+        AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser(),
         ShardRegistry::kNotMasterErrors);
 
     if (!response.isOK()) {
@@ -888,6 +888,21 @@ bool CatalogManagerReplicaSet::runUserManagementReadCommand(OperationContext* tx
                                                             BSONObjBuilder* result) {
     auto resultStatus = grid.shardRegistry()->runIdempotentCommandOnConfig(
         txn, kConfigPrimaryPreferredSelector, dbname, cmdObj);
+    if (resultStatus.isOK()) {
+        result->appendElements(resultStatus.getValue());
+        return Command::getStatusFromCommandResult(resultStatus.getValue()).isOK();
+    }
+
+    return Command::appendCommandStatus(*result, resultStatus.getStatus());
+}
+
+bool CatalogManagerReplicaSet::runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                                            const std::string& dbname,
+                                                            const BSONObj& cmdObj,
+                                                            BSONObjBuilder* result) {
+    bool isCustomerCmd = AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser();
+    auto resultStatus = grid.shardRegistry()->runIdempotentCommandOnConfig(
+        txn, kConfigPrimaryPreferredSelector, dbname, cmdObj, isCustomerCmd);
     if (resultStatus.isOK()) {
         result->appendElements(resultStatus.getValue());
         return Command::getStatusFromCommandResult(resultStatus.getValue()).isOK();

@@ -84,8 +84,7 @@ function runTest(conn) {
         assert(!db.auth('spencer', 'Github@12'));
         assert(db.auth('spencer', 'Github@125'));
 
-        testUserAdmin.updateUser('spencer',
-                                 {customData: {zipCode: 10036}, roles: ["read", "testRole"], "passwordDigestor" : "server"});
+        testUserAdmin.updateUser('spencer', {customData: {zipCode: 10036}, roles: ["read", "testRole"]});
         var user = testUserAdmin.getUser('spencer');
         assert.eq(10036, user.customData.zipCode);
         hasAuthzError(db.foo.insert({a: 1}));

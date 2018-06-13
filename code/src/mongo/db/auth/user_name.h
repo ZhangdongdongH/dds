@@ -86,14 +86,29 @@ public:
         return false;
     }
 
+    static bool isRwUser(const std::string username) {
+        if(username == "rwuser@admin") {
+            return true;
+        }
+        return false;
+    }
+
     static void getBuildinUsers(std::set<std::string>& buildInUsers) {
         buildInUsers.insert("admin");
         buildInUsers.insert("monitor");
         buildInUsers.insert("backupuser");
     }
+    static void getBuildinUsersAndRwuser(std::set<std::string>& buildInUsers) {
+        getBuildinUsers(buildInUsers);
+        buildInUsers.insert("rwuser");
+    }
 
     bool isBuildinUser() const {
         return isBuildinUser(_fullName);
+    }
+
+    bool isRwUser() const {
+        return isRwUser(_fullName);
     }
 
     bool isCustomer() const {

@@ -280,8 +280,13 @@ public:
         std::vector<Command*> commands;
 
         bool customer = false;
-        if (txn->getClient()->isCustomerConnection()
-                && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+
+        // because user may connect with inner network because some case in our clould instance,
+        // add temp fix that : when user is auth, do not check the connection way.
+        // TODO: when our cloud instance is fix, need fix this back.
+        if ( AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer()
+             || txn->isCustomerTxn()
+             || (txn->getClient()->isCustomerConnection() && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomerOrNoAuthUser()))
             ) {
             customer = true;
         }

@@ -162,7 +162,7 @@ public:
                 response.setErrMessage(errmsg);
             } else {
                 bool flag = true;
-                if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+                if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
                     if (request.getNS().ns() == std::string("admin.system.users")) {
                         if (_writeType == BatchedCommandRequest::BatchType_Update) {
                             return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateUser cmd."));

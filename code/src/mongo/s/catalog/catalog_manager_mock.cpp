@@ -159,6 +159,12 @@ bool CatalogManagerMock::runUserManagementReadCommand(OperationContext* txn,
                                                       BSONObjBuilder* result) {
     return true;
 }
+bool CatalogManagerMock::runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                                      const string& dbname,
+                                                      const BSONObj& cmdObj,
+                                                      BSONObjBuilder* result) {
+    return true;
+}
 
 Status CatalogManagerMock::applyChunkOpsDeprecated(OperationContext* txn,
                                                    const BSONArray& updateOps,

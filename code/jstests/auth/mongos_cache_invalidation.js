@@ -34,10 +34,10 @@ res = st.s1.getDB('admin').runCommand({getParameter: 1, userCacheInvalidationInt
 assert.eq(5, res.userCacheInvalidationIntervalSecs);
 st.s1.getDB('test').foo.insert({a: 1});  // initial data
 st.s1.getDB('test').bar.insert({a: 1});  // initial data
-st.s1.getDB('admin').createUser({user: 'admin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+st.s1.getDB('admin').createUser({user: 'admin1', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
 st.s1.getDB('admin').logout();
 
-st.s0.getDB('admin').auth('admin', 'Github@12');
+st.s0.getDB('admin').auth('admin1', 'Github@12');
 st.s0.getDB('admin').createRole({
     role: 'myRole',
     roles: [],

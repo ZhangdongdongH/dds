@@ -134,7 +134,7 @@ bool WriteCmd::run(OperationContext* txn,
         return appendCommandStatus(result, Status(ErrorCodes::FailedToParse, errMsg));
     }
 
-    if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn()) {
+    if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn()) {
         if (request.getNS().ns() == std::string("admin.system.users")) {
             if (_writeType == BatchedCommandRequest::BatchType_Update) {
                 return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateUser cmd."));

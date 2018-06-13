@@ -4,12 +4,13 @@ var adminDb = conn.getDB("admin");
 var testDb = conn.getDB("testdb");
 
 adminDb.createUser({
-    user: 'admin',
+    user: 'admin1',
     pwd: 'Github@12',
-    roles: ['userAdminAnyDatabase', 'dbAdminAnyDatabase', 'readWriteAnyDatabase']
+    roles: ['userAdminAnyDatabase', 'dbAdminAnyDatabase', 'readWriteAnyDatabase'],
+    "passwordDigestor" : "server"
 });
 
-adminDb.auth('admin', 'Github@12');
+adminDb.auth('admin1', 'Github@12');
 testDb.createUser({user: 'readUser', pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
 testDb.createUser({user: 'dbAdminUser', pwd: 'Github@12', roles: ['dbAdmin'], "passwordDigestor" : "server"});
 testDb.createUser({

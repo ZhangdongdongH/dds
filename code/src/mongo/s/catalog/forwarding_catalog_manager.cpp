@@ -530,6 +530,19 @@ bool ForwardingCatalogManager::runUserManagementReadCommand(OperationContext* tx
                      return success;
                  });
 }
+bool ForwardingCatalogManager::runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                                            const std::string& dbname,
+                                                            const BSONObj& cmdObj,
+                                                            BSONObjBuilder* result) {
+    return retry(txn,
+                 [&] {
+                     BSONObjBuilder builder;
+                     const bool success =
+                         _actual->runUserManagementReadCommandWithCheckTxn(txn, dbname, cmdObj, &builder);
+                     result->appendElements(builder.done());
+                     return success;
+                 });
+}
 
 Status ForwardingCatalogManager::applyChunkOpsDeprecated(OperationContext* txn,
                                                          const BSONArray& updateOps,

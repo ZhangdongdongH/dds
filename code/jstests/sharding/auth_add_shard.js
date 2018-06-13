@@ -11,7 +11,7 @@
     }
 
     // admin user object
-    var adminUser = {db: "admin", username: "foo", password: "Github@12"};
+    var adminUser = {db: "admin", username: "admin", password: "Github@12"};
 
     // set up a 2 shard cluster with keyfile
     var st = new ShardingTest({shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});

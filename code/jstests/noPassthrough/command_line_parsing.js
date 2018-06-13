@@ -16,6 +16,7 @@ var m2expected = {
     "parsed": {
         "config": "jstests/libs/testconfig",
         "storage": {"dbPath": m2.dbpath},
+        "security": {"whitelist": {"adminWhiteListPath": "/tmp/adminWhiteList"}},
         "net": {"port": m2.port},
         "help": false,
         "version": false,
@@ -40,6 +41,7 @@ var m3expected = {
     "parsed": {
         "config": "jstests/libs/testconfig",
         "storage": {"dbPath": m3.dbpath},
+        "security": {"whitelist": {"adminWhiteListPath": "/tmp/adminWhiteList"}},
         "net": {"port": m3.port},
         "help": false,
         "version": false,

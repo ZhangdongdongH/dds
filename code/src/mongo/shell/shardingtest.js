@@ -1019,7 +1019,7 @@ var ShardingTest = function(params) {
     }
 
     var keyFile = otherParams.keyFile;
-    var adminWhiteListPath = otherParams.adminWhiteListPath || otherParams.extraOptions.adminWhiteListPath;
+    var adminWhiteListPath = otherParams.adminWhiteListPath;
     var hostName = getHostName();
 
     this._testName = testName;

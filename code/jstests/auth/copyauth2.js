@@ -1,11 +1,10 @@
 // Basic test that copydb works with auth enabled when copying within the same cluster
 
 function runTest(a, b) {
-    a.createUser({user: "chevy", pwd: "Github@12", roles: ["read", {role: 'readWrite', db: b._name}], "passwordDigestor" : "server"});
     a.foo.insert({a: 1});
     b.getSiblingDB("admin").logout();
 
-    a.auth("chevy", "Github@12");
+    a.getSiblingDB("admin").auth("monitor", "Github@12");
 
     assert.eq(1, a.foo.count(), "A");
     assert.eq(0, b.foo.count(), "B");
@@ -20,8 +19,9 @@ var conn = MongoRunner.runMongod({auth: ""});
 var a = conn.getDB("copydb2-test-a");
 var b = conn.getDB("copydb2-test-b");
 var adminDB = conn.getDB("admin");
-adminDB.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
-adminDB.auth("root", "Github@12");
+adminDB.createUser({user: "admin", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+adminDB.auth("admin", "Github@12");
+adminDB.createUser({user: "monitor", pwd: "Github@12", roles: [{role: "read", db: a._name}, {role: 'readWrite', db: b._name}], "passwordDigestor" : "server"});
 runTest(a, b);
 MongoRunner.stopMongod(conn);
 

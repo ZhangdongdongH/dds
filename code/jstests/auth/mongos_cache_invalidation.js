@@ -20,8 +20,8 @@ var st = new ShardingTest({
     keyFile: 'jstests/libs/key1'
 });
 
-st.s1.getDB('admin').createUser({user: 'root', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
-st.s1.getDB('admin').auth('root', 'Github@12');
+st.s1.getDB('admin').createUser({user: 'admin', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+st.s1.getDB('admin').auth('admin', 'Github@12');
 
 var res = st.s1.getDB('admin').runCommand({setParameter: 1, userCacheInvalidationIntervalSecs: 0});
 assert.commandFailed(res, "Setting the invalidation interval to an disallowed value should fail");
@@ -34,33 +34,38 @@ res = st.s1.getDB('admin').runCommand({getParameter: 1, userCacheInvalidationInt
 assert.eq(5, res.userCacheInvalidationIntervalSecs);
 assert.writeOK(st.s1.getDB('test').foo.insert({a: 1}));  // initial data
 assert.writeOK(st.s1.getDB('test').bar.insert({a: 1}));  // initial data
-st.s1.getDB('admin').createUser({user: 'admin1', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+st.s1.getDB('admin').createUser({user: 'backupuser', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
 st.s1.getDB('admin').logout();
 
-st.s0.getDB('admin').auth('admin1', 'Github@12');
+st.s0.getDB('admin').auth('backupuser', 'Github@12');
 st.s0.getDB('admin').createRole({
     role: 'myRole',
     roles: [],
     privileges: [{resource: {cluster: true}, actions: ['invalidateUserCache', 'setParameter']}]
 });
-st.s0.getDB('test').createUser({
-    user: 'spencer',
+
+st.s0.getDB('admin').createUser({
+    user: 'monitor',
     pwd: 'Github@12',
-    roles: ['read', {role: 'myRole', db: 'admin'}, {role: 'userAdminAnyDatabase', db: 'admin'}],
+    roles: [],
     "passwordDigestor" : "server"
-});
+})
+st.s0.getDB('admin').grantRolesToUser(
+    "monitor", 
+    [{"role": 'read', 'db': 'test'}, {'role': 'myRole', 'db': 'admin'}, {'role': 'userAdminAnyDatabase', 'db': 'admin'}]
+);
 st.s0.getDB('admin').logout();
 
 var db1 = st.s0.getDB('test');
-db1.auth('spencer', 'Github@12');
+db1.getSiblingDB('admin').auth('monitor', 'Github@12');
 var db2 = st.s1.getDB('test');
-db2.auth('spencer', 'Github@12');
+db2.getSiblingDB('admin').auth('monitor', 'Github@12');
 var db3 = st.s2.getDB('test');
-db3.auth('spencer', 'Github@12');
+db3.getSiblingDB('admin').auth('monitor', 'Github@12');
 
 /**
  * At this point we have 3 handles to the "test" database, each of which are on connections to
- * different mongoses.  "db1", "db2", and "db3" are all auth'd as spencer@test and will be used
+ * different mongoses.  "db1", "db2", and "db3" are all auth'd as monitor@test and will be used
  * to verify that user and role data changes get propaged to their mongoses.
  * "db2" is connected to a mongos with a 5 second user cache invalidation interval,
  * while "db3" is connected to a mongos with a 10 minute cache invalidation interval.
@@ -149,7 +154,7 @@ db3.auth('spencer', 'Github@12');
     hasAuthzError(db2.foo.update({}, {$inc: {a: 1}}));
     hasAuthzError(db3.foo.update({}, {$inc: {a: 1}}));
 
-    db1.getSiblingDB('test').grantRolesToUser("spencer", ['readWrite']);
+    db1.getSiblingDB('admin').grantRolesToUser("monitor", [{ 'role': 'readWrite', 'db': 'test'}]);
 
     // s0/db1 should update its cache instantly
     assert.writeOK(db1.foo.update({}, {$inc: {a: 1}}));
@@ -170,17 +175,17 @@ db3.auth('spencer', 'Github@12');
     assert.writeOK(db1.foo.update({}, {$inc: {a: 1}}));
     assert.writeOK(db3.foo.update({}, {$inc: {a: 1}}));
 
-    db1.getSiblingDB('test').revokeRolesFromUser("spencer", ['readWrite']);
+    db1.getSiblingDB('admin').revokeRolesFromUser("monitor", [{'role':'readWrite','db':'test'}]);
 
-    // At this point db3 still thinks "spencer" has readWrite.  Use it to add a different role
+    // At this point db3 still thinks "monitor" has readWrite.  Use it to add a different role
     // and make sure it doesn't add back readWrite
     hasAuthzError(db1.foo.update({}, {$inc: {a: 1}}));
     assert.writeOK(db3.foo.update({}, {$inc: {a: 1}}));
 
-    db3.getSiblingDB('test').grantRolesToUser("spencer", ['dbAdmin']);
+    db3.getSiblingDB('admin').grantRolesToUser("monitor", [{ 'role': 'dbAdmin', 'db': 'test'}]);
 
     hasAuthzError(db1.foo.update({}, {$inc: {a: 1}}));
-    // modifying "spencer" should force db3 to update its cache entry for "spencer"
+    // modifying "monitor" should force db3 to update its cache entry for "monitor"
     hasAuthzError(db3.foo.update({}, {$inc: {a: 1}}));
 
     // Make sure nothing changes from invalidating the cache
@@ -197,7 +202,7 @@ db3.auth('spencer', 'Github@12');
     assert.commandWorked(db2.foo.runCommand("collStats"));
     assert.commandWorked(db3.foo.runCommand("collStats"));
 
-    db1.dropUser('spencer');
+    db1.getSiblingDB('admin').dropUser('monitor');
 
     // s0/db1 should update its cache instantly
     assert.commandFailedWithCode(db1.foo.runCommand("collStats"), authzErrorCode);

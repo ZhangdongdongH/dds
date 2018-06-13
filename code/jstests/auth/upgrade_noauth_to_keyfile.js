@@ -30,7 +30,7 @@ load('jstests/multiVersion/libs/multi_rs.js');
     var rstConn1 = rst.getPrimary();
 
     // Create a user to login as when auth is enabled later
-    rstConn1.getDB('admin').createUser({user: 'root', pwd: 'root', roles: ['root']});
+    rstConn1.getDB('admin').createUser({user: 'root', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
 
     rstConn1.getDB('test').a.insert({a: 1, str: 'TESTTESTTEST'});
     assert.eq(1, rstConn1.getDB('test').a.count(), 'Error interacting with replSet');
@@ -42,7 +42,7 @@ load('jstests/multiVersion/libs/multi_rs.js');
     assert.eq(2, rstConn2.getDB('test').a.count(), 'Error interacting with replSet');
 
     print('=== UPGRADE transitionToAuth/keyFile -> keyFile ===');
-    rst.upgradeSet(keyFileOptions, 'root', 'root');
+    rst.upgradeSet(keyFileOptions, 'root', 'Github@12');
 
     // upgradeSet leaves its connections logged in as root
     var rstConn3 = rst.getPrimary();

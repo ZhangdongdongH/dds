@@ -13,7 +13,7 @@
     assert.eq(0, db.system.roles.getIndexes().length);
 
     // TEST: User and role creation generates indexes
-    db.createUser({user: "user", pwd: "pwd", roles: []});
+    db.createUser({user: "user", pwd: "Github@12", roles: [], "passwordDigestor" : "server"});
     assert.eq(2, db.system.users.getIndexes().length);
 
     db.createRole({role: "role", privileges: [], roles: []});
@@ -47,7 +47,7 @@
     // TEST: Destroying the admin.system.users index and restarting will recreate it, even if
     // admin.system.roles does not exist
     db.dropDatabase();
-    db.createUser({user: "user", pwd: "pwd", roles: []});
+    db.createUser({user: "user", pwd: "Github@12", roles: [], "passwordDigestor" : "server"});
     assert.commandWorked(db.system.users.dropIndexes());
     MongoRunner.stopMongod(conn);
     conn = MongoRunner.runMongod({restart: conn, cleanData: false});

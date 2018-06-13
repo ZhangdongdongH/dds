@@ -9,8 +9,8 @@
         // Create the admin user.
         let adminDB = conn.getDB("admin");
         assert.commandWorked(
-            adminDB.runCommand({createUser: "admin", pwd: "admin", roles: ["root"]}));
-        assert.eq(1, adminDB.auth("admin", "admin"));
+            adminDB.runCommand({createUser: "admin", pwd: "Github@12", roles: ["root"], "digestPassword" : true }));
+        assert.eq(1, adminDB.auth("admin", "Github@12"));
 
         const viewsDBName = "views_authz";
         let viewsDB = adminDB.getSiblingDB(viewsDBName);
@@ -32,10 +32,10 @@
             roles: []
         }));
         assert.commandWorked(
-            viewsDB.runCommand({createUser: "viewUser", pwd: "pwd", roles: ["readWriteView"]}));
+            viewsDB.runCommand({createUser: "viewUser", pwd: "Github@12", roles: ["readWriteView"], "digestPassword" : true }));
 
         adminDB.logout();
-        assert.eq(1, viewsDB.auth("viewUser", "pwd"));
+        assert.eq(1, viewsDB.auth("viewUser", "Github@12"));
 
         const lookupStage = {
             $lookup: {from: "forbidden", localField: "x", foreignField: "x", as: "y"}
@@ -115,7 +115,7 @@
                                      "modified a view without having to specify 'pipeline'");
 
         // Create a view on a forbidden collection and populate it.
-        assert.eq(1, adminDB.auth("admin", "admin"));
+        assert.eq(1, adminDB.auth("admin", "Github@12"));
         assert.commandWorked(viewsDB.createView("view2", "forbidden", []));
         for (let i = 0; i < 10; i++) {
             assert.writeOK(viewsDB.forbidden.insert({x: 1}));

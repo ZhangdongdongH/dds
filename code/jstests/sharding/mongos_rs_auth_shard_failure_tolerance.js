@@ -19,7 +19,7 @@ var mongos = st.s0;
 var admin = mongos.getDB("admin");
 
 jsTest.log("Setting up initial admin user...");
-var adminUser = "adminUser";
+var adminUser = "admin";
 var password = "Github@12";
 
 // Create a user

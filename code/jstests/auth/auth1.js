@@ -56,10 +56,11 @@ function runTest(m) {
     assert.eq(1000, t.count(), "A1");
     assert.eq(1000, t.find().toArray().length, "A2");
 
-    db.setProfilingLevel(2);
-    t.count();
-    db.setProfilingLevel(0);
-    assert.lt(0, db.system.profile.find({user: "eliot@test"}).count(), "AP1");
+//  
+//    db.setProfilingLevel(2);
+//    t.count();
+//    db.setProfilingLevel(0);
+//    assert.lt(0, db.system.profile.find({user: "eliot@test"}).count(), "AP1");
 
     var p = {
         key: {i: true},

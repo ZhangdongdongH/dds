@@ -286,8 +286,12 @@
     // Authenticate as read-write user
     jsTestLog("Checking commands with read-write auth credentials");
     assert(testDB.auth(rwUser, password));
+    assert(testDB.logout().ok);
+    assert(adminDB.auth(rwUser, password));
     checkReadOps(true);
     checkWriteOps(true);
+    assert(adminDB.logout().ok);
+    assert(testDB.auth(rwUser, password));
 
     jsTestLog("Check drainging/removing a shard");
     assert(testDB.logout().ok);

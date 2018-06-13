@@ -28,10 +28,10 @@ function runInitialSyncTest() {
     var slave1 = replTest.liveNodes.slaves[0];
     var admin_s1 = slave1.getDB("admin");
 
-    print("2. Create a root user.");
-    admin.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
-    admin.auth("root", "Github@12");
-    admin_s1.auth("root", "Github@12");
+    print("2. Create a admin user.");
+    admin.createUser({user: "admin", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+    admin.auth("admin", "Github@12");
+    admin_s1.auth("admin", "Github@12");
 
     print("3. Insert some data");
     var bulk = foo.bar.initializeUnorderedBulkOp();

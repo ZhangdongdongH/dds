@@ -2285,6 +2285,10 @@ __wt_cache_eviction_worker(WT_SESSION_IMPL *session, bool busy, u_int pct_full)
 			__wt_cond_wait(session,
 			    conn->evict_threads.wait_cond, 10000, NULL);
 			cache->app_waits++;
+            if(cache->eviction_skip_wtnotfound) {
+                ret = 0;
+                goto err;
+            }
 			break;
 		default:
 			goto err;

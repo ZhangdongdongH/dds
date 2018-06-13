@@ -26,10 +26,10 @@
         assert(adminDB.auth('admin', 'Github@12'));
 
         var bcDB = conn.getDB('b@c');
-        bcDB.createUser({user: 'a', pwd: 'Github@122', roles: [{role: 'readWrite', db: 'b@c'}], "passwordDigestor" : "server"}});
+        bcDB.createUser({user: 'a', pwd: 'Github@122', roles: [{role: 'readWrite', db: 'b@c'}], "passwordDigestor" : "server"});
 
         var cDB = conn.getDB('c');
-        cDB.createUser({user: 'a@b', pwd: 'Github@121', roles: [{role: 'readWrite', db: 'c'}], "passwordDigestor" : "server"}});
+        cDB.createUser({user: 'a@b', pwd: 'Github@121', roles: [{role: 'readWrite', db: 'c'}], "passwordDigestor" : "server"});
 
         assert(adminDB.logout());
 

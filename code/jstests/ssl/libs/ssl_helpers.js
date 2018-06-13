@@ -107,8 +107,8 @@ function mixedShardTest(options1, options2, shouldSucceed) {
         });
 
         // Create admin user in case the options include auth
-        st.admin.createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
-        st.admin.auth('admin', 'pwd');
+        st.admin.createUser({user: 'admin', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+        st.admin.auth('admin', 'Github@12');
 
         st.stopBalancer();
 

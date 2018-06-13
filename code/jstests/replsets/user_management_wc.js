@@ -29,23 +29,23 @@ load('jstests/multiVersion/libs/auth_helpers.js');
     var commands = [];
 
     commands.push({
-        req: {createUser: 'username', pwd: 'password', roles: jsTest.basicUserRoles},
+        req: {createUser: 'username', pwd: 'Github@12', roles: jsTest.basicUserRoles, "digestPassword" : true},
         setupFunc: function() {},
         confirmFunc: function() {
-            assert(db.auth("username", "password"), "auth failed");
-            assert(!db.auth("username", "passworda"), "auth should have failed");
+            assert(db.auth("username", "Github@12"), "auth failed");
+            assert(!db.auth("username", "Github@12a"), "auth should have failed");
         },
         admin: false
     });
 
     commands.push({
-        req: {updateUser: 'username', pwd: 'password2', roles: jsTest.basicUserRoles},
+        req: {updateUser: 'username', pwd: 'Github@13', roles: jsTest.basicUserRoles, "digestPassword" : true},
         setupFunc: function() {
-            db.runCommand({createUser: 'username', pwd: 'password', roles: jsTest.basicUserRoles});
+            db.runCommand({createUser: 'username', pwd: 'Github@12', roles: jsTest.basicUserRoles});
         },
         confirmFunc: function() {
-            assert(db.auth("username", "password2"), "auth failed");
-            assert(!db.auth("username", "password"), "auth should have failed");
+            assert(db.auth("username", "Github@13"), "auth failed");
+            assert(!db.auth("username", "Github@12"), "auth should have failed");
         },
         admin: false
     });
@@ -53,11 +53,11 @@ load('jstests/multiVersion/libs/auth_helpers.js');
     commands.push({
         req: {dropUser: 'tempUser'},
         setupFunc: function() {
-            db.runCommand({createUser: 'tempUser', pwd: 'password', roles: jsTest.basicUserRoles});
-            assert(db.auth("tempUser", "password"), "auth failed");
+            db.runCommand({createUser: 'tempUser', pwd: 'Github@12', roles: jsTest.basicUserRoles, "digestPassword" : true});
+            assert(db.auth("tempUser", "Github@12"), "auth failed");
         },
         confirmFunc: function() {
-            assert(!db.auth("tempUser", "password"), "auth should have failed");
+            assert(!db.auth("tempUser", "Github@12"), "auth should have failed");
         },
         admin: false
     });
@@ -68,11 +68,11 @@ load('jstests/multiVersion/libs/auth_helpers.js');
             adminDB.system.version.update(
                 {_id: "authSchema"}, {"currentVersion": 3}, {upsert: true});
 
-            db.createUser({user: 'user1', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'pass'}));
+            db.createUser({user: 'user1', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'Github@12'}));
 
-            db.createUser({user: 'user2', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'pass'}));
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'Github@12'}));
         },
         confirmFunc: function() {
             // All users should only have SCRAM credentials.
@@ -80,8 +80,8 @@ load('jstests/multiVersion/libs/auth_helpers.js');
             verifyUserDoc(db, 'user2', false, true);
 
             // After authSchemaUpgrade MONGODB-CR no longer works.
-            verifyAuth(db, 'user1', 'pass', false, true);
-            verifyAuth(db, 'user2', 'pass', false, true);
+            verifyAuth(db, 'user1', 'Github@12', false, true);
+            verifyAuth(db, 'user2', 'Github@12', false, true);
         },
         admin: true
     });
@@ -97,7 +97,7 @@ load('jstests/multiVersion/libs/auth_helpers.js');
         setupFunc: function() {
             adminDB.system.users.remove({});
             adminDB.system.roles.remove({});
-            adminDB.createUser({user: 'lorax', pwd: 'pwd', roles: ['read']});
+            adminDB.createUser({user: 'lorax', pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
             adminDB.createRole({role: 'role1', roles: ['read'], privileges: []});
             adminDB.system.users.find().forEach(function(doc) {
                 adminDB.tempusers.insert(doc);
@@ -111,7 +111,7 @@ load('jstests/multiVersion/libs/auth_helpers.js');
             assert.eq(0, adminDB.system.users.find().itcount());
             assert.eq(0, adminDB.system.roles.find().itcount());
 
-            db.createUser({user: 'lorax2', pwd: 'pwd', roles: ['readWrite']});
+            db.createUser({user: 'lorax2', pwd: 'Github@12', roles: ['readWrite'], "passwordDigestor" : "server"});
             db.createRole({role: 'role2', roles: ['readWrite'], privileges: []});
 
             assert.eq(1, adminDB.system.users.find().itcount());

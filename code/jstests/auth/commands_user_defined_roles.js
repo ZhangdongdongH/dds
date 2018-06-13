@@ -8,7 +8,7 @@ in jstests/auth/commands.js.
 */
 
 // constants
-var testUser = "userDefinedRolesTestUser";
+var testUser = "monitor";
 var testRole = "userDefinedRolesTestRole";
 
 load("jstests/auth/lib/commands_lib.js");

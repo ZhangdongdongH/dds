@@ -9,7 +9,7 @@
 
     var adminUser = {
         user: "admin",
-        pwd: "a",
+        pwd: "Github@12",
         roles:
             ["readWriteAnyDatabase", "dbAdminAnyDatabase", "userAdminAnyDatabase", "clusterAdmin"],
         "passwordDigestor" : "server"

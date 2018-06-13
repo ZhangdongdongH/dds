@@ -44,9 +44,9 @@ load("jstests/replsets/rslib.js");
 
     // Pre-populate the data directory for the first replica set node, to be started later, with
     // a user's credentials.
-    print("add a user to server0: foo");
+    print("add a user to server0: admin");
     m = MongoRunner.runMongod({dbpath: MongoRunner.dataPath + name + "-0"});
-    m.getDB("admin").createUser({user: "foo", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    m.getDB("admin").createUser({user: "admin", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     m.getDB("test").createUser({user: "bar", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
     print("make sure user is written before shutting down");
     MongoRunner.stopMongod(m);
@@ -62,7 +62,7 @@ load("jstests/replsets/rslib.js");
     print("start 2 with keyFile");
     rs.start(2, {"keyFile": key1_600});
 
-    var result = m.getDB("admin").auth("foo", "Github@12");
+    var result = m.getDB("admin").auth("admin", "Github@12");
     assert.eq(result, 1, "login failed");
     print("Initializing replSet with config: " + tojson(rs.getReplSetConfig()));
     result = m.getDB("admin").runCommand({replSetInitiate: rs.getReplSetConfig()});
@@ -74,7 +74,7 @@ load("jstests/replsets/rslib.js");
     rs.awaitSecondaryNodes();
     var mId = rs.getNodeId(master);
     var slave = rs.liveNodes.slaves[0];
-    assert.eq(1, master.getDB("admin").auth("foo", "Github@12"));
+    assert.eq(1, master.getDB("admin").auth("admin", "Github@12"));
     assert.writeOK(
         master.getDB("test").foo.insert({x: 1}, {writeConcern: {w: 3, wtimeout: 60000}}));
 
@@ -152,7 +152,7 @@ load("jstests/replsets/rslib.js");
         keyFile: key2_600
     });
 
-    master.getDB("admin").auth("foo", "Github@12");
+    master.getDB("admin").auth("admin", "Github@12");
     var config = master.getDB("local").system.replset.findOne();
     config.members.push({_id: 3, host: rs.host + ":" + port[3]});
     config.version++;
@@ -162,7 +162,7 @@ load("jstests/replsets/rslib.js");
         print("error: " + e);
     }
     master = rs.getPrimary();
-    master.getDB("admin").auth("foo", "Github@12");
+    master.getDB("admin").auth("admin", "Github@12");
 
     print("shouldn't ever sync");
     for (var i = 0; i < 10; i++) {
@@ -200,7 +200,7 @@ load("jstests/replsets/rslib.js");
     assert.soon(function() {
         for (var i in rs.nodes) {
             rs.nodes[i].setSlaveOk();
-            rs.nodes[i].getDB("admin").auth("foo", "Github@12");
+            rs.nodes[i].getDB("admin").auth("admin", "Github@12");
             config = rs.nodes[i].getDB("local").system.replset.findOne();
             if (config.version != 2) {
                 return false;

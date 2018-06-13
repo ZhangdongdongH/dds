@@ -82,6 +82,7 @@
         _recvChunkStart: {skip: isAnInternalCommand},
         _recvChunkStatus: {skip: isAnInternalCommand},
         _transferMods: {skip: isAnInternalCommand},
+        reload: {skip: isAnInternalCommand},
         addShard: {skip: isUnrelated},
         addShardToZone: {skip: isUnrelated},
         aggregate: {command: {aggregate: "view", pipeline: [{$match: {}}]}},
@@ -140,7 +141,7 @@
             }
         },
         createUser: {
-            command: {createUser: "testuser", pwd: "testpass", roles: []},
+            command: {createUser: "testuser", pwd: "Github@12", roles: []},
             setup: function(conn) {
                 assert.commandWorked(conn.runCommand({dropAllUsersFromDatabase: 1}));
             },

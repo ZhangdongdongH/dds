@@ -39,7 +39,7 @@ load('jstests/multiVersion/libs/auth_helpers.js');
         db.dropUser('username');
         db.dropUser('user1');
         localDB.dropUser('user2');
-        assert(!db.auth("username", "password"), "auth should have failed");
+        assert(!db.auth("username", "Github@13"), "auth should have failed");
         getNewDB();
     }
 
@@ -64,12 +64,12 @@ load('jstests/multiVersion/libs/auth_helpers.js');
             localDB.getSiblingDB('admin').system.version.update(
                 {_id: "authSchema"}, {"currentVersion": 3}, {upsert: true});
 
-            db.createUser({user: 'user1', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'pass'}));
+            db.createUser({user: 'user1', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'Github@12'}));
             db.logout();
 
-            localDB.createUser({user: 'user2', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(localDB.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'pass'}));
+            localDB.createUser({user: 'user2', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+            assert(localDB.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'Github@12'}));
             localDB.logout();
         },
         confirmFunc: function() {
@@ -78,8 +78,8 @@ load('jstests/multiVersion/libs/auth_helpers.js');
             verifyUserDoc(localDB, 'user2', false, true);
 
             // After authSchemaUpgrade MONGODB-CR no longer works.
-            verifyAuth(db, 'user1', 'pass', false, true);
-            verifyAuth(localDB, 'user2', 'pass', false, true);
+            verifyAuth(db, 'user1', 'Github@12', false, true);
+            verifyAuth(localDB, 'user2', 'Github@12', false, true);
         },
         requiresMajority: true,
         runsOnShards: true,
@@ -123,10 +123,10 @@ load('jstests/multiVersion/libs/auth_helpers.js');
     });
 
     commands.push({
-        req: {createUser: 'username', pwd: 'password', roles: jsTest.basicUserRoles},
+        req: {createUser: 'username', pwd: 'Github@13', roles: jsTest.basicUserRoles, "digestPassword" : true},
         setupFunc: function() {},
         confirmFunc: function() {
-            assert(db.auth("username", "password"), "auth failed");
+            assert(db.auth("username", "Github@13"), "auth failed");
         },
         requiresMajority: true,
         runsOnShards: false,
@@ -135,13 +135,13 @@ load('jstests/multiVersion/libs/auth_helpers.js');
     });
 
     commands.push({
-        req: {updateUser: 'username', pwd: 'password2', roles: jsTest.basicUserRoles},
+        req: {updateUser: 'username', pwd: 'Github@14', roles: jsTest.basicUserRoles},
         setupFunc: function() {
-            db.runCommand({createUser: 'username', pwd: 'password', roles: jsTest.basicUserRoles});
+            db.runCommand({createUser: 'username', pwd: 'Github@13', roles: jsTest.basicUserRoles, "digestPassword" : true});
         },
         confirmFunc: function() {
-            assert(!db.auth("username", "password"), "auth should have failed");
-            assert(db.auth("username", "password2"), "auth failed");
+            assert(!db.auth("username", "Github@13"), "auth should have failed");
+            assert(db.auth("username", "Github@14"), "auth failed");
         },
         requiresMajority: true,
         runsOnShards: false,
@@ -151,11 +151,11 @@ load('jstests/multiVersion/libs/auth_helpers.js');
     commands.push({
         req: {dropUser: 'tempUser'},
         setupFunc: function() {
-            db.runCommand({createUser: 'tempUser', pwd: 'password', roles: jsTest.basicUserRoles});
-            assert(db.auth("tempUser", "password"), "auth failed");
+            db.runCommand({createUser: 'tempUser', pwd: 'Github@13', roles: jsTest.basicUserRoles, "digestPassword" : true});
+            assert(db.auth("tempUser", "Github@13"), "auth failed");
         },
         confirmFunc: function() {
-            assert(!db.auth("tempUser", "password"), "auth should have failed");
+            assert(!db.auth("tempUser", "Github@13"), "auth should have failed");
         },
         requiresMajority: true,
         runsOnShards: false,

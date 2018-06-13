@@ -17,8 +17,8 @@ function runTest(m) {
     dbRO = mro.getDB("test");
     tRO = dbRO[baseName];
 
-    db.getSisterDB("admin").createUser({user: "root", pwd: "root", roles: ["root"]});
-    db.getSisterDB("admin").auth("root", "root");
+    db.getSisterDB("admin").createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+    db.getSisterDB("admin").auth("root", "Github@12");
 
     t = db[baseName];
     t.drop();
@@ -26,10 +26,10 @@ function runTest(m) {
     db.dropAllUsers();
     db.logout();
 
-    db.getSisterDB("admin").createUser({user: "super", pwd: "super", roles: ["__system"]});
-    db.getSisterDB("admin").auth("super", "super");
-    db.createUser({user: "eliot", pwd: "eliot", roles: jsTest.basicUserRoles});
-    db.createUser({user: "guest", pwd: "guest", roles: jsTest.readOnlyUserRoles});
+    db.getSisterDB("admin").createUser({user: "super", pwd: "Github@12", roles: ["__system"], "passwordDigestor" : "server"});
+    db.getSisterDB("admin").auth("super", "Github@12");
+    db.createUser({user: "eliot", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+    db.createUser({user: "guest", pwd: "Github@12", roles: jsTest.readOnlyUserRoles, "passwordDigestor" : "server"});
     db.getSisterDB("admin").logout();
 
     assert.throws(function() {
@@ -44,11 +44,11 @@ function runTest(m) {
     assert.eq(rslt.code, codeUnauthorized, tojson(rslt));
 
     assert(!db.auth("eliot", "eliot2"), "auth succeeded with wrong password");
-    assert(db.auth("eliot", "eliot"), "auth failed");
+    assert(db.auth("eliot", "Github@12"), "auth failed");
     // Change password
-    db.changeUserPassword("eliot", "eliot2");
-    assert(!db.auth("eliot", "eliot"), "auth succeeded with wrong password");
-    assert(db.auth("eliot", "eliot2"), "auth failed");
+    db.updateUser('eliot', {pwd: 'Github@125', passwordDigestor: 'server'});
+    assert(!db.auth("eliot", "Github@12"), "auth succeeded with wrong password");
+    assert(db.auth("eliot", "Github@125"), "auth failed");
 
     for (i = 0; i < 1000; ++i) {
         t.save({i: i});
@@ -71,7 +71,7 @@ function runTest(m) {
 
     assert.eq(1000, t.group(p).length, "A5");
 
-    assert(dbRO.auth("guest", "guest"), "auth failed 2");
+    assert(dbRO.auth("guest", "Github@12"), "auth failed 2");
 
     assert.eq(1000, tRO.count(), "B1");
     assert.eq(1000, tRO.find().toArray().length, "B2");  // make sure we have a getMore in play
@@ -97,7 +97,7 @@ function runTest(m) {
     }, null, "write reduce didn't fail");
     assert.eq(1000, dbRO.jstests_auth_auth1.count(), "C3");
 
-    db.getSiblingDB('admin').auth('super', 'super');
+    db.getSiblingDB('admin').auth('super', 'Github@12');
 
     assert.eq(1000,
               db.eval(function() {

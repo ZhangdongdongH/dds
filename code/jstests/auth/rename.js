@@ -7,11 +7,11 @@ var db2 = m.getDB("bar");
 var admin = m.getDB('admin');
 
 // Setup initial data
-admin.createUser({user: 'admin', pwd: 'password', roles: jsTest.adminUserRoles});
-admin.auth('admin', 'password');
+admin.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+admin.auth('admin', 'Github@12');
 
-db1.createUser({user: "foo", pwd: "bar", roles: jsTest.basicUserRoles});
-db2.createUser({user: "bar", pwd: "foo", roles: jsTest.basicUserRoles});
+db1.createUser({user: "foo", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+db2.createUser({user: "bar", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
 
 printjson(db1.a.count());
 db1.a.save({});
@@ -24,7 +24,7 @@ assert.commandFailed(
     admin.runCommand({renameCollection: db1.a.getFullName(), to: db1.b.getFullName()}));
 
 // can run same db with auth
-db1.auth('foo', 'bar');
+db1.auth('foo', 'Github@12');
 assert.commandWorked(
     admin.runCommand({renameCollection: db1.a.getFullName(), to: db1.b.getFullName()}));
 
@@ -33,7 +33,7 @@ assert.commandFailed(
     admin.runCommand({renameCollection: db1.b.getFullName(), to: db2.a.getFullName()}));
 
 // can run diff db with auth
-db2.auth('bar', 'foo');
+db2.auth('bar', 'Github@12');
 assert.commandWorked(
     admin.runCommand({renameCollection: db1.b.getFullName(), to: db2.a.getFullName()}));
 

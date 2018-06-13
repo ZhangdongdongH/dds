@@ -262,6 +262,7 @@ ProgramRunner::ProgramRunner(const BSONObj& args) {
     _argv.push_back(programPath.string());
 
     _port = -1;
+    bool saveFlag = true;
 
     BSONObjIterator j(args);
     j.next();  // skip program name (handled above)
@@ -276,13 +277,25 @@ ProgramRunner::ProgramRunner(const BSONObj& args) {
             verify(e.type() == mongo::String);
             str = e.valuestr();
         }
-        if (str == "--port") {
+        if (str == "--port" || str == "--NotSavePort") {
             _port = -2;
+            if(str == "--NotSavePort") {
+                // NotSavePort is a port which may include in registry, 
+                // but this port and config should not save in _argv.
+                // this option is used when mongod -f yaml
+                saveFlag=false;
+                continue;
+            }
         } else if (_port == -2) {
             _port = strtol(str.c_str(), 0, 10);
+            if(saveFlag == false) {
+                saveFlag=true;
+                continue;
+            }
         } else if (isMongodProgram && str == "--configsvr") {
             _name = "c";
         }
+        
         _argv.push_back(str);
     }
 

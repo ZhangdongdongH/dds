@@ -20,6 +20,7 @@ ToolTest.prototype.startDB = function(coll) {
         nohttpinterface: "",
         noprealloc: "",
         smallfiles: "",
+        adminWhiteListPath: "/tmp/adminWhiteList",
         bind_ip: "127.0.0.1"
     };
 
@@ -96,6 +97,10 @@ ReplTest.prototype.getOptions = function(master, extra, putBinaryFirst, norepl) 
 
     if (!extra.oplogSize)
         extra.oplogSize = "40";
+        
+    if(!extra.adminWhiteListPath) {
+        extra.adminWhiteListPath = "/tmp/adminWhiteList";
+    }
 
     var a = [];
     if (putBinaryFirst)

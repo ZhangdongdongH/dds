@@ -30,6 +30,7 @@
 #include <iosfwd>
 #include <memory>
 #include <string>
+#include <set>
 
 
 #include "mongo/base/disallow_copying.h"
@@ -75,6 +76,29 @@ public:
         return getFullName();
     }
 
+    static bool isBuildinUser(const std::string username) {
+        if(username == "admin@admin" 
+            || username == "monitor@admin" 
+            || username == "backupuser@admin") {
+            
+            return true;
+        }
+        return false;
+    }
+
+    static void getBuildinUsers(std::set<std::string>& buildInUsers) {
+        buildInUsers.insert("admin");
+        buildInUsers.insert("monitor");
+        buildInUsers.insert("backupuser");
+    }
+
+    bool isBuildinUser() const {
+        return isBuildinUser(_fullName);
+    }
+
+    bool isCustomer() const {
+        return !isBuildinUser();
+    }
 private:
     std::string _fullName;  // The full name, stored as a string.  "user@db".
     size_t _splitPoint;     // The index of the "@" separating the user and db name parts.

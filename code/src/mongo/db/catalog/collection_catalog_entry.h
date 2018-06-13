@@ -122,6 +122,12 @@ public:
                                  const BSONObj& validator,
                                  StringData validationLevel,
                                  StringData validationAction) = 0;
+    /**
+     * Update capped collection config, only WiredTiger engine support
+     */
+    virtual void updateCappedSize(OperationContext* txn, long long cappedSize) {}
+    virtual void updateCappedMaxDocs(OperationContext* txn, long long cappedMaxDocs) {}
+
 
 private:
     NamespaceString _ns;

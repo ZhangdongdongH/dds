@@ -55,6 +55,8 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/util/log.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
 
 namespace mongo {
 
@@ -194,6 +196,49 @@ public:
             return appendCommandStatus(result,
                                        {ErrorCodes::InvalidNamespace,
                                         str::stream() << "Invalid collection name: " << nss.ns()});
+        }
+
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+            bool flag = false;
+            BSONObj buildinfilter;
+            if (fullns == "admin.system.users") {
+                std::set<std::string> buildinUsers;
+                UserName::getBuildinUsers(buildinUsers); 
+
+                BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+            if (fullns == "admin.system.roles" ) {
+                std::set<std::string> buildinRoles;
+                RoleName::getBuildinRoles(buildinRoles); 
+                BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+
+            if(flag) {
+                std::string filterName = "filter";
+                BSONElement filterField = cmdObj[filterName];
+                BSONObj newFilter;
+                if (filterField.isABSONObj()) {
+                    BSONObj filter = filterField.embeddedObject();
+                    newFilter = BSON("$and" << BSON_ARRAY(filter << buildinfilter));
+                } else {
+                    newFilter = buildinfilter;
+                }
+
+                BSONObjBuilder nb(64);
+                nb.append(filterName, newFilter);
+                BSONForEach( e, cmdObj ) {
+                    if (!str::equals(filterName.c_str() , e.fieldName())) {
+                        nb.append(e);
+                    }
+                }
+                cmdObj = nb.obj();
+            }
         }
 
         // Although it is a command, a find command gets counted as a query.

@@ -60,6 +60,11 @@ SockAddr MessagingPortMock::localAddr() const {
     return SockAddr{};
 }
 
+HostAndPort MessagingPortMock::local() const {
+    return _local;
+}
+
+
 void MessagingPortMock::setRemote(const HostAndPort& remote) {
     _remote = remote;
 }

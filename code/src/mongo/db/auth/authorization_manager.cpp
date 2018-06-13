@@ -730,4 +730,19 @@ void AuthorizationManager::logOp(
     }
 }
 
+bool AuthorizationManager::isReservedCollectionForCustomer(std::string collectionName) {
+    static std::string reservedCollections = "\
+,local.replset.minvalid\
+,local.startup_log\
+,local.system.replset\
+,local.replset.election\
+,local.me\
+,";
+    
+    if (reservedCollections.find(","+collectionName+",") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
 }  // namespace mongo

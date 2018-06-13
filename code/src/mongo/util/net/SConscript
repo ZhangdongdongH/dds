@@ -28,6 +28,7 @@ env.Library(
         "hostname_canonicalization.cpp",
         "httpclient.cpp",
         "listen.cpp",
+        "whitelist.cpp",
         "message.cpp",
         "message_port.cpp",
         "sock.cpp",
@@ -35,6 +36,8 @@ env.Library(
         "ssl_expiration.cpp",
         "ssl_manager.cpp",
         "ssl_options.cpp",
+        "externalconfig.cpp",
+        "publicip_privateiprange.cpp"
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/server_options_core',

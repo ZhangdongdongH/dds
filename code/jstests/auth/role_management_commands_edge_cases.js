@@ -6,8 +6,8 @@
 function runTest(conn) {
     var db = conn.getDB('test');
     var admin = conn.getDB('admin');
-    admin.createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
-    admin.auth('userAdmin', 'pwd');
+    admin.createUser({user: 'userAdmin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+    admin.auth('userAdmin', 'Github@12');
 
     (function testCreateRole() {
         jsTestLog("Testing createRole");

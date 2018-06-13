@@ -49,7 +49,7 @@ function testProperAuthorization(conn, t, testcase, r) {
 
     var runOnDb = conn.getDB(testcase.runOnDb);
     authCommandsLib.setup(conn, t, runOnDb);
-    assert(r.db.auth("user|" + r.key, "password"));
+    assert(r.db.auth("user|" + r.key, "Github@12"));
     var res = runOnDb.runCommand(t.command);
 
     if (testcase.roles[r.key]) {
@@ -100,13 +100,13 @@ function runOneTest(conn, t) {
 
 function createUsers(conn) {
     var adminDb = conn.getDB(adminDbName);
-    adminDb.createUser({user: "admin", pwd: "password", roles: ["__system"]});
+    adminDb.createUser({user: "admin", pwd: "Github@12", roles: ["__system"], "passwordDigestor" : "server"});
 
-    assert(adminDb.auth("admin", "password"));
+    assert(adminDb.auth("admin", "Github@12"));
     for (var i = 0; i < roles.length; i++) {
         r = roles[i];
         r.db = conn.getDB(r.dbname);
-        r.db.createUser({user: "user|" + r.key, pwd: "password", roles: [r.role]});
+        r.db.createUser({user: "user|" + r.key, pwd: "Github@12", roles: [r.role], "passwordDigestor" : "server"});
     }
     adminDb.logout();
 }

@@ -49,6 +49,7 @@
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 
@@ -113,6 +114,12 @@ void _addWorkingSetMember(OperationContext* txn,
         return;
     }
 
+    if (txn->getClient()->isCustomerConnection()
+        && AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() 
+        && AuthorizationManager::isReservedCollectionForCustomer(collection->ns().toString())) {
+        return;
+    }
+    
     StringData collectionName = collection->ns().coll();
     if (collectionName == "system.namespaces") {
         return;

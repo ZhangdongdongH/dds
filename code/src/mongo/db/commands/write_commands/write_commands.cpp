@@ -49,6 +49,9 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/write_concern.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
 
 namespace mongo {
 
@@ -130,6 +133,55 @@ bool WriteCmd::run(OperationContext* txn,
     if (!request.parseBSON(dbName, cmdObj, &errMsg) || !request.isValid(&errMsg)) {
         return appendCommandStatus(result, Status(ErrorCodes::FailedToParse, errMsg));
     }
+
+    if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn()) {
+        if (request.getNS().ns() == std::string("admin.system.users")) {
+            if (_writeType == BatchedCommandRequest::BatchType_Update) {
+                return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateUser cmd."));
+            }
+            if (_writeType == BatchedCommandRequest::BatchType_Delete) {
+                return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropUser cmd."));
+            }
+            if (_writeType == BatchedCommandRequest::BatchType_Insert) {
+                const std::vector<BSONObj>& docs = request.getInsertRequest()->getDocuments();
+                for (unsigned int i = 0; i < docs.size(); i++) {
+                    std::string userName;
+                    std::string dbName;
+                    Status status1 = bsonExtractStringField(docs[i], "user", &userName);
+                    Status status2 = bsonExtractStringField(docs[i], "db", &dbName);
+                    if (status1.isOK() && status2.isOK() 
+                            && UserName::isBuildinUser(userName+"@"+dbName)) {
+                        return appendCommandStatus(result,
+                                Status(ErrorCodes::Unauthorized, "unauthorized"));
+                    }
+                }
+            }
+        }
+        if (request.getNS().ns() == std::string("admin.system.roles")) {
+            if (_writeType == BatchedCommandRequest::BatchType_Update) {
+                return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateRole cmd."));
+            }
+            if (_writeType == BatchedCommandRequest::BatchType_Delete) {
+                return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropRole cmd."));
+            }
+            if (_writeType == BatchedCommandRequest::BatchType_Insert) {
+                const std::vector<BSONObj>& docs = request.getInsertRequest()->getDocuments();
+                for (unsigned int i = 0; i < docs.size(); i++) {
+                    std::string roleName;
+                    std::string dbName;
+                    Status status1 = bsonExtractStringField(docs[i], "role", &roleName);
+                    Status status2 = bsonExtractStringField(docs[i], "db", &dbName);
+                    if (status1.isOK() && status2.isOK() 
+                            && RoleName::isBuildinRoles(roleName+"@"+dbName)) {
+                        return appendCommandStatus(result,
+                                Status(ErrorCodes::Unauthorized, "unauthorized"));
+                    }
+                }
+            }
+        }
+    }
+
+
 
     StatusWith<WriteConcernOptions> wcStatus = extractWriteConcern(txn, cmdObj, dbName);
 

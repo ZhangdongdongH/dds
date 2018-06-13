@@ -74,6 +74,8 @@
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 
@@ -848,8 +850,11 @@ bool CatalogManagerReplicaSet::runUserManagementWriteCommand(OperationContext* t
         cmdToRun = modifiedCmd.obj();
     }
 
+
     auto response = grid.shardRegistry()->runCommandOnConfigWithRetries(
-        txn, dbname, cmdToRun, ShardRegistry::kNotMasterErrors);
+        txn, dbname, cmdToRun, 
+        AuthorizationSession::get(txn->getClient())->isAuthWithCustomer(),
+        ShardRegistry::kNotMasterErrors);
 
     if (!response.isOK()) {
         return Command::appendCommandStatus(*result, response.getStatus());

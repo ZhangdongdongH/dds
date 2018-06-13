@@ -77,6 +77,10 @@ protected:
     std::string parseNsCollectionRequired(const std::string& dbname, const BSONObj& cmdObj) const;
 
 public:
+    std::string getfullns(const std::string& dbname, const BSONObj& cmdObj) const;
+
+
+public:
     typedef StringMap<Command*> CommandMap;
 
     // NOTE: Do not remove this declaration, or relocate it in this class. We
@@ -473,6 +477,9 @@ private:
         // The default implementation of addRequiredPrivileges should never be hit.
         fassertFailed(16940);
     }
+
+public:
+	static bool _checkIfDisableCommands(const std::string& cmdname);
 };
 
 void runCommands(OperationContext* txn,

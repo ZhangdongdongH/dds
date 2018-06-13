@@ -5,8 +5,8 @@ var conn = MongoRunner.runMongod({auth: ''});
 
 var testIterationCountControl = function() {
     var adminDB = conn.getDB('admin');
-    adminDB.createUser({user: 'user1', pwd: 'pass', roles: jsTest.adminUserRoles});
-    assert(adminDB.auth({user: 'user1', pwd: 'pass'}));
+    adminDB.createUser({user: 'user1', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    assert(adminDB.auth({user: 'user1', pwd: 'Github@12'}));
 
     var userDoc = getUserDoc(adminDB, 'user1');
     assert.eq(10000, userDoc.credentials['SCRAM-SHA-1'].iterationCount);
@@ -17,7 +17,7 @@ var testIterationCountControl = function() {
     assert.eq(10000, userDoc.credentials['SCRAM-SHA-1'].iterationCount);
 
     // But it should take effect when the user's password is changed.
-    adminDB.updateUser('user1', {pwd: 'pass', roles: jsTest.adminUserRoles});
+    adminDB.updateUser('user1', {pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     userDoc = getUserDoc(adminDB, 'user1');
     assert.eq(5000, userDoc.credentials['SCRAM-SHA-1'].iterationCount);
 

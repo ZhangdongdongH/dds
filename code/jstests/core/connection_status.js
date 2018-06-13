@@ -78,8 +78,10 @@
             role: "root",
             db: "admin"
         };
-        myDB.createUser({user: userName, pwd: "weak password", roles: [role]});
-        myDB.auth(userName, "weak password");
+        // myDB.createUser({user: userName, pwd: "weak password", roles: [role]}, "passwordDigestor" : "server");
+        // myDB.auth(userName, "weak password");
+        myDB.createUser({user: userName, pwd: "Github@12", roles: [role], "passwordDigestor" : "server"});
+        myDB.auth(userName, "Github@12");
 
         // Validate with and without showPrivileges
         validateConnectionStatus(user, role, true);

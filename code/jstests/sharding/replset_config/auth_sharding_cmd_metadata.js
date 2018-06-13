@@ -9,19 +9,19 @@
 
     var adminUser = {
         db: "admin",
-        username: "foo",
-        password: "bar"
+        username: "admin",
+        password: "Github@12"
     };
 
-    st.s.getDB(adminUser.db).createUser({user: 'foo', pwd: 'bar', roles: jsTest.adminUserRoles});
+    st.s.getDB(adminUser.db).createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
 
-    st.s.getDB('admin').auth('foo', 'bar');
+    st.s.getDB('admin').auth('admin', 'Github@12');
 
     st.adminCommand({enableSharding: 'test'});
     st.adminCommand({shardCollection: 'test.user', key: {x: 1}});
 
-    st.d0.getDB('admin').createUser({user: 'user', pwd: 'pwd', roles: jsTest.adminUserRoles});
-    st.d0.getDB('admin').auth('user', 'pwd');
+    st.d0.getDB('admin').createUser({user: 'omuser', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    st.d0.getDB('admin').auth('omuser', 'Github@12');
 
     var maxSecs = Math.pow(2, 32) - 1;
     var metadata = {
@@ -36,8 +36,8 @@
     assert.neq(null, status.sharding);
     assert.lt(status.sharding.lastSeenConfigServerOpTime.t, maxSecs);
 
-    st.d0.getDB('admin').createUser({user: 'internal', pwd: 'pwd', roles: ['__system']});
-    st.d0.getDB('admin').auth('internal', 'pwd');
+    st.d0.getDB('admin').createUser({user: 'internal', pwd: 'Github@12', roles: ['__system'], "passwordDigestor" : "server"});
+    st.d0.getDB('admin').auth('internal', 'Github@12');
 
     res = st.d0.getDB('test').runCommandWithMetadata("ping", {ping: 1}, metadata);
     assert.commandWorked(res.commandReply);

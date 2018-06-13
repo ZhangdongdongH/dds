@@ -182,6 +182,10 @@ public:
     std::string jsonString(JsonStringFormat format,
                            bool includeFieldNames = true,
                            int pretty = 0) const;
+    void jsonString(std::stringstream& s,
+                    JsonStringFormat format,
+                    bool includeFieldNames = true,
+                    int pretty = 0) const;
     operator std::string() const {
         return toString();
     }
@@ -819,4 +823,5 @@ inline BSONElement::BSONElement() {
 
 // TODO(SERVER-14596): move to a better place; take a StringData.
 std::string escape(const std::string& s, bool escape_slash = false);
+void escape(std::stringstream &os, const char* s, size_t len, bool escape_slash = false);
 }

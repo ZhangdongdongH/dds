@@ -8,8 +8,8 @@ var profileName = "system.profile";
 var dumpDir = MongoRunner.dataPath + "jstests_tool_dumprestore_dump_system_profile/";
 db = m.getDB(dbName);
 
-db.createUser({user: "testuser", pwd: "testuser", roles: jsTest.adminUserRoles});
-assert(db.auth("testuser", "testuser"), "auth failed");
+db.createUser({user: "testuser", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+assert(db.auth("testuser", "Github@12"), "auth failed");
 
 t = db[colName];
 t.drop();
@@ -27,7 +27,7 @@ assert.gt(profile.count(), 0, "admin.system.profile should have documents");
 assert.eq(t.count(), 100, "testcol should have documents");
 
 // Create a user with backup permissions
-db.createUser({user: "backup", pwd: "password", roles: ["backup"]});
+db.createUser({user: "backup", pwd: "Github@12", roles: ["backup"], "passwordDigestor" : "server"});
 
 // Backup the database with the backup user
 var exitCode = MongoRunner.runMongoTool("mongodump",
@@ -36,7 +36,7 @@ var exitCode = MongoRunner.runMongoTool("mongodump",
                                           out: dumpDir,
                                           authenticationDatabase: "admin",
                                           username: "backup",
-                                          password: "password",
+                                          password: "Github@12",
                                           host: "127.0.0.1:" + m.port,
                                         });
 assert.eq(exitCode, 0, "mongodump should succeed with authentication");

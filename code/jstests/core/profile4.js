@@ -21,8 +21,8 @@ var coll = db.profile4;
 coll.drop();
 
 var username = "jstests_profile4_user";
-db.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
-db.auth(username, "password");
+db.createUser({user: username, pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+db.auth(username, "Github@12");
 
 try {
     var lastOp;

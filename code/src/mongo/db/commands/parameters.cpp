@@ -46,6 +46,8 @@
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/net/ssl_options.h"
+#include "mongo/util/net/listen.h"
+
 
 using std::string;
 using std::stringstream;
@@ -580,6 +582,94 @@ public:
         return Status::OK();
     }
 } clusterAuthModeSetting;
+
+
+
+class MaxIncomingConnectionsSetting : public ServerParameter {
+public:
+    MaxIncomingConnectionsSetting() : ServerParameter(ServerParameterSet::getGlobal(), "maxIncomingConnections") {}
+
+    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
+        b << name << Listener::globalTicketHolder.outof();
+    }
+
+    virtual Status set(const BSONElement& newValueElement) {
+        int newValue = 0;
+        if (!newValueElement.coerce(&newValue) || newValue < 0)
+            return Status(ErrorCodes::BadValue,
+                          mongoutils::str::stream()
+                              << "Invalid value for maxIncomingConnections: " << newValueElement);
+		
+
+        Status status = Listener::globalTicketHolder.resize(newValue);
+        if (!status.isOK())
+            return status;
+        status = Listener::checkTicketNumbers();
+        if (!status.isOK())
+            return status;
+        return Status::OK();
+    }
+
+    virtual Status setFromString(const std::string& str) {
+        int newValue = 0;
+        Status status = parseNumberFromString(str, &newValue);
+        if (!status.isOK())
+            return status;
+        if (newValue < 0)
+            return Status(ErrorCodes::BadValue,
+                          mongoutils::str::stream() << "Invalid value for maxIncomingConnections: " << newValue);
+        status = Listener::globalTicketHolder.resize(newValue);
+        if (!status.isOK())
+            return status;
+        status = Listener::checkTicketNumbers();
+        if (!status.isOK())
+            return status;
+        return Status::OK();
+    }
+} maxIncomingConnectionsSetting;
+
+class MaxInternalIncomingConnectionsSetting : public ServerParameter {
+public:
+    MaxInternalIncomingConnectionsSetting() : ServerParameter(ServerParameterSet::getGlobal(), "maxInternalIncomingConnections") {}
+
+    virtual void append(OperationContext* txn, BSONObjBuilder& b, const std::string& name) {
+        b << name << Listener::internalTicketHolder.outof();
+    }
+
+    virtual Status set(const BSONElement& newValueElement) {
+        int newValue = 0;
+        if (!newValueElement.coerce(&newValue) || newValue < 0)
+            return Status(ErrorCodes::BadValue,
+                          mongoutils::str::stream()
+                              << "Invalid value for maxInternalIncomingConnections: " << newValueElement);
+        Status status = Listener::internalTicketHolder.resize(newValue);
+        if (!status.isOK())
+            return status;
+        status = Listener::checkInternalTicketNumbers();
+        if (!status.isOK())
+            return status;
+        return Status::OK();
+    }
+
+    virtual Status setFromString(const std::string& str) {
+        int newValue = 0;
+        Status status = parseNumberFromString(str, &newValue);
+        if (!status.isOK())
+            return status;
+        if (newValue < 0)
+            return Status(ErrorCodes::BadValue,
+                          mongoutils::str::stream() << "Invalid value for maxInternalIncomingConnections: " << newValue);
+        status = Listener::internalTicketHolder.resize(newValue);
+        if (!status.isOK())
+            return status;
+        status = Listener::checkInternalTicketNumbers();
+        if (!status.isOK())
+            return status;
+        return Status::OK();
+    }
+} maxInternalIncomingConnections;
+
+
 
 ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> QuietSetting(
     ServerParameterSet::getGlobal(), "quiet", &serverGlobalParams.quiet);

@@ -84,6 +84,7 @@ public:
     virtual HostAndPort remote() const;
     virtual SockAddr remoteAddr() const;
     virtual SockAddr localAddr() const;
+    virtual HostAndPort local() const;
 
     std::shared_ptr<Socket> psock;
 
@@ -117,9 +118,34 @@ public:
         return psock->getSockCreationMicroSec();
     }
 
+    virtual void setInAdminWhiteList() {
+        _inAdminWhiteList = true;
+    }
+
+    virtual void setPublicIp() {
+        _fromPublicIp = true;
+    }
+
+    virtual bool inAdminWhiteList() {
+        return _inAdminWhiteList;
+    }
+    
+    virtual bool isCustomerConnection() const {
+        return (!_inAdminWhiteList);
+    }
+
+    virtual bool isFromPublicIp() {
+        return _fromPublicIp;
+    }
+
 private:
     // this is the parsed version of remote
     HostAndPort _remoteParsed;
+    HostAndPort _localParsed;
+
+    bool _inAdminWhiteList;
+    bool _inUserWhiteList;
+    bool _fromPublicIp;
 
 public:
     static void closeAllSockets(unsigned tagMask = 0xffffffff);

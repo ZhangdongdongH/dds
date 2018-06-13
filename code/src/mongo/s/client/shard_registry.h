@@ -305,6 +305,18 @@ public:
                                                       const std::string& dbname,
                                                       const BSONObj& cmdObj,
                                                       const ErrorCodesSet& errorsToCheck);
+    
+    
+    /**
+     * This is function main function like above, only add a isCustomerCmd paramer, 
+     * when isCustomerCmd is true, the metadata which send to remote mongod will contain 
+     * this customer info.
+     */
+    StatusWith<BSONObj> runCommandOnConfigWithRetries(OperationContext* txn,
+                                                      const std::string& dbname,
+                                                      const BSONObj& cmdObj,
+                                                      bool isCustomerCmd,
+                                                      const ErrorCodesSet& errorsToCheck);
 
     /**
      * Notifies the specified RemoteCommandTargeter of a particular mode of failure for the

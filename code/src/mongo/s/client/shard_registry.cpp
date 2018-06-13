@@ -82,6 +82,7 @@ const char kCmdResponseWriteConcernField[] = "writeConcernError";
 const Seconds kConfigCommandTimeout{30};
 const int kOnErrorNumRetries = 3;
 const BSONObj kReplMetadata(BSON(rpc::kReplSetMetadataFieldName << 1));
+const BSONObj kCustomerReplMetadata(BSON(rpc::kReplSetMetadataFieldName << 1 << "customerCmd" << 1));
 const BSONObj kSecondaryOkMetadata{rpc::ServerSelectionMetadata(true, boost::none).toBSON()};
 
 const BSONObj kReplSecondaryOkMetadata{[] {
@@ -597,7 +598,7 @@ StatusWith<ShardRegistry::QueryResponse> ShardRegistry::_exhaustiveFindOnConfig(
 
     findCmdBuilder.append(LiteParsedQuery::cmdOptionMaxTimeMS,
                           durationCount<Milliseconds>(maxTime));
-
+    
     QueryFetcher fetcher(_executorPool->getFixedExecutor(),
                          host.getValue(),
                          nss,
@@ -739,6 +740,28 @@ StatusWith<BSONObj> ShardRegistry::runCommandOnConfigWithRetries(
                                            dbname,
                                            cmdObj,
                                            kReplMetadata,
+                                           errorsToCheck);
+    if (!response.isOK()) {
+        return response.getStatus();
+    }
+
+    return response.getValue().response;
+}
+
+StatusWith<BSONObj> ShardRegistry::runCommandOnConfigWithRetries(
+    OperationContext* txn,
+    const std::string& dbname,
+    const BSONObj& cmdObj,
+    bool isFromCustomer,
+    const ShardRegistry::ErrorCodesSet& errorsToCheck) {
+
+    auto response = _runCommandWithRetries(txn,
+                                           _executorPool->getFixedExecutor(),
+                                           getConfigShard(),
+                                           ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+                                           dbname,
+                                           cmdObj,
+                                           isFromCustomer?kCustomerReplMetadata:kReplMetadata,
                                            errorsToCheck);
     if (!response.isOK()) {
         return response.getStatus();

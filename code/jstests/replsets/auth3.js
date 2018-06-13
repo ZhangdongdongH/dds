@@ -18,18 +18,18 @@
 
     master = rs.getPrimary();
     jsTest.log("adding user");
-    master.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles},
+    master.getDB("admin").createUser({user: "foo", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
                                      {w: 2, wtimeout: 30000});
 
     var safeInsert = function() {
         master = rs.getPrimary();
-        master.getDB("admin").auth("foo", "bar");
+        master.getDB("admin").auth("foo", "Github@12");
         assert.writeOK(master.getDB("foo").bar.insert({x: 1}));
     };
 
     jsTest.log("authing");
     for (var i = 0; i < 2; i++) {
-        assert(rs.nodes[i].getDB("admin").auth("foo", "bar"),
+        assert(rs.nodes[i].getDB("admin").auth("foo", "Github@12"),
                "could not log into " + rs.nodes[i].host);
     }
 
@@ -46,7 +46,7 @@
     rs.stop(1);
 
     master = rs.getPrimary();
-    master.getDB("admin").auth("foo", "bar");
+    master.getDB("admin").auth("foo", "Github@12");
     master.getDB("foo").bar.drop();
     jsTest.log("last op: " +
                tojson(master.getDB("local").oplog.rs.find().sort({$natural: -1}).limit(1).next()));

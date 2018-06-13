@@ -13,25 +13,25 @@
  */
 var AUTH_INFO = {
     admin: {
-        root: {pwd: 'root', roles: ['root']},
-        cluster: {pwd: 'cluster', roles: ['clusterAdmin']},
-        anone: {pwd: 'none', roles: []},
-        aro: {pwd: 'ro', roles: ['read']},
-        arw: {pwd: 'rw', roles: ['readWrite']},
-        aadmin: {pwd: 'admin', roles: ['dbAdmin']},
-        auadmin: {pwd: 'uadmin', roles: ['userAdmin']},
-        any_ro: {pwd: 'ro', roles: ['readAnyDatabase']},
-        any_rw: {pwd: 'rw', roles: ['readWriteAnyDatabase']},
-        any_admin: {pwd: 'admin', roles: ['dbAdminAnyDatabase']},
-        any_uadmin: {pwd: 'uadmin', roles: ['userAdminAnyDatabase']}
+        root: {pwd: 'Github@12Root', roles: ['root']},
+        cluster: {pwd: 'Github@12cluster', roles: ['clusterAdmin']},
+        anone: {pwd: 'Github@12none', roles: []},
+        aro: {pwd: 'Github@12ro', roles: ['read']},
+        arw: {pwd: 'Github@12rw', roles: ['readWrite']},
+        aadmin: {pwd: 'Github@12admin', roles: ['dbAdmin']},
+        auadmin: {pwd: 'Github@12uadmin', roles: ['userAdmin']},
+        any_ro: {pwd: 'Github@12ro', roles: ['readAnyDatabase']},
+        any_rw: {pwd: 'Github@12rw', roles: ['readWriteAnyDatabase']},
+        any_admin: {pwd: 'Github@12admin', roles: ['dbAdminAnyDatabase']},
+        any_uadmin: {pwd: 'Github@12uadmin', roles: ['userAdminAnyDatabase']}
     },
     test: {
-        none: {pwd: 'none', roles: []},
-        ro: {pwd: 'ro', roles: ['read']},
-        rw: {pwd: 'rw', roles: ['readWrite']},
-        roadmin: {pwd: 'roadmin', roles: ['read', 'dbAdmin']},
-        admin: {pwd: 'admin', roles: ['dbAdmin']},
-        uadmin: {pwd: 'uadmin', roles: ['userAdmin']}
+        none: {pwd: 'Github@12none', roles: []},
+        ro: {pwd: 'Github@12ro', roles: ['read']},
+        rw: {pwd: 'Github@12rw', roles: ['readWrite']},
+        roadmin: {pwd: 'Github@12roadmin', roles: ['read', 'dbAdmin']},
+        admin: {pwd: 'Github@12admin', roles: ['dbAdmin']},
+        uadmin: {pwd: 'Github@12uadmin', roles: ['userAdmin']}
     }
 };
 
@@ -183,7 +183,7 @@ var testOps = function(db, allowedActions) {
 
     checkErr(allowedActions.hasOwnProperty('user_w'),
              function() {
-                 db.createUser({user: 'a', pwd: 'a', roles: jsTest.basicUserRoles});
+                 db.createUser({user: 'a', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
                  assert(db.dropUser('a'));
              });
 
@@ -469,7 +469,7 @@ var runTests = function(conn) {
         var adminDB = conn.getDB('admin');
 
         adminDB.createUser(
-            {user: 'root', pwd: AUTH_INFO.admin.root.pwd, roles: AUTH_INFO.admin.root.roles});
+            {user: 'root', pwd: AUTH_INFO.admin.root.pwd, roles: AUTH_INFO.admin.root.roles, "passwordDigestor" : "server"});
         adminDB.auth('root', AUTH_INFO.admin.root.pwd);
 
         for (var x = 0; x < 10; x++) {
@@ -487,7 +487,7 @@ var runTests = function(conn) {
                 }
 
                 var info = dbObj[userName];
-                conn.getDB(dbName).createUser({user: userName, pwd: info.pwd, roles: info.roles});
+                conn.getDB(dbName).createUser({user: userName, pwd: info.pwd, roles: info.roles, "passwordDigestor" : "server"});
             }
         }
 

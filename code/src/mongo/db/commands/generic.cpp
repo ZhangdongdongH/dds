@@ -62,6 +62,7 @@
 #include "mongo/util/processinfo.h"
 #include "mongo/util/ramlog.h"
 #include "mongo/util/version.h"
+#include "mongo/db/auth/authorization_session.h"
 
 namespace mongo {
 
@@ -274,12 +275,26 @@ public:
                      int,
                      string& errmsg,
                      BSONObjBuilder& result) {
+                     
         // sort the commands before building the result BSON
         std::vector<Command*> commands;
+
+        bool customer = false;
+        if (txn->getClient()->isCustomerConnection()
+                && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+            ) {
+            customer = true;
+        }
+        
         for (CommandMap::const_iterator it = _commands->begin(); it != _commands->end(); ++it) {
             // don't show oldnames
-            if (it->first == it->second->name)
+            if (it->first == it->second->name) {
+                // don't show disable commands
+                if(customer && Command::_checkIfDisableCommands(it->first)) {
+                    continue;
+                }
                 commands.push_back(it->second);
+            }
         }
         std::sort(commands.begin(),
                   commands.end(),

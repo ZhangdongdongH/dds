@@ -48,10 +48,10 @@ var nodeCount = replTest.nodes.length;
  * is no admin user.
  */
 var adminDB = mongos.getDB('admin');
-adminDB.createUser({user: 'user', pwd: 'password', roles: jsTest.adminUserRoles});
-adminDB.auth('user', 'password');
+adminDB.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+adminDB.auth('admin', 'Github@12');
 var priAdminDB = replTest.getPrimary().getDB('admin');
-priAdminDB.createUser({user: 'user', pwd: 'password', roles: jsTest.adminUserRoles},
+priAdminDB.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
                       {w: 3, wtimeout: 30000});
 
 coll.drop();
@@ -78,7 +78,7 @@ jsTest.log('First query to SEC');
 assert(doesRouteToSec(coll, {v: vToFind++}));
 
 var SIG_TERM = 15;
-replTest.stopSet(SIG_TERM, true, {auth: {user: 'user', pwd: 'password'}});
+replTest.stopSet(SIG_TERM, true, {auth: {user: 'admin', pwd: 'Github@12'}});
 
 for (var n = 0; n < nodeCount; n++) {
     replTest.restart(n, rsOpts);
@@ -105,7 +105,7 @@ assert(doesRouteToSec(coll, {v: vToFind++}));
 
 // Cleanup auth so Windows will be able to shutdown gracefully
 priAdminDB = replTest.getPrimary().getDB('admin');
-priAdminDB.auth('user', 'password');
-priAdminDB.dropUser('user');
+priAdminDB.auth('admin', 'Github@12');
+priAdminDB.dropUser('admin');
 
 st.stop();

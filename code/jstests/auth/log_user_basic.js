@@ -71,14 +71,14 @@ if (0) {
         };
 
         var conn1Auth =
-            [{user: 'foo', pwd: 'bar', db: 'test'}, {user: 'chun', pwd: 'li', db: 'sf'}];
+            [{user: 'foo', pwd: 'Github@12bar', db: 'test'}, {user: 'chun', pwd: 'li', db: 'sf'}];
 
         var conn2Auth =
-            [{user: 'root', pwd: 'ugat', db: 'admin'}, {user: 'elbow', pwd: 'freeze', db: 'bboy'}];
+            [{user: 'root', pwd: 'Github@12ugat', db: 'admin'}, {user: 'elbow', pwd: 'freeze', db: 'bboy'}];
 
         var loginUser = function(connInfo, connAuth) {
             var db = connInfo.mongo.getDB(connAuth.db);
-            db.createUser({user: connAuth.user, pwd: connAuth.pwd, roles: jsTest.adminUserRoles});
+            db.createUser({user: connAuth.user, pwd: connAuth.pwd, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
             db.auth(connAuth.user, connAuth.pwd);
             connInfo.users[connAuth.db] = connAuth.user;
         };

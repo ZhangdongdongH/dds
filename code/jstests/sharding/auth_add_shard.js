@@ -14,7 +14,7 @@
     var adminUser = {
         db: "admin",
         username: "foo",
-        password: "bar"
+        password: "Github@12"
     };
 
     // set up a 2 shard cluster with keyfile
@@ -30,7 +30,7 @@
     print("adding user");
     mongos.getDB(adminUser.db)
         .createUser(
-            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles});
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
 
     // login as admin user
     login(adminUser);

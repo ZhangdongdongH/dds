@@ -9,6 +9,7 @@
  *     name {string}: name for this test
  *     verbose {number}: the verbosity for the mongos
  *     keyFile {string}: the location of the keyFile
+ *     adminWhiteListPath {string}: the location of the adminWhiteListPath
  *     chunksize {number}:
  *     nopreallocj {boolean|number}:
  *
@@ -1019,6 +1020,7 @@ var ShardingTest = function(params) {
     otherParams.bridgeOptions = otherParams.bridgeOptions || {};
 
     var keyFile = otherParams.keyFile || otherParams.extraOptions.keyFile;
+    var adminWhiteListPath = otherParams.adminWhiteListPath || otherParams.extraOptions.adminWhiteListPath;
     var hostName = getHostName();
 
     this._testName = testName;
@@ -1078,6 +1080,7 @@ var ShardingTest = function(params) {
                 useBridge: otherParams.useBridge,
                 bridgeOptions: otherParams.bridgeOptions,
                 keyFile: keyFile,
+                adminWhiteListPath: adminWhiteListPath,
                 protocolVersion: protocolVersion,
                 shardSvr: true,
                 settings: rsSettings
@@ -1107,6 +1110,7 @@ var ShardingTest = function(params) {
                 noJournalPrealloc: otherParams.nopreallocj,
                 pathOpts: Object.merge(pathOpts, {shard: i}),
                 dbpath: "$testName$shard",
+                adminWhiteListPath: adminWhiteListPath,
                 keyFile: keyFile
             };
 
@@ -1207,6 +1211,7 @@ var ShardingTest = function(params) {
                 pathOpts: Object.merge(pathOpts, {config: i}),
                 dbpath: "$testName-config$config",
                 keyFile: keyFile,
+                adminWhiteListPath: adminWhiteListPath,
                 // Ensure that journaling is always enabled for config servers.
                 journal: "",
                 configsvr: ""
@@ -1265,6 +1270,7 @@ var ShardingTest = function(params) {
             useBridge: otherParams.useBridge,
             bridgeOptions: otherParams.bridgeOptions,
             keyFile: keyFile,
+            adminWhiteListPath: adminWhiteListPath,
             name: testName + "-configRS",
         };
 
@@ -1339,6 +1345,7 @@ var ShardingTest = function(params) {
             configdb: this._configDB,
             verbose: verboseLevel || 0,
             keyFile: keyFile,
+            adminWhiteListPath: adminWhiteListPath,
         };
 
         if (!otherParams.noChunkSize) {

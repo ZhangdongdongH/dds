@@ -10,9 +10,9 @@ assert.throws(function() {
 });
 
 // Should succeed due to localhost exception.
-conn1.getDB("admin").createUser({user: "root", pwd: "pass", roles: ["root"]});
+conn1.getDB("admin").createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
 
-conn1.getDB("admin").auth("root", "pass");
+conn1.getDB("admin").auth("root", "Github@12");
 conn1.getDB("test").foo.insert({a: 1});
 
 conn1.getDB("admin").dropAllUsers();
@@ -24,7 +24,7 @@ assert.throws(function() {
 
 // Should fail since localhost exception is disabled
 assert.throws(function() {
-    conn2.getDB("admin").createUser({user: "root", pwd: "pass", roles: ["root"]});
+    conn2.getDB("admin").createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
 });
 
 print("SUCCESS Completed disable_localhost_bypass.js");

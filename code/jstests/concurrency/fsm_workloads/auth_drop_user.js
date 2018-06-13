@@ -26,7 +26,7 @@ var $config = (function() {
 
         function createAndDropUser(db, collName) {
             var username = uniqueUsername(this.prefix, this.tid, this.num++);
-            db.createUser({user: username, pwd: 'password', roles: ['readWrite', 'dbAdmin']});
+            db.createUser({user: username, pwd: 'Github@12', roles: ['readWrite', 'dbAdmin'], "passwordDigestor" : "server"});
 
             var res = db.getUser(username);
             assertAlways(res !== null, "user '" + username + "' should exist");

@@ -31,6 +31,9 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/util/net/listen.h"  // For DEFAULT_MAX_CONN
+#include "mongo/util/net/whitelist.h"
+#include "mongo/util/net/externalconfig.h"
+
 
 namespace mongo {
 
@@ -49,17 +52,23 @@ struct ServerGlobalParams {
           objcheck(true),
           defaultProfile(0),
           slowMS(100),
+          profileSizeMB(1),
           defaultLocalThresholdMillis(15),
           moveParanoia(false),
           noUnixSocket(false),
           doFork(0),
           socket("/tmp"),
           maxConns(DEFAULT_MAX_CONN),
+          maxInternalConns(DEFAULT_MAX_CONN_INTERNAL),
           unixSocketPermissions(DEFAULT_UNIX_PERMS),
           logAppend(false),
           logRenameOnRotate(true),
           logWithSyslog(false),
-          isHttpInterfaceEnabled(false) {
+          isHttpInterfaceEnabled(false),
+          limitVerifyTimes(true),
+          auditLogFormat("JSON"),
+          auditOpFilter(0xFFFFFFFF),
+          auditAuthSuccess(true){
         started = time(0);
     }
 
@@ -89,6 +98,7 @@ struct ServerGlobalParams {
 
     int defaultProfile;               // --profile
     int slowMS;                       // --time in ms that is "slow"
+    int profileSizeMB;                // --the maxsize of system.profile collection 
     int defaultLocalThresholdMillis;  // --localThreshold in ms to consider a node local
     bool moveParanoia;                // for move chunk paranoia
 
@@ -97,6 +107,7 @@ struct ServerGlobalParams {
     std::string socket;  // UNIX domain socket directory
 
     int maxConns;  // Maximum number of simultaneous open connections.
+    int maxInternalConns;  //Maximum number of simultaneous open internal connections.
 
     int unixSocketPermissions;  // permissions for the UNIX domain socket
 
@@ -110,6 +121,13 @@ struct ServerGlobalParams {
     int syslogFacility;      // Facility used when appending messages to the syslog.
 
     bool isHttpInterfaceEnabled;  // True if the dbwebserver should be enabled.
+    bool limitVerifyTimes;
+
+    std::string auditLogpath;// Path to audit log file, if logging to a file; otherwise, empty.
+    std::string auditLogFormat;// Format of audit log
+    std::string auditOpFilterStr; // Filter ops that need to be audited, string format.
+    int  auditOpFilter;      // Bitwise or result of ops that need to be audited, parsed from auditOpFilterStr.
+    bool auditAuthSuccess;   // True if audit authorization success requests.
 
 #ifndef _WIN32
     ProcessId parentProc;  // --fork pid of initial process
@@ -157,6 +175,13 @@ struct ServerGlobalParams {
         */
         ClusterAuthMode_x509
     };
+    /**
+        * host  in adminWhiteList manage and monitor mongodb instances
+        * It's not limited by 'maxIncomingConnections'
+        */
+    WhiteList adminWhiteList;
+
+    ExternalConfig externalConfig;
 };
 
 extern ServerGlobalParams serverGlobalParams;

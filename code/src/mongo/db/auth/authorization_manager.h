@@ -324,6 +324,8 @@ public:
                const BSONObj& obj,
                BSONObj* patt);
 
+    static bool isReservedCollectionForCustomer(std::string collectionName);
+
 private:
     /**
      * Type used to guard accesses and updates to the user cache.

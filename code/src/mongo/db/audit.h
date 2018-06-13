@@ -36,6 +36,8 @@
 #include "mongo/base/error_codes.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/user.h"
+#include "mongo/db/concurrency/lock_stats.h"
+
 
 namespace mongo {
 
@@ -47,6 +49,8 @@ class NamespaceString;
 class ReplSetConfig;
 class StringData;
 class UserName;
+class CurOp;
+
 
 namespace audit {
 
@@ -299,6 +303,14 @@ void logRemoveShard(ClientBasic* client, StringData shardname);
 void logShardCollection(ClientBasic* client, StringData ns, const BSONObj& keyPattern, bool unique);
 
 
+/**
+ * Logs the slow operation
+ */
+
+void logSlowOp(ClientBasic* client,CurOp& curop,const SingleThreadedLockStats& lockStats);
+
+
+
 /*
  * Appends an array of user/db pairs and an array of role/db pairs
  * to the provided metadata builder. The users and roles are extracted from the current client.
@@ -341,4 +353,7 @@ void parseAndRemoveImpersonatedRolesField(BSONObj cmdObj,
                                           bool* fieldIsPresent);
 
 }  // namespace audit
+
+void startAuditLogFlusher();
+
 }  // namespace mongo

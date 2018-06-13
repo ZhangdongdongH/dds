@@ -13,14 +13,14 @@ var setupConn = rsTest.getPrimary();
 var admin = setupConn.getDB('admin');
 
 // Setup initial data
-admin.createUser({user: 'admin', pwd: 'password', roles: jsTest.adminUserRoles});
-admin.auth('admin', 'password');
+admin.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+admin.auth('admin', 'Github@12');
 
 setupConn.getDB('foo')
-    .createUser({user: 'foo', pwd: 'foopwd', roles: jsTest.basicUserRoles}, {w: NUM_NODES});
+    .createUser({user: 'foo', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"}, {w: NUM_NODES});
 setupConn.getDB('foo').logout();
 setupConn.getDB('bar')
-    .createUser({user: 'bar', pwd: 'barpwd', roles: jsTest.basicUserRoles}, {w: NUM_NODES});
+    .createUser({user: 'bar', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"}, {w: NUM_NODES});
 setupConn.getDB('bar').logout();
 
 var replConn0 = new Mongo(rsTest.getURL());
@@ -30,8 +30,8 @@ var barDB0 = replConn0.getDB('bar');
 var fooDB1 = replConn1.getDB('foo');
 var barDB1 = replConn1.getDB('bar');
 
-fooDB0.auth('foo', 'foopwd');
-barDB1.auth('bar', 'barpwd');
+fooDB0.auth('foo', 'Github@12');
+barDB1.auth('bar', 'Github@12');
 
 assert.writeOK(fooDB0.user.insert({x: 1}, {writeConcern: {w: NUM_NODES}}));
 assert.writeError(barDB0.user.insert({x: 1}, {writeConcern: {w: NUM_NODES}}));

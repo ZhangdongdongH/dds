@@ -40,6 +40,7 @@
 #include <iostream>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/algorithm/string.hpp>
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
@@ -112,11 +113,14 @@ CODE facilitynames[] = {{"auth", LOG_AUTH},
 Status addGeneralServerOptions(moe::OptionSection* options) {
     StringBuilder portInfoBuilder;
     StringBuilder maxConnInfoBuilder;
+    StringBuilder maxInternalConnInfoBuilder;
     std::stringstream unixSockPermsBuilder;
 
     portInfoBuilder << "specify port number - " << ServerGlobalParams::DefaultDBPort
                     << " by default";
     maxConnInfoBuilder << "max number of simultaneous connections - " << DEFAULT_MAX_CONN
+                       << " by default";
+    maxInternalConnInfoBuilder << "max number of simultaneous internal connections - " << DEFAULT_MAX_CONN_INTERNAL
                        << " by default";
     unixSockPermsBuilder << "permissions to set on UNIX domain socket file - "
                          << "0" << std::oct << DEFAULT_UNIX_PERMS << " by default";
@@ -200,11 +204,16 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
         moe::String,
         "comma separated list of ip addresses to listen on - all local ips by default");
 
+
+
     options->addOptionChaining(
         "net.ipv6", "ipv6", moe::Switch, "enable IPv6 support (disabled by default)");
 
     options->addOptionChaining(
         "net.maxIncomingConnections", "maxConns", moe::Int, maxConnInfoBuilder.str().c_str());
+
+    options->addOptionChaining(
+        "net.maxInternalIncomingConnections", "maxInternalConns", moe::Int, maxInternalConnInfoBuilder.str().c_str());
 
     options->addOptionChaining(
                  "logpath",
@@ -261,6 +270,30 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
                                "Desired format for timestamps in log messages. One of ctime, "
                                "iso8601-utc or iso8601-local");
 
+    options->addOptionChaining("auditLog.path",
+                               "",
+                               moe::String,
+                               "audit log file to send writes to if logging to a file - has to be a file, not directory")
+                               .setSources(moe::SourceYAMLConfig)
+                               .hidden();
+
+    options->addOptionChaining("auditLog.format",
+                               "",
+                               moe::String,
+                               "Desired audit log format, JSON or HWDDS")
+                               .setSources(moe::SourceYAMLConfig);
+
+    options->addOptionChaining("auditLog.opFilter",
+                               "",
+                               moe::String,
+                               "specify filter operation to audit, ',' sperated string format")
+                               .setSources(moe::SourceYAMLConfig);
+
+    options->addOptionChaining("auditLog.authSuccess", "", moe::Bool, "enable audit authorization success")
+                               .setSources(moe::SourceYAMLConfig);
+
+	
+
     options->addOptionChaining("processManagement.pidFilePath",
                                "pidfilepath",
                                moe::String,
@@ -292,6 +325,21 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
     options->addOptionChaining(
                  "net.http.port", "", moe::Switch, "port to listen on for http interface")
         .setSources(moe::SourceYAMLConfig);
+
+    options->addOptionChaining("security.limitVerifyTimes",
+                               "limitverifytimes",
+                               moe::Switch,
+                               "enable limit verify times");
+	
+    options->addOptionChaining("security.whitelist.adminWhiteListPath",
+            "adminWhiteListPath",
+            moe::String,
+            "Absolute file path which stores admin whitelist");
+
+    options->addOptionChaining("externalConfig.externalConfigPath",
+                               "externalConfigPath",
+                               moe::String,
+                               "Absolute file path which stores external config");
 
     options->addOptionChaining(
                  "security.clusterAuthMode",
@@ -790,12 +838,33 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
         serverGlobalParams.bind_ip = params["net.bindIp"].as<std::string>();
     }
 
+
     if (params.count("net.ipv6") && params["net.ipv6"].as<bool>() == true) {
         enableIPv6();
     }
 
     if (params.count("net.http.enabled")) {
         serverGlobalParams.isHttpInterfaceEnabled = params["net.http.enabled"].as<bool>();
+    }
+
+    if (params.count("security.limitVerifyTimes")) {
+        serverGlobalParams.limitVerifyTimes = params["security.limitVerifyTimes"].as<bool>();
+    }
+
+    if (params.count("security.whitelist.adminWhiteListPath")) {
+        std::string path = params["security.whitelist.adminWhiteListPath"].as<string>();
+        std::string errmsg;
+        if (!serverGlobalParams.adminWhiteList.parseFromFile(path, errmsg)) {
+            return Status(ErrorCodes::BadValue, errmsg);
+        }
+    }
+
+    if (params.count("externalConfig.externalConfigPath")) {
+        std::string path = params["externalConfig.externalConfigPath"].as<string>();
+        std::string errmsg;
+        if (!serverGlobalParams.externalConfig.parseFromFile(path, errmsg)) {
+            return Status(ErrorCodes::BadValue, errmsg);
+        }
     }
 
     if (params.count("security.clusterAuthMode")) {
@@ -832,6 +901,13 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
 
         if (serverGlobalParams.maxConns < 5) {
             return Status(ErrorCodes::BadValue, "maxConns has to be at least 5");
+        }
+    }
+    if (params.count("net.maxInternalIncomingConnections")) {
+        serverGlobalParams.maxInternalConns = params["net.maxInternalIncomingConnections"].as<int>();
+
+        if (serverGlobalParams.maxInternalConns < 5) {
+            return Status(ErrorCodes::BadValue, "maxInternalConns has to be at least 5");
         }
     }
 
@@ -1017,6 +1093,35 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
         serverGlobalParams.clusterAuthMode.store(ServerGlobalParams::ClusterAuthMode_keyFile);
     }
 
+    if (params.count("auditLog.path")) {
+        serverGlobalParams.auditLogpath = params["auditLog.path"].as<std::string>();
+    }
+
+    if (params.count("auditLog.format")) {
+        serverGlobalParams.auditLogFormat = params["auditLog.format"].as<std::string>();
+        if (serverGlobalParams.auditLogFormat != "JSON" && serverGlobalParams.auditLogFormat != "HWDDS") {
+            StringBuilder sb;
+            sb << "Value of auditLogFormat must be one of JSON "
+               << "or HWDDS; not \"" << serverGlobalParams.auditLogFormat << "\".";
+            return Status(ErrorCodes::BadValue, sb.str());
+        }
+    }
+
+    if (params.count("auditLog.opFilter")) {
+        serverGlobalParams.auditOpFilterStr = params["auditLog.opFilter"].as<std::string>();
+        if (!parseAuditOpFilter(serverGlobalParams.auditOpFilterStr, serverGlobalParams.auditOpFilter)) {
+            StringBuilder sb;
+            sb << "Value of opFilter must be one or combination of auth,admin,slow,insert,update,delete,command,query or"
+               << "all/off; not \"" << serverGlobalParams.auditOpFilterStr << "\".";
+            return Status(ErrorCodes::BadValue, sb.str());
+        }
+    }
+
+    if (params.count("auditLog.authSuccess")) {
+        serverGlobalParams.auditAuthSuccess = params["auditLog.authSuccess"].as<bool>();
+    }
+
+
 #ifdef MONGO_CONFIG_SSL
     ret = storeSSLServerOptions(params);
     if (!ret.isOK()) {
@@ -1026,5 +1131,44 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
 
     return Status::OK();
 }
+
+bool parseAuditOpFilter(const std::string& filterStr, int& filter) {
+    unsigned int newFilter = 0;
+    std::vector<std::string> strs;
+    splitStringDelim(filterStr, &strs, ',');
+    bool hasAll = false;
+    bool hasOff = false;
+    for (std::vector<std::string>::iterator it = strs.begin(); it != strs.end(); ++it) {
+        boost::trim(*it);
+        if (*it == "off") {
+            hasOff = true;
+            continue;
+        }
+        if (*it == "all") {
+            hasAll = true;
+            continue;
+        }
+        logger::AuditOp op = logger::auditOpFromString(*it);
+        if (op == logger::opInvalid) {
+            return false;
+        }
+        newFilter |= (unsigned int)op;
+    }
+    if (hasAll || hasOff) {
+        // "all" and "off" should be alone
+        if (newFilter != 0) {
+            return false;
+        }
+        if (hasAll && hasOff) {
+            return false;
+        }
+        if (hasAll) {
+            newFilter = 0xFFFFFFFF;
+        }
+    }
+    filter = newFilter;
+    return true;
+}
+
 
 }  // namespace mongo

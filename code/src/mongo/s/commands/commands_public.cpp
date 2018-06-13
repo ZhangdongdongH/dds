@@ -38,12 +38,15 @@
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/apply_ops_cmd_common.h"
 #include "mongo/db/commands/copydb.h"
 #include "mongo/db/commands/rename_collection.h"
 #include "mongo/db/lasterror.h"
 #include "mongo/db/query/lite_parsed_query.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/server_options_helpers.h"
 #include "mongo/s/catalog/catalog_cache.h"
 #include "mongo/s/catalog/catalog_manager.h"
 #include "mongo/s/chunk_manager.h"
@@ -61,6 +64,7 @@
 #include "mongo/scripting/engine.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 
@@ -1546,6 +1550,101 @@ public:
     }
 
 } availableQueryOptionsCmd;
+
+class ReloadCommand : public Command {
+public:
+    ReloadCommand() : Command("reload") {  }
+    virtual bool isWriteCommandForConfigServer() const { return false; }
+    virtual bool slaveOk() const { return true; }
+    virtual bool adminOnly() const { return true; }
+    virtual void help(stringstream& h) const {
+        h << "Reload resource.\n"
+            "Example: {reload: 'adminWhiteListPath', param: '/var/admin_whitelist'}\n"
+            "         {reload: 'auditOpFilter', param: 'auth,admin,slow,insert,update,delete,command,query,all,off'}\n"
+            "         {reload: 'auditAuthSuccess', param: 'true|false'}\n";
+    }
+
+    virtual void addRequiredPrivileges(const std::string& dbname,
+                                       const BSONObj& cmdObj,
+                                       std::vector<Privilege>* out) {
+        ActionSet actions;
+        actions.addAction(ActionType::reload);
+        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
+    }
+
+    virtual bool run(OperationContext* txn,
+                     const string& dbname,
+                     BSONObj& cmdObj,
+                     int,
+                     string& errmsg,
+                     BSONObjBuilder& result) {
+        BSONElement k = cmdObj["reload"];
+        if (k.type() != String) {
+            errmsg = "reload: key must be 'String' type";
+            return false;
+        }
+
+        BSONElement v = cmdObj["param"];
+        if (v.eoo()) {
+            errmsg = "reload: must have 'param' field";
+            return false;
+        }
+
+        std::string key = k.String();
+
+        HostAndPort remote = txn->getClient()->getRemote();
+        log() << "CMD reload: reload: " << key << " param: " << v
+              << " from " << remote.host() << ":" << remote.port() << std::endl;
+
+        if (!serverGlobalParams.adminWhiteList.include(remote.host())) {
+            errmsg = "reload: authentication fail";
+            return false;
+        }
+
+        if (key == "adminWhiteListPath") {
+            if (v.type() != String) {
+                errmsg = "reload: " + key + " 's param must be 'String' type";
+                return false;
+            }
+
+            std::string value = v.String();
+            std::string oldPath = serverGlobalParams.adminWhiteList.path();
+            if (!serverGlobalParams.adminWhiteList.parseFromFile(value, errmsg)) {
+                return false;
+            }
+            result.append("adminWhiteListPath_old", oldPath);
+            result.append("adminWhiteListPath_new", serverGlobalParams.adminWhiteList.path());
+            log() << "security.whitelist.adminWhiteListPath: " << value << std::endl;
+            log() << "adminWhiteList: " << serverGlobalParams.adminWhiteList.toString() << std::endl;
+        } else if (key == "auditOpFilter") {
+            if (v.type() != String) {
+                errmsg = "reload: " + key + " 's param must be 'String' type";
+                return false;
+            }
+
+            std::string value = v.String();
+            if (!parseAuditOpFilter(value, serverGlobalParams.auditOpFilter)) {
+                errmsg = "reload: invalid value " + value;
+                return false;
+            }
+            log() << "auditLog.opFilter from: " << serverGlobalParams.auditOpFilterStr << " change to: " << value << std::endl;
+            serverGlobalParams.auditOpFilterStr = value;
+        } else if (key == "auditAuthSuccess") {
+            if (v.type() != Bool) {
+                errmsg = "reload: " + key + " 's param must be 'Bool' type";
+                return false;
+            }
+
+            log() << "auditLog.authSuccess from: " << serverGlobalParams.auditAuthSuccess << " change to: " << v.Bool() << std::endl;
+            serverGlobalParams.auditAuthSuccess = v.Bool();
+        } else {
+            errmsg = "reload: invalid key " + key;
+            return false;
+        }
+
+        return true;
+    }
+} reloadCmd;
 
 }  // namespace
 }  // namespace mongo

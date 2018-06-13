@@ -51,11 +51,14 @@ public:
     virtual unsigned remotePort() const;
     virtual SockAddr remoteAddr() const;
     virtual SockAddr localAddr() const;
+    virtual HostAndPort local() const;
+    virtual bool isCustomerConnection() const { return false;}
 
     void setRemote(const HostAndPort& remote);
 
 private:
     HostAndPort _remote;
+    HostAndPort _local;
 };
 
 }  // namespace mongo

@@ -4,14 +4,14 @@ var conn = MongoRunner.runMongod({auth: ""});
 
 var adminDB = conn.getDB("admin");
 var testDB = conn.getDB("test");
-adminDB.createUser({user: 'admin', pwd: 'x', roles: ['userAdminAnyDatabase']});
-adminDB.auth('admin', 'x');
-adminDB.createUser({user: 'mallory', pwd: 'x', roles: ['readWriteAnyDatabase']});
-testDB.createUser({user: 'user', pwd: 'x', roles: ['read']});
+adminDB.createUser({user: 'admin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+adminDB.auth('admin', 'Github@12');
+adminDB.createUser({user: 'mallory', pwd: 'Github@12', roles: ['readWriteAnyDatabase'], "passwordDigestor" : "server"});
+testDB.createUser({user: 'user', pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
 assert.eq(3, adminDB.system.users.count());
 adminDB.logout();
 
-adminDB.auth('mallory', 'x');
+adminDB.auth('mallory', 'Github@12');
 var res = adminDB.system.users.createIndex({haxx: 1}, {unique: true, dropDups: true});
 assert(!res.ok);
 assert.eq(13, res.code);  // unauthorized
@@ -33,6 +33,6 @@ var collectionInfosCursor =
 assert.eq([], new DBCommandCursor(adminDB.getMongo(), collectionInfosCursor).toArray());
 adminDB.logout();
 
-adminDB.auth('admin', 'x');
+adminDB.auth('admin', 'Github@12');
 // Make sure that no users were actually dropped
 assert.eq(3, adminDB.system.users.count());

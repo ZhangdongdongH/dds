@@ -4,8 +4,8 @@ var conn = MongoRunner.runMongod({auth: ""});
 var authzErrorCode = 13;
 
 var admin = conn.getDB("admin");
-admin.createUser({user: "adminUser", pwd: "pwd", roles: ["root"]});
-admin.auth({user: "adminUser", pwd: "pwd"});
+admin.createUser({user: "adminUser", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+admin.auth({user: "adminUser", pwd: "Github@12"});
 
 var db = conn.getDB("explain_auth_db");
 var coll = db.explain_auth_coll;
@@ -84,22 +84,22 @@ db.createRole({
 //  -- user defined role with just "find"
 //  -- user defined role with just "update"
 //  -- user defined role with just "remove"
-db.createUser({user: "findOnly", pwd: "pwd", roles: ["findOnly"]});
-db.createUser({user: "updateOnly", pwd: "pwd", roles: ["updateOnly"]});
-db.createUser({user: "removeOnly", pwd: "pwd", roles: ["removeOnly"]});
+db.createUser({user: "findOnly", pwd: "Github@12", roles: ["findOnly"], "passwordDigestor" : "server"});
+db.createUser({user: "updateOnly", pwd: "Github@12", roles: ["updateOnly"], "passwordDigestor" : "server"});
+db.createUser({user: "removeOnly", pwd: "Github@12", roles: ["removeOnly"], "passwordDigestor" : "server"});
 
 // We're done doing test setup, so admin user should no longer be logged in.
 admin.logout();
 
 // The "find" action allows explain of read operations.
-db.auth("findOnly", "pwd");
+db.auth("findOnly", "Github@12");
 testExplainAuth({find: true, count: true, group: true, remove: false, update: false});
 db.logout();
 
-db.auth("updateOnly", "pwd");
+db.auth("updateOnly", "Github@12");
 testExplainAuth({find: false, count: false, group: false, remove: false, update: true});
 db.logout();
 
-db.auth("removeOnly", "pwd");
+db.auth("removeOnly", "Github@12");
 testExplainAuth({find: false, count: false, group: false, remove: true, update: false});
 db.logout();

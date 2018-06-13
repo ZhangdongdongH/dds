@@ -1201,6 +1201,13 @@ public:
         if (args.showPrivileges) {
             // If you want privileges you need to call getUserDescription on each user.
             for (size_t i = 0; i < args.userNames.size(); ++i) {
+                
+                if (args.userNames[i].isBuildinUser() 
+                        && ( AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+                        ) {
+                    continue;
+                }
+                
                 BSONObj userDetails;
                 status = getGlobalAuthorizationManager()->getUserDescription(
                     txn, args.userNames[i], &userDetails);
@@ -2255,6 +2262,13 @@ public:
             }
         } else {
             for (size_t i = 0; i < args.roleNames.size(); ++i) {
+
+                // skip buildin roles
+                if(args.roleNames[i].isBuildinRoles() 
+                        && (AuthorizationSession::get((txn->getClient()))->isAuthWithCustomer() || txn->isCustomerTxn())
+                        ) {
+                    continue;
+                }
                 BSONObj roleDetails;
                 status = getGlobalAuthorizationManager()->getRoleDescription(
                     txn, args.roleNames[i], args.showPrivileges, &roleDetails);

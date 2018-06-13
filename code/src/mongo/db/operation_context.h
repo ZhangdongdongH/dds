@@ -210,6 +210,29 @@ public:
         return getKillStatus() != ErrorCodes::OK;
     }
 
+    bool isInBuildinMode() const {
+        return _buildInMode;
+    }
+
+    void setBuildinMode() {
+        _buildInMode = true;
+    }
+    
+    void cleanBuildinMode() {
+        _buildInMode = false;
+    }
+
+    bool isCustomerTxn() const {
+        return _isCustomerTxn;
+    }
+    void setCustomerTxn() {
+        _isCustomerTxn = true;
+    }
+
+    void unsetCustomerTxn() {
+        _isCustomerTxn = false;
+    }
+
 protected:
     OperationContext(Client* client, unsigned int opId, Locker* locker);
 
@@ -229,6 +252,12 @@ private:
     AtomicWord<ErrorCodes::Error> _killCode{ErrorCodes::OK};
 
     WriteConcernOptions _writeConcern;
+    bool _buildInMode;
+
+    // note: if this value is true, means this ctx is customer context, 
+    //       but when this value is false, it is not means a build in context, 
+    //       context aslo may be a customer context.
+    bool _isCustomerTxn;  
 };
 
 class WriteUnitOfWork {

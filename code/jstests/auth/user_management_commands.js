@@ -10,18 +10,18 @@ function runTest(conn) {
         assert.eq(authzErrorCode, result.getWriteError().code);
     };
 
-    conn.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
-    conn.getDB('admin').auth('admin', 'pwd');
+    conn.getDB('admin').createUser({user: 'admin', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+    conn.getDB('admin').auth('admin', 'Github@12');
     conn.getDB('admin').createUser({
         user: 'userAdmin',
-        pwd: 'pwd',
+        pwd: 'Github@12',
         roles: ['userAdminAnyDatabase'],
-        customData: {userAdmin: true}
+        customData: {userAdmin: true}, "passwordDigestor" : "server"
     });
     conn.getDB('admin').logout();
 
     var userAdminConn = new Mongo(conn.host);
-    userAdminConn.getDB('admin').auth('userAdmin', 'pwd');
+    userAdminConn.getDB('admin').auth('userAdmin', 'Github@12');
     var testUserAdmin = userAdminConn.getDB('test');
     testUserAdmin.createRole({
         role: 'testRole',
@@ -48,15 +48,15 @@ function runTest(conn) {
 
         testUserAdmin.createUser({
             user: "spencer",
-            pwd: "pwd",
+            pwd: "Github@12",
             customData: {zipCode: 10028},
-            roles: ['readWrite', 'testRole', {role: 'adminRole', db: 'admin'}]
+            roles: ['readWrite', 'testRole', {role: 'adminRole', db: 'admin'}], "passwordDigestor" : "server"
         });
-        testUserAdmin.createUser({user: "andy", pwd: "pwd", roles: []});
+        testUserAdmin.createUser({user: "andy", pwd: "Github@12", roles: [], "passwordDigestor" : "server"});
 
         var user = testUserAdmin.getUser('spencer');
         assert.eq(10028, user.customData.zipCode);
-        assert(db.auth('spencer', 'pwd'));
+        assert(db.auth('spencer', 'Github@12'));
         assert.writeOK(db.foo.insert({a: 1}));
         assert.eq(1, db.foo.findOne().a);
         assert.doesNotThrow(function() {
@@ -65,7 +65,7 @@ function runTest(conn) {
         assert.commandWorked(db.adminCommand('connPoolSync'));
 
         db.logout();
-        assert(db.auth('andy', 'pwd'));
+        assert(db.auth('andy', 'Github@12'));
         hasAuthzError(db.foo.insert({a: 1}));
         assert.throws(function() {
             db.foo.findOne();
@@ -78,14 +78,14 @@ function runTest(conn) {
     (function testUpdateUser() {
         jsTestLog("Testing updateUser");
 
-        testUserAdmin.updateUser('spencer', {pwd: 'password', customData: {}});
+        testUserAdmin.updateUser('spencer', {pwd: 'Github@125', customData: {}, "passwordDigestor" : "server"});
         var user = testUserAdmin.getUser('spencer');
         assert.eq(null, user.customData.zipCode);
-        assert(!db.auth('spencer', 'pwd'));
-        assert(db.auth('spencer', 'password'));
+        assert(!db.auth('spencer', 'Github@12'));
+        assert(db.auth('spencer', 'Github@125'));
 
         testUserAdmin.updateUser('spencer',
-                                 {customData: {zipCode: 10036}, roles: ["read", "testRole"]});
+                                 {customData: {zipCode: 10036}, roles: ["read", "testRole"], "passwordDigestor" : "server"});
         var user = testUserAdmin.getUser('spencer');
         assert.eq(10036, user.customData.zipCode);
         hasAuthzError(db.foo.insert({a: 1}));
@@ -214,13 +214,13 @@ function runTest(conn) {
     (function testDropUser() {
         jsTestLog("Testing dropUser");
 
-        assert(db.auth('spencer', 'password'));
-        assert(db.auth('andy', 'pwd'));
+        assert(db.auth('spencer', 'Github@125'));
+        assert(db.auth('andy', 'Github@12'));
 
         assert.commandWorked(testUserAdmin.runCommand({dropUser: 'spencer'}));
 
-        assert(!db.auth('spencer', 'password'));
-        assert(db.auth('andy', 'pwd'));
+        assert(!db.auth('spencer', 'Github@125'));
+        assert(db.auth('andy', 'Github@12'));
 
         assert.eq(1, testUserAdmin.getUsers().length);
     })();
@@ -229,11 +229,11 @@ function runTest(conn) {
         jsTestLog("Testing dropAllUsersFromDatabase");
 
         assert.eq(1, testUserAdmin.getUsers().length);
-        assert(db.auth('andy', 'pwd'));
+        assert(db.auth('andy', 'Github@12'));
 
         assert.commandWorked(testUserAdmin.runCommand({dropAllUsersFromDatabase: 1}));
 
-        assert(!db.auth('andy', 'pwd'));
+        assert(!db.auth('andy', 'Github@12'));
         assert.eq(0, testUserAdmin.getUsers().length);
     })();
 }

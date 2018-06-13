@@ -37,6 +37,7 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/client.h"
 #include "mongo/db/client_basic.h"
 #include "mongo/config.h"
 #include "mongo/db/commands.h"
@@ -223,9 +224,13 @@ public:
     }
 
     BSONObj generateSection(OperationContext* txn, const BSONElement& configElement) const {
-        BSONObjBuilder bb;
+        BSONObjBuilder bb;	
         bb.append("current", Listener::globalTicketHolder.used());
         bb.append("available", Listener::globalTicketHolder.available());
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithBuiltinUser()) {
+			bb.append("internal_current", Listener::internalTicketHolder.used());
+            bb.append("internal_available", Listener::internalTicketHolder.available());
+		}
         bb.append("totalCreated", Listener::globalConnectionNumber.load());
         return bb.obj();
     }

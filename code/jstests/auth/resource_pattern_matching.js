@@ -6,20 +6,20 @@ function setup_users(granter) {
     var admindb = granter.getSiblingDB("admin");
     admindb.runCommand({
         createUser: "admin",
-        pwd: "admin",
+        pwd: "Github@12",
         roles: [
             "userAdminAnyDatabase",
             "dbAdminAnyDatabase",
             "clusterAdmin",
             "readWriteAnyDatabase"
-        ]
+        ], "digestPassword" : true
     });
 
-    admindb.auth("admin", "admin");
+    admindb.auth("admin", "Github@12");
 
     printjson(admindb.runCommand({createRole: "test_role", privileges: [], roles: []}));
 
-    printjson(admindb.runCommand({createUser: "test_user", pwd: "password", roles: ["test_role"]}));
+    printjson(admindb.runCommand({createUser: "test_user", pwd: "Github@12", roles: ["test_role"], "digestPassword" : true}));
 }
 
 function setup_dbs_and_cols(db) {
@@ -41,7 +41,7 @@ function setup_dbs_and_cols(db) {
 function grant_privileges(granter, privileges) {
     var admindb = granter.getSiblingDB("admin");
 
-    admindb.auth("admin", "admin");
+    admindb.auth("admin", "Github@12");
 
     var result = admindb.runCommand({
         grantPrivilegesToRole: "test_role",
@@ -57,7 +57,7 @@ function grant_privileges(granter, privileges) {
 function revoke_privileges(granter, privileges) {
     var admindb = granter.getSiblingDB("admin");
 
-    admindb.auth("admin", "admin");
+    admindb.auth("admin", "Github@12");
 
     var result = admindb.runCommand({
         revokePrivilegesFromRole: "test_role",
@@ -72,7 +72,7 @@ function revoke_privileges(granter, privileges) {
 
 function invalidateUserCache(verifier) {
     var admindb = verifier.getSiblingDB("admin");
-    admindb.auth('admin', 'admin');
+    admindb.auth('admin', 'Github@12');
     admindb.runCommand("invalidateUserCache");
     admindb.logout();
 }
@@ -83,7 +83,7 @@ function run_test(name, granter, verifier, privileges, collections) {
     grant_privileges(granter, privileges);
     invalidateUserCache(verifier);
 
-    verifier.getSiblingDB('admin').auth("test_user", "password");
+    verifier.getSiblingDB('admin').auth("test_user", "Github@12");
 
     for (var key in collections) {
         var parts = key.split(".");

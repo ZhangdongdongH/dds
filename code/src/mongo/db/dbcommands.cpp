@@ -197,6 +197,13 @@ public:
                                               "with --configsvr"));
         }
 
+        if (dbname == "admin" && txn->getClient()->isCustomerConnection() &&
+                AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()) {
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::IllegalOperation,
+                                              "Cannot drop 'admin' database"));
+        }
+
         if ((repl::getGlobalReplicationCoordinator()->getReplicationMode() !=
              repl::ReplicationCoordinator::modeNone) &&
             (dbname == "local")) {
@@ -1209,6 +1216,10 @@ void Command::execCommand(OperationContext* txn,
         // TODO: move this back to runCommands when mongos supports OperationContext
         // see SERVER-18515 for details.
         uassertStatusOK(rpc::readRequestMetadata(txn, request.getMetadata()));
+        
+        if (request.getMetadata().hasField("customerCmd")) {
+            txn->setCustomerTxn();
+        }
 
         dassert(replyBuilder->getState() == rpc::ReplyBuilderInterface::State::kCommandReply);
 

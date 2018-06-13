@@ -49,6 +49,7 @@
 #include "mongo/db/server_parameters.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/version.h"
+#include "mongo/db/client.h"
 
 namespace {
 
@@ -710,7 +711,9 @@ void Explain::explainStages(PlanExecutor* exec,
         execBob.doneFast();
     }
 
-    generateServerInfo(out);
+    if (!exec->getOpCtx()->getClient()->isCustomerConnection()) {
+        generateServerInfo(out);
+    }
 }
 
 // static

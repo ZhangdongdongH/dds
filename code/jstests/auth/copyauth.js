@@ -117,8 +117,8 @@ function copydbBetweenClustersTest(configObj) {
     if (configObj.isSourceUsingAuth) {
         // Create a super user so we can create a regular user and not be locked out afterwards
         source.conn.getDB("admin")
-            .createUser({user: "sourceSuperUser", pwd: "sourceSuperUser", roles: ["root"]});
-        source.conn.getDB("admin").auth("sourceSuperUser", "sourceSuperUser");
+            .createUser({user: "sourceSuperUser", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+        source.conn.getDB("admin").auth("sourceSuperUser", "Github@12");
 
         source.conn.getDB(baseName)[baseName].save({i: 1});
         assert.eq(1, source.conn.getDB(baseName)[baseName].count());
@@ -126,7 +126,7 @@ function copydbBetweenClustersTest(configObj) {
 
         // Insert a document and create a regular user that we will use for the target
         // authenticating with the source
-        source.conn.getDB(baseName).createUser({user: "foo", pwd: "bar", roles: ["dbOwner"]});
+        source.conn.getDB(baseName).createUser({user: "foo", pwd: "Github@125", roles: ["dbOwner"], "passwordDigestor" : "server"});
 
         source.conn.getDB("admin").logout();
         assert.throws(function() {
@@ -143,11 +143,11 @@ function copydbBetweenClustersTest(configObj) {
 
     if (configObj.isTargetUsingAuth) {
         target.conn.getDB("admin")
-            .createUser({user: "targetSuperUser", pwd: "targetSuperUser", roles: ["root"]});
+            .createUser({user: "targetSuperUser", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
         assert.throws(function() {
             target.conn.getDB(baseName)[baseName].findOne();
         });
-        target.conn.getDB("admin").auth("targetSuperUser", "targetSuperUser");
+        target.conn.getDB("admin").auth("targetSuperUser", "Github@12");
     }
 
     // 3. Run the copydb command
@@ -157,7 +157,7 @@ function copydbBetweenClustersTest(configObj) {
         // We only need to pass username and password if the target has to send authentication
         // information to the source cluster
         assert.commandWorked(target.conn.getDB(baseName).copyDatabase(
-            baseName, baseName, source.connString, "foo", "bar"));
+            baseName, baseName, source.connString, "foo", "Github@125"));
     } else {
         // We are copying from a cluster with no auth
         assert.commandWorked(

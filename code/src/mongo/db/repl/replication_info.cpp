@@ -57,11 +57,28 @@ using std::stringstream;
 
 namespace repl {
 
-void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level) {
+void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level, bool shouldReplacePrivateIpToPublicIp) {
     ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
     if (replCoord->getSettings().usingReplSets()) {
         IsMasterResponse isMasterResponse;
         replCoord->fillIsMasterForReplSet(&isMasterResponse);
+        if(shouldReplacePrivateIpToPublicIp == true && txn->getClient()->isFromPublicIp()) {
+            PublicIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPublicIpPrivateIpRange();
+
+
+            std::vector<HostAndPort> tmpVector;
+            for(auto & hp : isMasterResponse.getHosts()) {
+                tmpVector.push_back(HostAndPort(range.getPublicIp(hp.host()), hp.port()));
+            }
+            isMasterResponse.setHosts(tmpVector);
+
+            auto meHpOld = isMasterResponse.getMe();
+            auto meHpNew = HostAndPort(range.getPublicIp(meHpOld.host()), meHpOld.port());
+            isMasterResponse.setMe(meHpNew);
+            if (isMasterResponse.isMaster()) {
+                isMasterResponse.setPrimary(meHpNew);
+            }
+        }
         result.appendElements(isMasterResponse.toBSON());
         if (level) {
             replCoord->appendSlaveInfoData(&result);
@@ -155,7 +172,7 @@ public:
         int level = configElement.numberInt();
 
         BSONObjBuilder result;
-        appendReplicationInfo(txn, result, level);
+        appendReplicationInfo(txn, result, level, false);
         getGlobalReplicationCoordinator()->processReplSetGetRBID(&result);
 
         return result.obj();
@@ -225,7 +242,7 @@ public:
         if (cmdObj["forShell"].trueValue())
             LastError::get(txn->getClient()).disable();
 
-        appendReplicationInfo(txn, result, 0);
+        appendReplicationInfo(txn, result, 0, true);
 
         if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::CSRS) {
             result.append("configsvr", 1);

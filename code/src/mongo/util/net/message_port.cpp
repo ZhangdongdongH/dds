@@ -111,9 +111,12 @@ MessagingPort::MessagingPort(int fd, const SockAddr& remote)
 MessagingPort::MessagingPort(double timeout, logger::LogSeverity ll)
     : MessagingPort(std::make_shared<Socket>(timeout, ll)) {}
 
-MessagingPort::MessagingPort(std::shared_ptr<Socket> sock) : psock(std::move(sock)) {
+MessagingPort::MessagingPort(std::shared_ptr<Socket> sock) 
+    : psock(std::move(sock)), _inAdminWhiteList(false), _inUserWhiteList(false), _fromPublicIp(false) {
     SockAddr sa = psock->remoteAddr();
     _remoteParsed = HostAndPort(sa.getAddr(), sa.getPort());
+    SockAddr lsa = psock->localAddr();
+    _localParsed = HostAndPort(lsa.getAddr(), lsa.getPort());
     ports.insert(this);
 }
 
@@ -278,6 +281,10 @@ SockAddr MessagingPort::remoteAddr() const {
 
 SockAddr MessagingPort::localAddr() const {
     return psock->localAddr();
+}
+
+HostAndPort MessagingPort::local() const {
+    return _localParsed;
 }
 
 }  // namespace mongo

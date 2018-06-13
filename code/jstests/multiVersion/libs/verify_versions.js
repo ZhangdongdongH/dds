@@ -23,6 +23,8 @@ var Mongo, assert;
     // looking for versions not found
     assert.allBinVersions = function(versionsWanted, versionsFound) {
 
+        print("versionsWanted is " + versionsWanted);
+        print("versionsFound is " + versionsFound);
         for (var i = 0; i < versionsWanted.length; i++) {
             var version = versionsWanted[i];
             var found = false;

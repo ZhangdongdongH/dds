@@ -39,8 +39,8 @@ MongoRunner.stopMongod(port[0]);
 
 print("add a user to server0: foo");
 m = MongoRunner.runMongod({dbpath: MongoRunner.dataPath + name + "-0"});
-m.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles});
-m.getDB("test").createUser({user: "bar", pwd: "baz", roles: jsTest.basicUserRoles});
+m.getDB("admin").createUser({user: "foo", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+m.getDB("test").createUser({user: "bar", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
 print("make sure user is written before shutting down");
 MongoRunner.stopMongod(m);
 
@@ -53,7 +53,7 @@ rs.start(1, {"keyFile": key1_600});
 print("restart 2 with keyFile");
 rs.start(2, {"keyFile": key1_600});
 
-var result = m.getDB("admin").auth("foo", "bar");
+var result = m.getDB("admin").auth("foo", "Github@12");
 assert.eq(result, 1, "login failed");
 print("Initializing replSet with config: " + tojson(rs.getReplSetConfig()));
 result = m.getDB("admin").runCommand({replSetInitiate: rs.getReplSetConfig()});
@@ -64,7 +64,7 @@ var master = rs.getPrimary();
 rs.awaitSecondaryNodes();
 var mId = rs.getNodeId(master);
 var slave = rs.liveNodes.slaves[0];
-assert.eq(1, master.getDB("admin").auth("foo", "bar"));
+assert.eq(1, master.getDB("admin").auth("foo", "Github@12"));
 assert.writeOK(master.getDB("test").foo.insert({x: 1}, {writeConcern: {w: 3, wtimeout: 60000}}));
 
 print("try some legal and illegal reads");
@@ -89,17 +89,17 @@ printjson(master.adminCommand({replSetGetStatus: 1}));
 
 doQueryOn(master);
 
-result = slave.getDB("test").auth("bar", "baz");
+result = slave.getDB("test").auth("bar", "Github@12");
 assert.eq(result, 1);
 
 r = slave.getDB("test").foo.findOne();
 assert.eq(r.x, 1);
 
 print("add some data");
-master.getDB("test").auth("bar", "baz");
+master.getDB("test").auth("bar", "Github@12");
 var bulk = master.getDB("test").foo.initializeUnorderedBulkOp();
 for (var i = 0; i < 1000; i++) {
-    bulk.insert({x: i, foo: "bar"});
+    bulk.insert({x: i, foo: "Github@12"});
 }
 assert.writeOK(bulk.execute({w: 3, wtimeout: 60000}));
 
@@ -109,10 +109,10 @@ rs.stop(mId);
 master = rs.getPrimary();
 
 print("add some more data 1");
-master.getDB("test").auth("bar", "baz");
+master.getDB("test").auth("bar", "Github@12");
 bulk = master.getDB("test").foo.initializeUnorderedBulkOp();
 for (var i = 0; i < 1000; i++) {
-    bulk.insert({x: i, foo: "bar"});
+    bulk.insert({x: i, foo: "Github@12"});
 }
 assert.writeOK(bulk.execute({w: 2}));
 
@@ -123,7 +123,7 @@ master = rs.getPrimary();
 print("add some more data 2");
 bulk = master.getDB("test").foo.initializeUnorderedBulkOp();
 for (var i = 0; i < 1000; i++) {
-    bulk.insert({x: i, foo: "bar"});
+    bulk.insert({x: i, foo: "Github@12"});
 }
 bulk.execute({w: 3, wtimeout: 60000});
 
@@ -136,7 +136,7 @@ var conn = MongoRunner.runMongod({
     keyFile: key2_600
 });
 
-master.getDB("admin").auth("foo", "bar");
+master.getDB("admin").auth("foo", "Github@12");
 var config = master.getDB("local").system.replset.findOne();
 config.members.push({_id: 3, host: rs.host + ":" + port[3]});
 config.version++;
@@ -146,7 +146,7 @@ try {
     print("error: " + e);
 }
 master = rs.getPrimary();
-master.getDB("admin").auth("foo", "bar");
+master.getDB("admin").auth("foo", "Github@12");
 
 print("shouldn't ever sync");
 for (var i = 0; i < 10; i++) {
@@ -184,7 +184,7 @@ print("make sure it has the config, too");
 assert.soon(function() {
     for (var i in rs.nodes) {
         rs.nodes[i].setSlaveOk();
-        rs.nodes[i].getDB("admin").auth("foo", "bar");
+        rs.nodes[i].getDB("admin").auth("foo", "Github@12");
         config = rs.nodes[i].getDB("local").system.replset.findOne();
         if (config.version != 2) {
             return false;

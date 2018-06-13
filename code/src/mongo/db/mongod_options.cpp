@@ -156,6 +156,13 @@ Status addMongodOptions(moe::OptionSection* options) {
                         "operationProfiling.mode", "", moe::String, "(off/slowOp/all)")
         .setSources(moe::SourceYAMLConfig)
         .format("(:?off)|(:?slowOp)|(:?all)", "(off/slowOp/all)");
+	
+    general_options.addOptionChaining("operationProfiling.profileSizeMB",
+                                      "profilesize",
+                                      moe::Int,
+                                      "value of profile collection size")
+        .setDefault(moe::Value(1));
+	
 
     general_options.addOptionChaining(
                         "cpu", "cpu", moe::Switch, "periodically show cpu and iowait utilization")
@@ -990,6 +997,10 @@ Status storeMongodOptions(const moe::Environment& params, const std::vector<std:
 
     if (params.count("operationProfiling.slowOpThresholdMs")) {
         serverGlobalParams.slowMS = params["operationProfiling.slowOpThresholdMs"].as<int>();
+    }
+
+    if (params.count("operationProfiling.profileSizeMB")) {
+        serverGlobalParams.profileSizeMB = params["operationProfiling.profileSizeMB"].as<int>();
     }
 
     if (params.count("storage.syncPeriodSecs")) {

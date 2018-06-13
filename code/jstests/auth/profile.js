@@ -3,8 +3,8 @@ var conn = MongoRunner.runMongod();
 var db1 = conn.getDB("profile-a");
 var db2 = db1.getSisterDB("profile-b");
 var username = "user";
-db1.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
-db2.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
+db1.createUser({user: username, pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+db2.createUser({user: username, pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
 
 function lastOp(db) {
     return db.system.profile.find().sort({$natural: -1}).next();
@@ -25,7 +25,7 @@ var last = lastOp(db1);
 assert.eq("", last.user);
 assert.eq(0, last.allUsers.length);
 
-db1.auth(username, "password");
+db1.auth(username, "Github@12");
 
 db1.foo.findOne();
 var last = lastOp(db1);
@@ -34,7 +34,7 @@ assert.eq(1, last.allUsers.length);
 assert.eq(username, last.allUsers[0].user);
 assert.eq(db1, last.allUsers[0].db);
 
-db2.auth(username, "password");
+db2.auth(username, "Github@12");
 
 db1.foo.findOne();
 var last = lastOp(db1);

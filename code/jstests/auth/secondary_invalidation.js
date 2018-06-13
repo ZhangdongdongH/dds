@@ -14,13 +14,13 @@ var secondary = rsTest.getSecondary();
 var admin = primary.getDB('admin');
 
 // Setup initial data
-admin.createUser({user: 'admin', pwd: 'password', roles: jsTest.adminUserRoles});
-admin.auth('admin', 'password');
+admin.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+admin.auth('admin', 'Github@12');
 
-primary.getDB('foo').createUser({user: 'foo', pwd: 'foopwd', roles: []}, {w: NUM_NODES});
+primary.getDB('foo').createUser({user: 'foo', pwd: 'Github@12', roles: [], "passwordDigestor" : "server"}, {w: NUM_NODES});
 
 secondaryFoo = secondary.getDB('foo');
-secondaryFoo.auth('foo', 'foopwd');
+secondaryFoo.auth('foo', 'Github@12');
 assert.throws(function() {
     secondaryFoo.col.findOne();
 }, [], "Secondary read worked without permissions");

@@ -6,8 +6,8 @@ var conn = MongoRunner.runMongod({
     sslPEMKeyFile: "jstests/libs/server.pem",
     sslCAFile: "jstests/libs/ca.pem"
 });
-conn.getDB('admin').createUser({user: "root", pwd: "pass", roles: ["root"]});
-conn.getDB('admin').auth("root", "pass");
+conn.getDB('admin').createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+conn.getDB('admin').auth("root", "Github@12");
 var cmdOut = conn.getDB('admin').runCommand({getParameter: 1, authenticationMechanisms: 1});
 if (cmdOut.ok) {
     TestData.authMechanism = "MONGODB-X509";  // SERVER-10353
@@ -31,13 +31,13 @@ function authAndTest(mongo) {
     // It should be impossible to create users with the same name as the server's subject
     assert.throws(function() {
         external.createUser(
-            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}]});
+            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     }, {}, "Created user with same name as the server's x.509 subject");
 
     // It should be impossible to create users with names recognized as cluster members
     assert.throws(function() {
         external.createUser(
-            {user: INTERNAL_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}]});
+            {user: INTERNAL_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     }, {}, "Created user which would be recognized as a cluster member");
 
     // Add user using localhost exception
@@ -46,13 +46,13 @@ function authAndTest(mongo) {
         roles: [
             {'role': 'userAdminAnyDatabase', 'db': 'admin'},
             {'role': 'readWriteAnyDatabase', 'db': 'admin'}
-        ]
+        ], "passwordDigestor" : "server"
     });
 
     // It should be impossible to create users with an internal name
     assert.throws(function() {
         external.createUser(
-            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}]});
+            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     });
 
     // Localhost exception should not be in place anymore
@@ -67,7 +67,7 @@ function authAndTest(mongo) {
 
     // Check that we can add a user and read data
     test.createUser(
-        {user: "test", pwd: "test", roles: [{'role': 'readWriteAnyDatabase', 'db': 'admin'}]});
+        {user: "test", pwd: "Github@12", roles: [{'role': 'readWriteAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     test.foo.findOne();
 
     external.logout();

@@ -13,8 +13,8 @@ var test = conn.getDB("test");
 // insert a single document and add two test users
 test.foo.insert({a: 1});
 assert.eq(1, test.foo.findOne().a);
-test.createUser({user: 'a', pwd: 'a', roles: jsTest.basicUserRoles});
-test.createUser({user: 'b', pwd: 'b', roles: jsTest.basicUserRoles});
+test.createUser({user: 'a', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+test.createUser({user: 'b', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
 
 function missingOrEquals(string) {
     return 'function() { ' +
@@ -32,12 +32,12 @@ function testDbEval() {
     test.eval('someGlobal = "noUsers";');
 
     // test new user auth causes scope to be cleared
-    test.auth('a', 'a');
+    test.auth('a', 'Github@12');
     assert(test.eval('return ' + missingOrEquals('a')), "dbEval: Auth user 'a'");
 
     // test auth as another user causes scope to be cleared
     test.eval('someGlobal = "a";');
-    test.auth('b', 'b');
+    test.auth('b', 'Github@12');
     assert(test.eval('return ' + missingOrEquals('a&b')), "dbEval: Auth user 'b'");
 
     // test user logout causes scope to be cleared
@@ -54,13 +54,13 @@ function testWhere() {
     test.foo.findOne({$where: 'someGlobal = "noUsers";'});
 
     // test new user auth causes scope to be cleared
-    test.auth('a', 'a');
+    test.auth('a', 'Github@12');
     assert.eq(
         1, test.foo.count({$where: 'return ' + missingOrEquals('a')}), "$where: Auth user 'a");
 
     // test auth as another user causes scope to be cleared
     test.foo.findOne({$where: 'someGlobal = "a";'});
-    test.auth('b', 'b');
+    test.auth('b', 'Github@12');
     assert(test.foo.count({$where: 'return ' + missingOrEquals('a&b')}), "$where: Auth user 'b'");
     // test user logout causes scope to be cleared
     test.foo.findOne({$where: 'someGlobal = "a&b";'});
@@ -89,14 +89,14 @@ function testMapReduce() {
     setGlobalInMap('noUsers');
 
     // test new user auth causes scope to be cleared
-    test.auth('a', 'a');
+    test.auth('a', 'Github@12');
     assert.doesNotThrow(function() {
         getGlobalFromMap('a');
     }, [], "M/R: Auth user 'a'");
 
     // test auth as another user causes scope to be cleared
     setGlobalInMap('a');
-    test.auth('b', 'b');
+    test.auth('b', 'Github@12');
     assert.doesNotThrow(function() {
         getGlobalFromMap('a&b');
     }, [], "M/R: Auth user 'b'");
@@ -131,12 +131,12 @@ function testGroup() {
     setGlobalInGroup('noUsers');
 
     // test new user auth causes scope to be cleared
-    test.auth('a', 'a');
+    test.auth('a', 'Github@12');
     assert.doesNotThrow(getGlobalFromGroup, ['a'], "Group: Auth user 'a'");
 
     // test auth as another user causes scope to be cleared
     setGlobalInGroup('a');
-    test.auth('b', 'b');
+    test.auth('b', 'Github@12');
     assert.doesNotThrow(getGlobalFromGroup, ['a&b'], "Group: Auth user 'b'");
 
     // test user logout causes scope to be cleared

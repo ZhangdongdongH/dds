@@ -14,7 +14,7 @@ load("jstests/ssl/libs/ssl_helpers.js");
 
 function authAllNodes() {
     for (var n = 0; n < rst.nodes.length; n++) {
-        var status = rst.nodes[n].getDB("admin").auth("root", "pwd");
+        var status = rst.nodes[n].getDB("admin").auth("root", "Github@12");
         assert.eq(status, 1);
     }
 }
@@ -31,8 +31,8 @@ rst.initiate();
 
 // Connect to master and do some basic operations
 var rstConn1 = rst.getPrimary();
-rstConn1.getDB("admin").createUser({user: "root", pwd: "pwd", roles: ["root"]}, {w: NUM_NODES});
-rstConn1.getDB("admin").auth("root", "pwd");
+rstConn1.getDB("admin").createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"}, {w: NUM_NODES});
+rstConn1.getDB("admin").auth("root", "Github@12");
 rstConn1.getDB("test").a.insert({a: 1, str: "TESTTESTTEST"});
 assert.eq(1, rstConn1.getDB("test").a.count(), "Error interacting with replSet");
 
@@ -48,7 +48,7 @@ rst.upgradeSet(
       sslCAFile: CA_CERT
     },
     "root",
-    "pwd");
+    "Github@12");
 authAllNodes();
 rst.awaitReplication();
 
@@ -67,7 +67,7 @@ rst.upgradeSet(
       sslCAFile: CA_CERT
     },
     "root",
-    "pwd");
+    "Github@12");
 authAllNodes();
 rst.awaitReplication();
 
@@ -98,7 +98,7 @@ rst.upgradeSet(
       sslCAFile: CA_CERT
     },
     "root",
-    "pwd");
+    "Github@12");
 authAllNodes();
 rst.awaitReplication();
 var rstConn4 = rst.getPrimary();

@@ -13,11 +13,11 @@ function runTest(conn) {
     var userAdminConn = new Mongo(conn.host);
     var testUserAdmin = userAdminConn.getDB('test');
     var adminUserAdmin = userAdminConn.getDB('admin');
-    adminUserAdmin.createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
-    adminUserAdmin.auth('userAdmin', 'pwd');
-    testUserAdmin.createUser({user: 'testUser', pwd: 'pwd', roles: []});
+    adminUserAdmin.createUser({user: 'userAdmin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+    adminUserAdmin.auth('userAdmin', 'Github@12');
+    testUserAdmin.createUser({user: 'testUser', pwd: 'Github@12', roles: [], "passwordDigestor" : "server"});
     var db = conn.getDB('test');
-    assert(db.auth('testUser', 'pwd'));
+    assert(db.auth('testUser', 'Github@12'));
 
     // At this point there are 3 databases handles in use. - "testUserAdmin" and "adminUserAdmin"
     // are handles to the "test" and "admin" dbs respectively.  They are on the same connection,

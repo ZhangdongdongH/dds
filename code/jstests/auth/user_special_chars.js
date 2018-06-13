@@ -5,8 +5,8 @@ var testUserSpecialCharacters = function() {
     // Create a user with special characters, make sure it can auth.
     var adminDB = conn.getDB('admin');
     adminDB.createUser(
-        {user: '~`!@#$%^&*()-_+={}[]||;:",.//><', pwd: 'pass', roles: jsTest.adminUserRoles});
-    assert(adminDB.auth({user: '~`!@#$%^&*()-_+={}[]||;:",.//><', pwd: 'pass'}));
+        {user: '~`!@#$%^&*()-_+={}[]||;:",.//><', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    assert(adminDB.auth({user: '~`!@#$%^&*()-_+={}[]||;:",.//><', pwd: 'Github@12'}));
 };
 
 testUserSpecialCharacters();

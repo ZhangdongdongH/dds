@@ -5,20 +5,20 @@
 
     var adminUser = {
         db: "admin",
-        username: "foo",
-        password: "bar"
+        username: "admin",
+        password: "Github@12"
     };
 
     var testUser = {
         db: "test",
         username: "bar",
-        password: "baz"
+        password: "Github@12"
     };
 
     var testUserReadOnly = {
         db: "test",
         username: "sad",
-        password: "bat"
+        password: "Github@12"
     };
 
     function login(userObj, thingToUse) {
@@ -63,7 +63,7 @@
     print("Configuration: Add user " + tojson(adminUser));
     s.getDB(adminUser.db)
         .createUser(
-            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles});
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     login(adminUser);
 
     // Set the chunk size, disable the secondary throttle (so the test doesn't run so slow)
@@ -131,12 +131,12 @@
 
     s.getDB(testUser.db)
         .createUser(
-            {user: testUser.username, pwd: testUser.password, roles: jsTest.basicUserRoles});
+            {user: testUser.username, pwd: testUser.password, roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
     s.getDB(testUserReadOnly.db)
         .createUser({
             user: testUserReadOnly.username,
             pwd: testUserReadOnly.password,
-            roles: jsTest.readOnlyUserRoles
+            roles: jsTest.readOnlyUserRoles, "passwordDigestor" : "server"
         });
 
     logout(adminUser);
@@ -274,12 +274,12 @@
     d1.getPrimary()
         .getDB(adminUser.db)
         .createUser(
-            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles},
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
             {w: 3, wtimeout: 60000});
     d2.getPrimary()
         .getDB(adminUser.db)
         .createUser(
-            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles},
+            {user: adminUser.username, pwd: adminUser.password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
             {w: 3, wtimeout: 60000});
 
     login(testUser);

@@ -36,7 +36,7 @@
 namespace mongo {
 
 OperationContext::OperationContext(Client* client, unsigned int opId, Locker* locker)
-    : _client(client), _opId(opId), _locker(locker) {}
+    : _client(client), _opId(opId), _locker(locker), _buildInMode(false), _isCustomerTxn(false) {}
 
 ServiceContext* OperationContext::getServiceContext() const {
     return _client->getServiceContext();

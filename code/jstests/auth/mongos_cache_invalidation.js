@@ -20,8 +20,8 @@ var st = new ShardingTest({
     keyFile: 'jstests/libs/key1'
 });
 
-st.s1.getDB('admin').createUser({user: 'root', pwd: 'pwd', roles: ['root']});
-st.s1.getDB('admin').auth('root', 'pwd');
+st.s1.getDB('admin').createUser({user: 'root', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+st.s1.getDB('admin').auth('root', 'Github@12');
 
 var res = st.s1.getDB('admin').runCommand({setParameter: 1, userCacheInvalidationIntervalSecs: 0});
 assert.commandFailed(res, "Setting the invalidation interval to an disallowed value should fail");
@@ -34,10 +34,10 @@ res = st.s1.getDB('admin').runCommand({getParameter: 1, userCacheInvalidationInt
 assert.eq(5, res.userCacheInvalidationIntervalSecs);
 st.s1.getDB('test').foo.insert({a: 1});  // initial data
 st.s1.getDB('test').bar.insert({a: 1});  // initial data
-st.s1.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
+st.s1.getDB('admin').createUser({user: 'admin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
 st.s1.getDB('admin').logout();
 
-st.s0.getDB('admin').auth('admin', 'pwd');
+st.s0.getDB('admin').auth('admin', 'Github@12');
 st.s0.getDB('admin').createRole({
     role: 'myRole',
     roles: [],
@@ -45,17 +45,18 @@ st.s0.getDB('admin').createRole({
 });
 st.s0.getDB('test').createUser({
     user: 'spencer',
-    pwd: 'pwd',
-    roles: ['read', {role: 'myRole', db: 'admin'}, {role: 'userAdminAnyDatabase', db: 'admin'}]
+    pwd: 'Github@12',
+    roles: ['read', {role: 'myRole', db: 'admin'}, {role: 'userAdminAnyDatabase', db: 'admin'}],
+    "passwordDigestor" : "server"
 });
 st.s0.getDB('admin').logout();
 
 var db1 = st.s0.getDB('test');
-db1.auth('spencer', 'pwd');
+db1.auth('spencer', 'Github@12');
 var db2 = st.s1.getDB('test');
-db2.auth('spencer', 'pwd');
+db2.auth('spencer', 'Github@12');
 var db3 = st.s2.getDB('test');
-db3.auth('spencer', 'pwd');
+db3.auth('spencer', 'Github@12');
 
 /**
  * At this point we have 3 handles to the "test" database, each of which are on connections to

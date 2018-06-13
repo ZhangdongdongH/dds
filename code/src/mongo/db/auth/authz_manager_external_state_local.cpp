@@ -39,6 +39,8 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 
@@ -232,6 +234,15 @@ Status AuthzManagerExternalStateLocal::getRoleDescription(OperationContext* txn,
                                                           bool showPrivileges,
                                                           BSONObj* result) {
     stdx::lock_guard<stdx::mutex> lk(_roleGraphMutex);
+    // shouldAllowLocalhost is consider to remove, 
+    // because the first user should use the mongodb buildin admin role, and 
+    // no one will create a user with build in dbs role.
+    // DBS: TODO
+    if(!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn())
+            && roleName.isBuildinRoles()) {
+        return Status(ErrorCodes::RoleNotFound, "No role named " + roleName.toString());
+    }
     return _getRoleDescription_inlock(roleName, showPrivileges, result);
 }
 
@@ -298,6 +309,10 @@ Status AuthzManagerExternalStateLocal::getRoleDescriptionsForDB(OperationContext
         if (!showBuiltinRoles && _roleGraph.isBuiltinRole(it.get())) {
             continue;
         }
+        if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomer() || txn->isCustomerTxn()) 
+                && it.get().isBuildinRoles()) {
+            continue;
+        }
         BSONObj roleDoc;
         Status status = _getRoleDescription_inlock(it.get(), showPrivileges, &roleDoc);
         if (!status.isOK()) {
@@ -332,12 +347,14 @@ Status AuthzManagerExternalStateLocal::_initializeRoleGraph(OperationContext* tx
     _roleGraph = RoleGraph();
 
     RoleGraph newRoleGraph;
+    txn->setBuildinMode();
     Status status =
         query(txn,
               AuthorizationManager::rolesCollectionNamespace,
               BSONObj(),
               BSONObj(),
               stdx::bind(addRoleFromDocumentOrWarn, &newRoleGraph, stdx::placeholders::_1));
+    txn->cleanBuildinMode();
     if (!status.isOK())
         return status;
 

@@ -95,6 +95,11 @@ Status cloneCollectionAsCapped(OperationContext* txn,
     std::string fromNs = db->name() + "." + shortFrom;
     std::string toNs = db->name() + "." + shortTo;
 
+    if(fromNs == "admin.system.users" || fromNs == "admin.system.roles" ) {
+        return Status(ErrorCodes::Unauthorized,
+                      str::stream() << "source collection " << fromNs << " does not allow to cloneCollectionAsCapped");
+    }
+
     Collection* fromCollection = db->getCollection(fromNs);
     if (!fromCollection)
         return Status(ErrorCodes::NamespaceNotFound,

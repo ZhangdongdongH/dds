@@ -474,6 +474,9 @@ env.Library(
         "audit.cpp",
     ],
     LIBDEPS=[
+        'auth/authorization_manager_global',
+        '$BUILD_DIR/mongo/db/auth/authcore',
+        '$BUILD_DIR/mongo/util/net/hostandport',
     ],
 )
 
@@ -561,6 +564,7 @@ serverOnlyFiles = [
     "commands/plan_cache_commands.cpp",
     "commands/rename_collection.cpp",
     "commands/repair_cursor.cpp",
+    "commands/reload_cmd.cpp",
     "commands/snapshot_management.cpp",
     "commands/test_commands.cpp",
     "commands/top_command.cpp",

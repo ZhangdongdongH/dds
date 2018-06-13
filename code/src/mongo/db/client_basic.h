@@ -65,6 +65,11 @@ public:
         return _messagingPort->remote();
     }
 
+    HostAndPort getLocal() const {
+        verify(_messagingPort);
+        return _messagingPort->local();
+    }
+
     /**
      * Returns the ServiceContext that owns this client session context.
      */
@@ -80,6 +85,20 @@ public:
     }
 
     static ClientBasic* getCurrent();
+
+    bool isCustomerConnection() const {
+        if(_messagingPort) {
+            return _messagingPort->isCustomerConnection();
+        }
+        return false;
+    }
+
+    bool isFromPublicIp() const {
+        if(_messagingPort) {
+            return _messagingPort->isFromPublicIp();
+        }
+        return false;
+    }
 
 protected:
     ClientBasic(ServiceContext* serviceContext, AbstractMessagingPort* messagingPort);

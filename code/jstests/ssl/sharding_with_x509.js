@@ -27,8 +27,8 @@
         }
     });
 
-    st.s.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
-    st.s.getDB('admin').auth('admin', 'pwd');
+    st.s.getDB('admin').createUser({user: 'admin', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+    st.s.getDB('admin').auth('admin', 'Github@12');
 
     var coll = st.s.getCollection("test.foo");
 

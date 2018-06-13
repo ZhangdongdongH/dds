@@ -29,6 +29,7 @@
 #pragma once
 
 #include <vector>
+#include <set>
 
 #include "mongo/config.h"
 #include "mongo/util/net/message.h"
@@ -50,6 +51,7 @@ public:
     virtual unsigned remotePort() const = 0;
     virtual SockAddr remoteAddr() const = 0;
     virtual SockAddr localAddr() const = 0;
+    virtual HostAndPort local() const = 0;
 
     void setX509SubjectName(const std::string& x509SubjectName) {
         _x509SubjectName = x509SubjectName;
@@ -62,7 +64,15 @@ public:
     long long connectionId() const {
         return _connectionId;
     }
+
     void setConnectionId(long long connectionId);
+
+    /* whitelist interfaces */
+    virtual void setInAdminWhiteList() {  }
+    virtual bool inAdminWhiteList() { return false; }
+    virtual bool isCustomerConnection() const = 0;
+    virtual bool isFromPublicIp() {return false;}
+    virtual void setPublicIp() {  }
 
 public:
     // TODO make this private with some helpers

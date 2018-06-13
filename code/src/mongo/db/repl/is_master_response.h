@@ -95,6 +95,10 @@ public:
         return _hosts;
     }
 
+    void setHosts(std::vector<HostAndPort>& hosts) {
+        _hosts.swap(hosts);
+    }
+
     const std::vector<HostAndPort>& getPassives() const {
         return _passives;
     }

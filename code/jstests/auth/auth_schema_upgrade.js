@@ -7,15 +7,15 @@ var setupCRUsers = function(conn) {
 
     adminDB.system.version.update({_id: "authSchema"}, {"currentVersion": 3}, {upsert: true});
 
-    adminDB.createUser({user: 'user1', pwd: 'pass', roles: jsTest.adminUserRoles});
-    assert(adminDB.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'pass'}));
+    adminDB.createUser({user: 'user1', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    assert(adminDB.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'Github@12'}));
 
-    adminDB.createUser({user: 'user2', pwd: 'pass', roles: jsTest.adminUserRoles});
-    assert(adminDB.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'pass'}));
+    adminDB.createUser({user: 'user2', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    assert(adminDB.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'Github@12'}));
 
     // Add $external no-op user to verify that it does not affect
     // authSchemaUpgrade SERVER-18475
-    adminDB.getSiblingDB('$external').createUser({user: "evil", roles: []});
+    adminDB.getSiblingDB('$external').createUser({user: "evil", roles: [], "passwordDigestor" : "server"});
 
     jsTest.log("Verifying user documents before upgrading");
 
@@ -25,7 +25,7 @@ var setupCRUsers = function(conn) {
     verifyUserDoc(adminDB, 'user2', true, false);
     verifyUserDoc(adminDB.getSiblingDB('$external'), "evil", false, false, true);
 
-    adminDB.updateUser('user1', {pwd: 'newpass', roles: jsTest.adminUserRoles});
+    adminDB.updateUser('user1', {pwd: 'newpass', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     verifyAuth(adminDB, 'user1', 'newpass', true, true);
 
     verifyUserDoc(adminDB, 'user1', true, false);

@@ -43,6 +43,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/db/initialize_server_global_state.h"
 
 namespace mongo {
 
@@ -175,7 +176,7 @@ Status createProfileCollection(OperationContext* txn, Database* db) {
 
     CollectionOptions collectionOptions;
     collectionOptions.capped = true;
-    collectionOptions.cappedSize = 1024 * 1024;
+    collectionOptions.cappedSize = ((long long)serverGlobalParams.profileSizeMB) * 1024 * 1024;
 
     WriteUnitOfWork wunit(txn);
     bool shouldReplicateWrites = txn->writesAreReplicated();

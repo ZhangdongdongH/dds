@@ -66,4 +66,7 @@ Status storeServerOptions(const moe::Environment& params, const std::vector<std:
 
 void printCommandLineOpts();
 
+bool parseAuditOpFilter(const std::string& filterStr, int& filter);
+
+
 }  // namespace mongo

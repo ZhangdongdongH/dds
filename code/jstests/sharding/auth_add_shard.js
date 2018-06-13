@@ -11,7 +11,7 @@
     }
 
     // admin user object
-    var adminUser = {db: "admin", username: "foo", password: "bar"};
+    var adminUser = {db: "admin", username: "foo", password: "Github@12"};
 
     // set up a 2 shard cluster with keyfile
     var st = new ShardingTest({shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});
@@ -26,7 +26,7 @@
     mongos.getDB(adminUser.db).createUser({
         user: adminUser.username,
         pwd: adminUser.password,
-        roles: jsTest.adminUserRoles
+        roles: jsTest.adminUserRoles, "passwordDigestor" : "server"
     });
 
     // login as admin user

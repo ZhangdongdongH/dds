@@ -18,8 +18,8 @@ function lastOp() {
 try {
     username = 'jstests_evalb_user';
     db.dropUser(username);
-    db.createUser({user: username, pwd: 'password', roles: jsTest.basicUserRoles});
-    db.auth(username, 'password');
+    db.createUser({user: username, pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+    db.auth(username, 'Github@12');
 
     t = db.evalb;
     t.drop();

@@ -6,68 +6,68 @@
 function runTest(conn) {
     var db = conn.getDB('test');
     var admin = conn.getDB('admin');
-    admin.createUser({user: 'userAdmin', pwd: 'pwd', roles: ['userAdminAnyDatabase']});
-    admin.auth('userAdmin', 'pwd');
+    admin.createUser({user: 'userAdmin', pwd: 'Github@12', roles: ['userAdminAnyDatabase'], "passwordDigestor" : "server"});
+    admin.auth('userAdmin', 'Github@12');
 
     (function testCreateUser() {
         jsTestLog("Testing createUser");
 
-        db.createUser({user: 'user1', pwd: 'pwd', roles: []});
+        db.createUser({user: 'user1', pwd: 'Github@12', roles: [], "passwordDigestor" : "server"});
 
         // Try to create duplicate user
         assert.throws(function() {
-            db.createUser({user: 'user1', pwd: 'pwd', roles: ['read']});
+            db.createUser({user: 'user1', pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
         });
         assert.eq(0, db.getUser('user1').roles.length);
 
         // Try to create user with role that doesn't exist
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: ['fakeRole']});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: ['fakeRole'], "passwordDigestor" : "server"});
         });
 
         // Try to create user with invalid arguments
         assert.throws(function() {
-            db.createUser({user: '', pwd: 'pwd', roles: ['read']});
+            db.createUser({user: '', pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: ['user2'], pwd: 'pwd', roles: ['read']});
+            db.createUser({user: ['user2'], pwd: 'Github@12', roles: ['read'], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: '', roles: ['read']});
+            db.createUser({user: 'user2', pwd: '', roles: ['read'], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: ['pwd'], roles: ['read']});
+            db.createUser({user: 'user2', pwd: ['Github@12'], roles: ['read'], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: ['']});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [''], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [{}]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [{}], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [1]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [1], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [{role: 'read'}]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [{role: 'read'}], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [{db: 'test'}]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [{db: 'test'}], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [{role: 'read', db: ''}]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [{role: 'read', db: ''}], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'user2', pwd: 'pwd', roles: [{role: '', db: 'test'}]});
+            db.createUser({user: 'user2', pwd: 'Github@12', roles: [{role: '', db: 'test'}], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'null\u0000char', pwd: 'pwd', roles: []});
+            db.createUser({user: 'null\u0000char', pwd: 'Github@12', roles: [], "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.createUser({user: 'null\0char', pwd: 'pwd', roles: []});
+            db.createUser({user: 'null\0char', pwd: 'Github@12', roles: [], "passwordDigestor" : "server"});
         });
         // Regression test for SERVER-17125
         assert.throws(function() {
-            db.getSiblingDB('$external').createUser({user: '', roles: []});
+            db.getSiblingDB('$external').createUser({user: '', roles: [], "passwordDigestor" : "server"});
         });
 
         assert.eq(1, db.getUsers().length);
@@ -93,13 +93,13 @@ function runTest(conn) {
 
         // Try to update user with invalid password
         assert.throws(function() {
-            db.updateUser('user1', {pwd: ''});
+            db.updateUser('user1', {pwd: '', "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.updateUser('user1', {pwd: 5});
+            db.updateUser('user1', {pwd: 5, "passwordDigestor" : "server"});
         });
         assert.throws(function() {
-            db.updateUser('user1', {pwd: ['a']});
+            db.updateUser('user1', {pwd: ['a'], "passwordDigestor" : "server"});
         });
 
         // Try to update user with invalid customData
@@ -186,7 +186,7 @@ function runTest(conn) {
         assert.eq(0, db.getUser('user1').roles.length);
         assert.eq(null, db.getUser('user1').customData);
         // Make sure password didn't change
-        assert(new Mongo(db.getMongo().host).getDB(db.getName()).auth('user1', 'pwd'));
+        assert(new Mongo(db.getMongo().host).getDB(db.getName()).auth('user1', 'Github@12'));
     })();
 
     (function testRevokeRolesFromUser() {

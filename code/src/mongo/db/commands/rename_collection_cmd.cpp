@@ -132,6 +132,13 @@ public:
             return false;
         }
 
+        if (source == "admin.system.users" ||
+            target == "admin.system.users") {
+            errmsg = "It is not allowed to rename admin.system.users";
+            return false;
+        }
+
+
         if (NamespaceString(source).coll() == "system.indexes" ||
             NamespaceString(target).coll() == "system.indexes") {
             errmsg = "renaming system.indexes is not allowed";

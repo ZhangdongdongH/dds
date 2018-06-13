@@ -40,6 +40,7 @@
 #include "mongo/config.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/counters.h"
+#include "mongo/db/server_options.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/util/assert_util.h"
@@ -78,6 +79,7 @@ TransportLayerLegacy::TransportLayerLegacy(const TransportLayerLegacy::Options& 
 
 std::shared_ptr<TransportLayerLegacy::LegacySession> TransportLayerLegacy::LegacySession::create(
     std::unique_ptr<AbstractMessagingPort> amp, TransportLayerLegacy* tl) {
+
     std::shared_ptr<LegacySession> handle(new LegacySession(std::move(amp), tl));
     return handle;
 }
@@ -88,7 +90,11 @@ TransportLayerLegacy::LegacySession::LegacySession(std::unique_ptr<AbstractMessa
       _local(amp->localAddr().toString(true)),
       _tl(tl),
       _tags(kEmptyTagMask),
-      _connection(stdx::make_unique<Connection>(std::move(amp))) {}
+      _customerConnection(amp->isCustomerConnection()),
+      _fromPublicIp(amp->isFromPublicIp()),
+      _fromPrivateIp(amp->isFromPrivateIp1()),
+      _connection(stdx::make_unique<Connection>(std::move(amp)))
+      {}
 
 TransportLayerLegacy::LegacySession::~LegacySession() {
     _tl->_destroy(*this);
@@ -234,7 +240,12 @@ void TransportLayerLegacy::_closeConnection(Connection* conn) {
 
     conn->closed = true;
     conn->amp->shutdown();
-    Listener::globalTicketHolder.release();
+
+    if (conn->amp->inAdminWhiteList()) {
+        Listener::internalTicketHolder.release();
+    } else {
+        Listener::globalTicketHolder.release();
+    }
 }
 
 // Capture all of the weak pointers behind the lock, to delay their expiry until we leave the
@@ -333,11 +344,34 @@ Status TransportLayerLegacy::_runTicket(Ticket ticket) {
 }
 
 void TransportLayerLegacy::_handleNewConnection(std::unique_ptr<AbstractMessagingPort> amp) {
-    if (!Listener::globalTicketHolder.tryAcquire()) {
+
+    if (serverGlobalParams.adminWhiteList.include(amp->remote().host())
+        ||serverGlobalParams.adminWhiteList.include(amp->local().host())) {
+        amp->setInAdminWhiteList();
+    }
+
+    if(serverGlobalParams.externalConfig.getPublicIpPrivateIpRange().isPublicIp(amp->remote().host())) {
+        amp->setPublicIp();
+    }
+
+    if(serverGlobalParams.externalConfig.getPrivateIpPrivateIpRange().isPrivateIp(amp->remote().host())) {
+        amp->setPrivateIp1();
+    }
+
+    if (!amp->inAdminWhiteList()) {
+        if (!Listener::globalTicketHolder.tryAcquire()) {
         log() << "connection refused because too many open connections: "
               << Listener::globalTicketHolder.used();
-        amp->shutdown();
-        return;
+            amp->shutdown();
+            return;
+        }
+    } else{
+        if (!Listener::internalTicketHolder.tryAcquire()) {
+            log() << "connection refused because too many open internal connections: "
+                  << Listener::internalTicketHolder.used();
+            amp->shutdown();
+            return;
+        }
     }
 
     amp->setLogLevel(logger::LogSeverity::Debug(1));

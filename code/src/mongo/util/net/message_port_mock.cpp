@@ -80,6 +80,10 @@ SockAddr MessagingPortMock::localAddr() const {
     return SockAddr{};
 }
 
+HostAndPort MessagingPortMock::local() const {
+    return _local;
+}
+
 bool MessagingPortMock::isStillConnected() const {
     return true;
 }

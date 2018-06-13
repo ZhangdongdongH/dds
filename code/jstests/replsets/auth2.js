@@ -45,7 +45,7 @@
     var master = replSetTest.getPrimary();
 
     print("add an admin user");
-    master.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles},
+    master.getDB("admin").createUser({user: "foo", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
                                      {w: 3, wtimeout: 30000});
     var m = replSetTest.nodes[0];
 
@@ -56,8 +56,8 @@
     replSetTest.restart(2, {"keyFile": key1});
 
     // auth to all nodes with auth
-    replSetTest.nodes[1].getDB("admin").auth("foo", "bar");
-    replSetTest.nodes[2].getDB("admin").auth("foo", "bar");
+    replSetTest.nodes[1].getDB("admin").auth("foo", "Github@12");
+    replSetTest.nodes[2].getDB("admin").auth("foo", "Github@12");
     testInvalidAuthStates(replSetTest);
 
     print("restart mongod with bad keyFile");
@@ -66,9 +66,9 @@
     m = replSetTest.restart(0, {"keyFile": key2});
 
     // auth to all nodes
-    replSetTest.nodes[0].getDB("admin").auth("foo", "bar");
-    replSetTest.nodes[1].getDB("admin").auth("foo", "bar");
-    replSetTest.nodes[2].getDB("admin").auth("foo", "bar");
+    replSetTest.nodes[0].getDB("admin").auth("foo", "Github@12");
+    replSetTest.nodes[1].getDB("admin").auth("foo", "Github@12");
+    replSetTest.nodes[2].getDB("admin").auth("foo", "Github@12");
     testInvalidAuthStates(replSetTest);
 
     replSetTest.stop(0);

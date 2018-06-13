@@ -80,6 +80,9 @@
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/client.h"
+
 
 namespace mongo {
 
@@ -97,8 +100,8 @@ using str::stream;
 namespace {
 
 const ReadPreferenceSetting kConfigReadSelector(ReadPreference::Nearest, TagSet{});
-const ReadPreferenceSetting kConfigPrimaryPreferredSelector(ReadPreference::PrimaryPreferred,
-                                                            TagSet{});
+const ReadPreferenceSetting kConfigPrimaryPreferredSelector(ReadPreference::PrimaryPreferred, TagSet{});
+const ReadPreferenceSetting kCustomerConfigPrimaryPreferredSelector(ReadPreference::PrimaryPreferred, TagSet{}, true);
 const int kMaxReadRetry = 3;
 const int kMaxWriteRetry = 3;
 
@@ -1335,10 +1338,14 @@ bool ShardingCatalogClientImpl::runUserManagementWriteCommand(OperationContext* 
         cmdToRun = modifiedCmd.obj();
     }
 
+    auto readPreferenceSetting = ReadPreferenceSetting{ReadPreference::PrimaryOnly};
+    if(AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
+        readPreferenceSetting.customerMeta = true;
+    }
     auto response =
         Grid::get(txn)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             txn,
-            ReadPreferenceSetting{ReadPreference::PrimaryOnly},
+            readPreferenceSetting,
             dbname,
             cmdToRun,
             Shard::kDefaultConfigCommandTimeout,
@@ -1385,6 +1392,27 @@ bool ShardingCatalogClientImpl::runUserManagementReadCommand(OperationContext* t
         Grid::get(txn)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
             txn,
             kConfigPrimaryPreferredSelector,
+            dbname,
+            cmdObj,
+            Shard::kDefaultConfigCommandTimeout,
+            Shard::RetryPolicy::kIdempotent);
+    if (resultStatus.isOK()) {
+        result->appendElements(resultStatus.getValue().response);
+        return resultStatus.getValue().commandStatus.isOK();
+    }
+
+    return Command::appendCommandStatus(*result, resultStatus.getStatus());
+}
+
+bool ShardingCatalogClientImpl::runUserManagementReadCommandWithCheckTxn(OperationContext* txn,
+                                                            const std::string& dbname,
+                                                            const BSONObj& cmdObj,
+                                                            BSONObjBuilder* result) {
+    bool isCustomerCmd = AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser();
+    auto resultStatus =
+        Grid::get(txn)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+            txn,
+            isCustomerCmd?kCustomerConfigPrimaryPreferredSelector:kConfigPrimaryPreferredSelector,
             dbname,
             cmdObj,
             Shard::kDefaultConfigCommandTimeout,

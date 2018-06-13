@@ -103,9 +103,15 @@ public:
     MatchExpression* root() const {
         return _root.get();
     }
+    
     BSONObj getQueryObj() const {
         return _qr->getFilter();
     }
+
+    void setQueryObj(BSONObj filter) {
+        _qr->setFilter(filter);
+    }
+    
     const QueryRequest& getQueryRequest() const {
         return *_qr;
     }

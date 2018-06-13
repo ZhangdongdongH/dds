@@ -40,6 +40,9 @@
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/util/timer.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/client.h"
+#include "mongo/db/auth/authorization_session.h"
 
 namespace mongo {
 namespace {
@@ -94,7 +97,50 @@ public:
 
         BSONObjBuilder countCmdBuilder;
         countCmdBuilder.append("count", nss.coll());
+        
+        if (AuthorizationSession::get(opCtx->getClient())->isAuthWithCustomerOrNoAuthUser()) {
+            bool flag = false;
+            BSONObj buildinfilter;
+            if (nss.ns() == "admin.system.users") {
+                std::set<std::string> buildinUsers;
+                UserName::getBuildinUsers(buildinUsers); 
 
+                BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+            if (nss.ns() == "admin.system.roles" ) {
+                std::set<std::string> buildinRoles;
+                RoleName::getBuildinRoles(buildinRoles); 
+                BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+
+            if(flag) {
+                std::string filterName = "filter";
+                BSONElement filterField = cmdObj[filterName];
+                BSONObj newFilter;
+                if (filterField.isABSONObj()) {
+                    BSONObj filter = filterField.embeddedObject();
+                    newFilter = BSON("$and" << BSON_ARRAY(filter << buildinfilter));
+                } else {
+                    newFilter = buildinfilter;
+                }
+
+                BSONObjBuilder nb(64);
+                nb.append(filterName, newFilter);
+                BSONForEach( e, cmdObj ) {
+                    if (!str::equals(filterName.c_str() , e.fieldName())) {
+                        nb.append(e);
+                    }
+                }
+                cmdObj = nb.obj();
+            }
+        }
+        
         BSONObj filter;
         if (cmdObj["query"].isABSONObj()) {
             countCmdBuilder.append("query", cmdObj["query"].Obj());

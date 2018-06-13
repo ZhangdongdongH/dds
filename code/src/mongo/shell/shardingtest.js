@@ -12,6 +12,7 @@
  *     name {string}: name for this test
  *     verbose {number}: the verbosity for the mongos
  *     chunkSize {number}: the chunk size to use as configuration for the cluster
+ *     adminWhiteListPath {string}: the location of the adminWhiteListPath
  *     nopreallocj {boolean|number}:
  *
  *     mongos {number|Object|Array.<Object>}: number of mongos or mongos
@@ -1018,6 +1019,7 @@ var ShardingTest = function(params) {
     }
 
     var keyFile = otherParams.keyFile;
+    var adminWhiteListPath = otherParams.adminWhiteListPath || otherParams.extraOptions.adminWhiteListPath;
     var hostName = getHostName();
 
     this._testName = testName;
@@ -1074,6 +1076,7 @@ var ShardingTest = function(params) {
                 useBridge: otherParams.useBridge,
                 bridgeOptions: otherParams.bridgeOptions,
                 keyFile: keyFile,
+                adminWhiteListPath: adminWhiteListPath,
                 protocolVersion: protocolVersion,
                 settings: rsSettings
             });
@@ -1102,6 +1105,7 @@ var ShardingTest = function(params) {
                 pathOpts: Object.merge(pathOpts, {shard: i}),
                 dbpath: "$testName$shard",
                 shardsvr: '',
+		adminWhiteListPath: adminWhiteListPath,
                 keyFile: keyFile
             };
 
@@ -1197,6 +1201,7 @@ var ShardingTest = function(params) {
         useBridge: otherParams.useBridge,
         bridgeOptions: otherParams.bridgeOptions,
         keyFile: keyFile,
+        adminWhiteListPath: adminWhiteListPath,
         name: testName + "-configRS",
     };
 
@@ -1251,6 +1256,7 @@ var ShardingTest = function(params) {
             pathOpts: Object.merge(pathOpts, {mongos: i}),
             verbose: mongosVerboseLevel,
             keyFile: keyFile,
+            adminWhiteListPath: adminWhiteListPath,
         };
 
         if (otherParams.mongosOptions && otherParams.mongosOptions.binVersion) {

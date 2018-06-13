@@ -222,6 +222,202 @@ BSONObj Command::getRedactedCopyForLogging(const BSONObj& cmdObj) {
     return bob.obj();
 }
 
+
+/*****modify mongodb code start*****/
+
+namespace {
+const std::string CUSTOM_USER = "rwuser@admin";
+}  // namespace
+
+
+/*check if allow commands against admin/config database*/
+static bool _checkIfAllowedCommands(const std::string& cmdname) {
+
+    static std::string allowedCommands = "\
+,isMaster\
+,listCollections\
+,getLastError\
+,resetError\
+,logout\
+,updateUser\
+,authenticate\
+,saslStart\
+,saslContinue\
+,buildInfo\
+,serverStatus\
+,listDatabases\
+,ping\
+,";
+        
+    if (allowedCommands.find(","+cmdname+",") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+bool Command::_checkIfDisableCommands(const std::string& cmdname) {
+    // below cmds is hw contains, the 
+    // applyOps, flushRouterConfig, flushrouterconfig, addShard, addshard, cleanupOrphaned
+    // checkShardingIndex, listShards, listshards, removeShard, removeshard, getShardMap
+    // setShardVersion, shardingState, unsetSharding, dbHash, dbhash
+    // 
+    // below cmds is hw do not contains
+    // setReadOnly
+    static std::string disableCommands = "\
+,authSchemaUpgrade\
+,replSetElect\
+,replSetUpdatePosition\
+,appendOplogNote\
+,replSetFreeze\
+,replSetInitiate\
+,replSetMaintenance\
+,replSetReconfig\
+,replSetStepDown\
+,replSetSyncFrom\
+,replSetRequestVotes\
+,resync\
+,applyOps\
+,replSetGetConfig\
+,flushRouterConfig\
+,flushrouterconfig\
+,addShard\
+,addshard\
+,cleanupOrphaned\
+,checkShardingIndex\
+,listShards\
+,listshards\
+,removeShard\
+,removeshard\
+,getShardMap\
+,setShardVersion\
+,shardingState\
+,unsetSharding\
+,copydb\
+,clone\
+,clean\
+,connPoolSync\
+,compact\
+,setParameter\
+,repairDatabase\
+,repairCursor\
+,shutdown\
+,logRotate\
+,connPoolStats\
+,dbHash\
+,dbhash\
+,diagLogging\
+,driverOIDTest\
+,getCmdLineOpts\
+,getLog\
+,hostInfo\
+,_isSelf\
+,netstat\
+,profile\
+,shardConnPoolStats\
+,validate\
+,handshake\
+,_recvChunkAbort\
+,_recvChunkCommit\
+,_recvChunkStart\
+,_recvChunkStatus\
+,replSetFresh\
+,mapreduce.shardedfinish\
+,_transferMods\
+,replSetHeartbeat\
+,replSetGetRBID\
+,_migrateClone\
+,writeBacksQueued\
+,_getUserCacheGeneration\
+,";
+        
+    if (disableCommands.find(","+cmdname+",") != std::string::npos) {
+        return true;
+    }
+    return false;
+}
+
+static bool _isDisabledCommandsAndPameterForCustomer(Command* c, const std::string& cmdname, 
+    const std::string& dbname, const BSONObj& cmdObj) {
+
+   if(cmdname == "dropDatabase" || cmdname == "createIndexes" || cmdname == "dropIndexes") {
+        if(dbname == "admin") {
+            return true;
+        } 
+        return false;
+    }
+   
+   if(cmdname == "findAndModify" || cmdname == "findandmodify"
+       || cmdname == "group"
+       || cmdname == "mapreduce" || cmdname == "mapReduce"
+       || cmdname == "aggregate"
+       ) {
+        const std::string fullNs = c->parseNs(dbname, cmdObj);
+        if (fullNs == "admin.system.users" || fullNs == "admin.system.roles") {
+          return true;
+        }
+        return false;
+    }
+   
+  
+    return false;
+}
+
+static Status _checkAuthForUser(Command* c,
+        Client* client,
+        const std::string& dbname,
+        const BSONObj& cmdObj) {
+
+    // because user may connect with inner network because some case in our clould instance,
+    // add temp fix that : when user is auth, do not check the connection way.
+    // TODO: when our cloud instance is fix, need fix this back.
+    if (AuthorizationSession::get(client)->isAuthWithCustomer()
+        || (client->isCustomerConnection() && AuthorizationSession::get(client)->isAuthWithCustomerOrNoAuthUser())) { //check if consumer
+    
+        std::string cmdname = c->getName();
+        LOG(4) << "Mongodb consumer run command " << dbname << ".$cmd" << ' '
+            << cmdname;
+
+        if (Command::_checkIfDisableCommands(cmdname)) {
+            return Status(ErrorCodes::CommandNotFound, "no this command " + cmdname);
+        }
+
+        if (_checkIfAllowedCommands(cmdname)) { //check if allowed commands
+            LOG(4) << "Allow Mongodb consumer run command " << cmdname << "against the "
+                << dbname << " database.";
+        } else if (_isDisabledCommandsAndPameterForCustomer(c, cmdname, dbname, cmdObj)) {
+            return Status(ErrorCodes::Unauthorized, "unauthorized");
+        }
+                    /*
+            // forbid consumer run command upon admin database except adminonly commands
+            if (dbname == "admin" && !(c->adminOnly())) {
+                return Status(ErrorCodes::Unauthorized, "unauthorized");
+            }
+
+            // forbid consumer run command upon config database directly or undirectly
+            std::string ns = c->parseNs(dbname, cmdObj);
+            if (dbname == "config" ) {
+                if(!(cmdname == "find") &&
+                        !(cmdname == "aggregate") &&
+                        !(cmdname == "update" && (ns.find("config.tags",0) == 0 || ns.find("config.shards",0) == 0))&&
+                        !(cmdname == "remove" && ns.find("config.tags",0) == 0)) {					
+                    return Status(ErrorCodes::Unauthorized, "unauthorized");
+                }
+            }
+
+            // forbid consumer run command upon local database directly or undirectly
+            if (dbname == "local" 
+                || (dbname == "admin" && ns.find("admin.local.", 0) == 0)
+                || (dbname == "admin" && ns.find("admin.config.", 0) == 0)) {
+                return Status(ErrorCodes::Unauthorized, "unauthorized");
+            }
+            */
+    }
+
+    return Status::OK();
+}
+
+
+
 static Status _checkAuthorizationImpl(Command* c,
                                       OperationContext* txn,
                                       const std::string& dbname,
@@ -245,6 +441,19 @@ static Status _checkAuthorizationImpl(Command* c,
         if (!status.isOK()) {
             return status;
         }
+
+        status = _checkAuthForUser(c, client, dbname, cmdObj);
+        if (!status.isOK()) {
+            mmb::Document cmdToLog(cmdObj, mmb::Document::kInPlaceDisabled);
+            c->redactForLogging(&cmdToLog);
+
+            if (status == ErrorCodes::CommandNotFound) {
+                return Status(ErrorCodes::Unauthorized, str::stream() << "no this command" << cmdToLog.toString());
+            } else {
+                return Status(ErrorCodes::Unauthorized, str::stream() << "not  authorized on " << dbname << " to execute command " << cmdToLog.toString());
+            }
+        }
+
     } else if (c->adminOnly() && c->localHostOnlyIfNoAuth(cmdObj) &&
                !client->getIsLocalHostConnection()) {
         return Status(ErrorCodes::Unauthorized,
@@ -253,6 +462,9 @@ static Status _checkAuthorizationImpl(Command* c,
     }
     return Status::OK();
 }
+
+/*****modify mongodb code end*****/
+
 
 Status Command::checkAuthorization(Command* c,
                                    OperationContext* txn,

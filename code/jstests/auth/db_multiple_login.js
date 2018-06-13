@@ -7,10 +7,10 @@ var conn = MongoRunner.runMongod({auth: "", smallfiles: ""});
 var admin = conn.getDB("admin");
 var test = conn.getDB("test");
 
-admin.createUser({user: 'admin', pwd: 'a', roles: jsTest.adminUserRoles});
-assert(admin.auth('admin', 'a'));
-test.createUser({user: 'reader', pwd: 'a', roles: ["read"]});
-test.createUser({user: 'writer', pwd: 'a', roles: ["readWrite"]});
+admin.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+assert(admin.auth('admin', 'Github@12'));
+test.createUser({user: 'reader', pwd: 'Github@12', roles: ["read"], "passwordDigestor" : "server"});
+test.createUser({user: 'writer', pwd: 'Github@12', roles: ["readWrite"], "passwordDigestor" : "server"});
 admin.logout();
 
 // Nothing logged in, can neither read nor write.
@@ -20,11 +20,11 @@ assert.throws(function() {
 });
 
 // Writer logged in, can read and write.
-test.auth('writer', 'a');
+test.auth('writer', 'Github@12');
 assert.writeOK(test.docs.insert({value: 1}));
 test.foo.findOne();
 
 // Reader logged in, replacing writer, can only read.
-test.auth('reader', 'a');
+test.auth('reader', 'Github@12');
 assert.writeError(test.docs.insert({value: 2}));
 test.foo.findOne();

@@ -31,6 +31,8 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/util/net/listen.h"  // For DEFAULT_MAX_CONN
+#include "mongo/util/net/whitelist.h"
+#include "mongo/util/net/externalconfig.h"
 
 namespace mongo {
 
@@ -64,6 +66,7 @@ struct ServerGlobalParams {
 
     int defaultProfile = 0;                // --profile
     int slowMS = 100;                      // --time in ms that is "slow"
+    int profileSizeMB = 1;                // --the maxsize of system.profile collection 
     int defaultLocalThresholdMillis = 15;  // --localThreshold in ms to consider a node local
     bool moveParanoia = false;             // for move chunk paranoia
 
@@ -72,6 +75,7 @@ struct ServerGlobalParams {
     std::string socket = "/tmp";  // UNIX domain socket directory
 
     int maxConns = DEFAULT_MAX_CONN;  // Maximum number of simultaneous open connections.
+    int maxInternalConns = DEFAULT_MAX_CONN_INTERNAL;  //Maximum number of simultaneous open internal connections.
 
     int unixSocketPermissions = DEFAULT_UNIX_PERMS;  // permissions for the UNIX domain socket
 
@@ -85,6 +89,12 @@ struct ServerGlobalParams {
     int syslogFacility;             // Facility used when appending messages to the syslog.
 
     bool isHttpInterfaceEnabled = false;  // True if the dbwebserver should be enabled.
+    bool limitVerifyTimes = true;
+    std::string auditLogpath;// Path to audit log file, if logging to a file; otherwise, empty.
+    std::string auditLogFormat = "JSON";  // Format of audit log
+    std::string auditOpFilterStr; // Filter ops that need to be audited, string format.
+    int  auditOpFilter = 0xFFFFFFFF;      // Bitwise or result of ops that need to be audited, parsed from auditOpFilterStr.
+    bool auditAuthSuccess = true;   // True if audit authorization success requests.
 
 #ifndef _WIN32
     ProcessId parentProc;  // --fork pid of initial process
@@ -164,6 +174,14 @@ struct ServerGlobalParams {
         // "3.2" feature compatibility mode.
         AtomicWord<bool> validateFeaturesAsMaster{true};
     } featureCompatibility;
+	
+    /**
+    * host  in adminWhiteList manage and monitor mongodb instances
+    * It's not limited by 'maxIncomingConnections'
+    */
+    WhiteList adminWhiteList;
+
+    ExternalConfig externalConfig;
 };
 
 extern ServerGlobalParams serverGlobalParams;

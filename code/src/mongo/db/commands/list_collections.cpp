@@ -56,6 +56,7 @@
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/views/view_catalog.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 
@@ -119,7 +120,8 @@ void _addWorkingSetMember(OperationContext* txn,
     if (matcher && !matcher->matchesBSON(maybe)) {
         return;
     }
-
+    
+	
     WorkingSetID id = ws->allocate();
     WorkingSetMember* member = ws->get(id);
     member->keyData.clear();
@@ -260,6 +262,15 @@ public:
                 for (auto&& collName : *collNames) {
                     auto nss = NamespaceString(db->name(), collName);
                     Collection* collection = db->getCollection(nss);
+                    // because user may connect with inner network because some case in our clould instance,
+                    // add temp fix that : when user is auth, do not check the connection way.
+                    // TODO: when our cloud instance is fix, need fix this back.
+                    if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()
+                                || (txn->getClient()->isCustomerConnection() 
+                                    && AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()))
+                            && AuthorizationManager::isReservedCollectionForCustomer(nss.toString())) {
+                        continue;
+                    }
                     BSONObj collBson = buildCollectionBson(txn, collection);
                     if (!collBson.isEmpty()) {
                         _addWorkingSetMember(txn, collBson, matcher.get(), ws.get(), root.get());
@@ -267,6 +278,16 @@ public:
                 }
             } else {
                 for (auto&& collection : *db) {
+                    // because user may connect with inner network because some case in our clould instance,
+                    // add temp fix that : when user is auth, do not check the connection way.
+                    // TODO: when our cloud instance is fix, need fix this back.
+                    if(collection) {
+                        if ((AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()
+                                    || (txn->getClient()->isCustomerConnection() && AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()))
+                                && AuthorizationManager::isReservedCollectionForCustomer(collection->ns().toString())) {
+                            continue;
+                        }
+                    }
                     BSONObj collBson = buildCollectionBson(txn, collection);
                     if (!collBson.isEmpty()) {
                         _addWorkingSetMember(txn, collBson, matcher.get(), ws.get(), root.get());
@@ -275,6 +296,7 @@ public:
             }
 
             // Skipping views is only necessary for internal cloning operations.
+            // 
             bool skipViews = filterElt.type() == mongo::Object &&
                 SimpleBSONObjComparator::kInstance.evaluate(
                     filterElt.Obj() == ListCollectionsFilter::makeTypeCollectionFilter());

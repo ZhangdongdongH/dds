@@ -78,8 +78,9 @@ MONGO_FP_DECLARE(checkForInterruptFail);
 OperationContext::OperationContext(Client* client, unsigned int opId)
     : _client(client),
       _opId(opId),
-      _elapsedTime(client ? client->getServiceContext()->getTickSource()
-                          : SystemTickSource::get()) {}
+      _elapsedTime(client ? client->getServiceContext()->getTickSource() : SystemTickSource::get()), 
+      _buildInMode(false), 
+      _isCustomerTxn(false){}
 
 void OperationContext::setDeadlineAndMaxTime(Date_t when, Microseconds maxTime) {
     invariant(!getClient()->isInDirectClient());

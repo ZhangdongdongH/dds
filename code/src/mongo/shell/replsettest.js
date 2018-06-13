@@ -47,6 +47,7 @@
  *     useSeedList {boolean}: Use the connection string format of this set
  *        as the replica set name (overrides the name property). Default: false
  *     keyFile {string}
+ *     adminWhiteListPath {string}
  *     protocolVersion {number}: protocol version of replset used by the replset initiation.
  *
  *     useBridge {boolean}: If true, then a mongobridge process is started for each node in the
@@ -1576,6 +1577,7 @@ var ReplSetTest = function(opts) {
             useHostName: this.useHostName,
             oplogSize: this.oplogSize,
             keyFile: this.keyFile,
+            adminWhiteListPath: this.adminWhiteListPath,
             port: _useBridge ? _unbridgedPorts[n] : this.ports[n],
             noprealloc: "",
             smallfiles: "",
@@ -1834,6 +1836,7 @@ var ReplSetTest = function(opts) {
         self.oplogSize = opts.oplogSize || 40;
         self.useSeedList = opts.useSeedList || false;
         self.keyFile = opts.keyFile;
+        self.adminWhiteListPath = opts.adminWhiteListPath;
         self.protocolVersion = opts.protocolVersion;
 
         _useBridge = opts.useBridge || false;

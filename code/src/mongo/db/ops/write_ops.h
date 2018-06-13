@@ -46,6 +46,7 @@ struct ParsedWriteOp {
     NamespaceString ns;
     bool bypassDocumentValidation = false;
     bool continueOnError = false;
+    bool usermanagerCmd = false;
 };
 
 /**

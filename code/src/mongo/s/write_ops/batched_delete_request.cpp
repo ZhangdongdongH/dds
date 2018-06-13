@@ -43,6 +43,7 @@ const BSONField<std::string> BatchedDeleteRequest::collName("delete");
 const BSONField<std::vector<BatchedDeleteDocument*>> BatchedDeleteRequest::deletes("deletes");
 const BSONField<BSONObj> BatchedDeleteRequest::writeConcern("writeConcern");
 const BSONField<bool> BatchedDeleteRequest::ordered("ordered", true);
+const std::string BatchedDeleteRequest::DELETE_IS_CMD_FROM_USER_MANAGER_KEY = "deleteCmdFromUserManager";
 
 BatchedDeleteRequest::BatchedDeleteRequest() {
     clear();
@@ -94,6 +95,9 @@ BSONObj BatchedDeleteRequest::toBSON() const {
 
     if (_isOrderedSet)
         builder.append(ordered(), _ordered);
+    
+    if (_isCmdFromUserManager)
+        builder.append(DELETE_IS_CMD_FROM_USER_MANAGER_KEY, true);
 
     return builder.obj();
 }
@@ -130,6 +134,8 @@ bool BatchedDeleteRequest::parseBSON(StringData dbName, const BSONObj& source, s
             if (fieldState == FieldParser::FIELD_INVALID)
                 return false;
             _isOrderedSet = fieldState == FieldParser::FIELD_SET;
+        } else if (fieldName == DELETE_IS_CMD_FROM_USER_MANAGER_KEY) {
+            _isCmdFromUserManager = field.trueValue();
         } else if (fieldName[0] != '$') {
             std::initializer_list<StringData> ignoredFields = {"maxTimeMS", "shardVersion"};
             if (std::find(ignoredFields.begin(), ignoredFields.end(), fieldName) ==
@@ -154,6 +160,8 @@ void BatchedDeleteRequest::clear() {
 
     _ordered = false;
     _isOrderedSet = false;
+
+    _isCmdFromUserManager = false;
 }
 
 void BatchedDeleteRequest::cloneTo(BatchedDeleteRequest* other) const {
@@ -176,6 +184,7 @@ void BatchedDeleteRequest::cloneTo(BatchedDeleteRequest* other) const {
 
     other->_ordered = _ordered;
     other->_isOrderedSet = _isOrderedSet;
+    other->_isCmdFromUserManager = _isCmdFromUserManager;
 }
 
 std::string BatchedDeleteRequest::toString() const {

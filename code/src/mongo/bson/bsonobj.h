@@ -231,7 +231,10 @@ public:
     std::string jsonString(JsonStringFormat format = Strict,
                            int pretty = 0,
                            bool isArray = false) const;
-
+    void jsonString(std::stringstream& s,
+                    JsonStringFormat format = Strict,
+                    int pretty = 0,
+                    bool isArray = false) const;
     /** note: addFields always adds _id even if not specified */
     int addFields(BSONObj& from, std::set<std::string>& fields); /* returns n added */
 

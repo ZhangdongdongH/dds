@@ -45,6 +45,9 @@
 #include "mongo/db/server_options.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/util/log.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
 
 namespace mongo {
 namespace {
@@ -180,6 +183,28 @@ public:
                        "http://dochub.mongodb.org/core/3.4-feature-compatibility."));
         }
 
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
+
+            if (request.getValue().getNs().ns() == "admin.system.users" ) {
+                std::set<std::string> buildinUsers;
+                UserName::getBuildinUsers(buildinUsers); 
+                BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                BSONObj query = BSON("$and" << BSON_ARRAY(request.getValue().getQuery() << filter));
+                request.getValue().setQuery(query);
+            }
+            if (request.getValue().getNs().ns() == "admin.system.roles" ) {
+                std::set<std::string> buildinRoles;
+                RoleName::getBuildinRoles(buildinRoles); 
+                BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                BSONObj query = BSON("$and" << BSON_ARRAY(request.getValue().getQuery() << filter));
+                request.getValue().setQuery(query);
+            }
+        }
+		
         AutoGetCollectionOrViewForRead ctx(txn, request.getValue().getNs());
         Collection* collection = ctx.getCollection();
 

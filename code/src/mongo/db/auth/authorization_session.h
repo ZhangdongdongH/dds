@@ -276,6 +276,13 @@ public:
     // called.
     bool isImpersonating() const;
 
+    bool isAuthWithBuiltinUser() const;
+    bool isAuthWithCustomerOrNoAuthUser() const;
+    bool isAuthWithCustomer() const;
+    bool isNoAuthUser() const;
+    bool shouldAllowLocalhost() const;
+    
+
 protected:
     // Builds a vector of all roles held by users who are authenticated on this connection. The
     // vector is stored in _authenticatedRoleNames. This function is called when users are

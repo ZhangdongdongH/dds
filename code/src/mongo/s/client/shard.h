@@ -183,7 +183,7 @@ public:
         const std::string& dbName,
         const BSONObj& cmdObj,
         Milliseconds maxTimeMSOverride,
-        RetryPolicy retryPolicy);
+        RetryPolicy retryPolicy);    
 
     /**
      * Expects a single-entry batch wrtie command and runs it on the config server's primary using

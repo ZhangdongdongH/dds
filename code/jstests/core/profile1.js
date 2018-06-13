@@ -29,8 +29,8 @@
     db.dropDatabase();
 
     try {
-        db.createUser({user: username, pwd: "password", roles: jsTest.basicUserRoles});
-        db.auth(username, "password");
+        db.createUser({user: username, pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+        db.auth(username, "Github@12");
 
         // With pre-created system.profile (capped)
         db.runCommand({profile: 0});

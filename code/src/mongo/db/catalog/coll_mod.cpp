@@ -63,8 +63,8 @@ struct CollModRequest {
 StatusWith<CollModRequest> parseCollModRequest(OperationContext* txn,
                                                const NamespaceString& nss,
                                                Collection* coll,
-                                               const BSONObj& cmdObj) {
-
+                                               const BSONObj& cmdObj,
+                                               BSONObjBuilder* result) {
     bool isView = !coll;
 
     CollModRequest cmr;
@@ -191,6 +191,49 @@ StatusWith<CollModRequest> parseCollModRequest(OperationContext* txn,
                 return Status(ErrorCodes::InvalidOptions, "'viewOn' option must be a string");
             }
             cmr.viewOn = e.str();
+        } else if (str::equals("cappedSize", e.fieldName()) ||
+                       str::equals("cappedMaxDocs", e.fieldName())) {
+            if (!e.isNumber()) {
+                return Status(ErrorCodes::InvalidOptions,
+                                     std::string(e.fieldName()) + " field must be a number");
+            }
+
+            const StringData name = e.fieldNameStringData();
+            const long long newVal = e.numberLong();
+
+            CollectionCatalogEntry* cce = coll->getCatalogEntry();
+
+            const CollectionOptions oldOptions = cce->getCollectionOptions(txn);
+            if (!oldOptions.capped) {
+                return Status(ErrorCodes::InvalidOptions,
+                                     "not a capped collection");
+            }
+            if (str::equals("cappedSize", e.fieldName())) {
+                const long long oldCappedSize = oldOptions.cappedSize;
+                const long long newCappedSize = newVal;
+
+                if (coll->getRecordStore()->setCappedSize(newCappedSize)) {
+                    result->appendNumber("cappedSize_old", oldCappedSize);
+                    result->appendNumber("cappedSize_new", newCappedSize);
+                    cce->updateCappedSize(txn, newCappedSize);
+                } else {
+                    return Status(ErrorCodes::InvalidOptions,
+                                         "option CappedSize not support");
+                }
+
+            } else {
+                const long long oldCappedMaxDocs = oldOptions.cappedMaxDocs;
+                const long long newCappedMaxDocs = newVal;
+
+                if (coll->getRecordStore()->setCappedMaxDocs(newCappedMaxDocs)) {
+                    result->appendNumber("cappedMaxDocs_old", oldCappedMaxDocs);
+                    result->appendNumber("cappedMaxDocs_new", newCappedMaxDocs);
+                    cce->updateCappedMaxDocs(txn, newCappedMaxDocs);
+                } else {
+                    return Status(ErrorCodes::InvalidOptions,
+                                         "option cappedMaxDocs not support");
+                }
+            }         
         } else {
             const StringData name = e.fieldNameStringData();
             if (isView) {
@@ -254,14 +297,14 @@ Status collMod(OperationContext* txn,
                                     << nss.ns());
     }
 
-    auto statusW = parseCollModRequest(txn, nss, coll, cmdObj);
+    WriteUnitOfWork wunit(txn);
+
+    auto statusW = parseCollModRequest(txn, nss, coll, cmdObj, result);
     if (!statusW.isOK()) {
         return statusW.getStatus();
     }
 
     CollModRequest cmr = statusW.getValue();
-
-    WriteUnitOfWork wunit(txn);
 
     if (view) {
         if (!cmr.viewPipeLine.eoo())

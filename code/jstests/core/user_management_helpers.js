@@ -15,8 +15,8 @@ function runTest(db) {
     db.dropDatabase();
     db.dropAllUsers();
 
-    db.createUser({user: "spencer", pwd: "password", roles: ['readWrite']});
-    db.createUser({user: "andy", pwd: "password", roles: ['readWrite']});
+    db.createUser({user: "spencer", pwd: "Github@12", roles: ['readWrite'], "passwordDigestor" : "server"});
+    db.createUser({user: "andy", pwd: "Github@12", roles: ['readWrite'], "passwordDigestor" : "server"});
 
     // Test getUser
     var userObj = db.getUser('spencer');
@@ -76,32 +76,32 @@ function runTest(db) {
 
     // Test password digestion
     assert.throws(function() {
-        db.createUser({user: 'user1', pwd: 'x', roles: [], digestPassword: true});
+        db.createUser({user: 'user1', pwd: 'Github@12', roles: [], digestPassword: true});
     });
     assert.throws(function() {
-        db.createUser({user: 'user1', pwd: 'x', roles: [], digestPassword: false});
+        db.createUser({user: 'user1', pwd: 'Github@12', roles: [], digestPassword: false});
     });
     assert.throws(function() {
-        db.createUser({user: 'user1', pwd: 'x', roles: [], passwordDigestor: 'foo'});
+        db.createUser({user: 'user1', pwd: 'Github@12', roles: [], passwordDigestor: 'foo'});
     });
-    db.createUser({user: 'user1', pwd: 'x', roles: [], passwordDigestor: "server"});
-    db.createUser({user: 'user2', pwd: 'x', roles: [], passwordDigestor: "client"});
-    assert(db.auth('user1', 'x'));
-    assert(db.auth('user2', 'x'));
+    db.createUser({user: 'user1', pwd: 'Github@12', roles: [], passwordDigestor: "server"});
+    db.createUser({user: 'user2', pwd: 'Github@12', roles: [], passwordDigestor: "server"});
+    assert(db.auth('user1', 'Github@12'));
+    assert(db.auth('user2', 'Github@12'));
 
     assert.throws(function() {
-        db.updateUser('user1', {pwd: 'y', digestPassword: true});
+        db.updateUser('user1', {pwd: 'aGithub@12', digestPassword: true});
     });
     assert.throws(function() {
-        db.updateUser('user1', {pwd: 'y', digestPassword: false});
+        db.updateUser('user1', {pwd: 'aGithub@12', digestPassword: false});
     });
     assert.throws(function() {
-        db.updateUser('user1', {pwd: 'y', passwordDigestor: 'foo'});
+        db.updateUser('user1', {pwd: 'aGithub@12', passwordDigestor: 'foo'});
     });
-    db.updateUser('user1', {pwd: 'y', passwordDigestor: 'server'});
-    db.updateUser('user2', {pwd: 'y', passwordDigestor: 'client'});
-    assert(db.auth('user1', 'y'));
-    assert(db.auth('user2', 'y'));
+    db.updateUser('user1', {pwd: 'aGithub@12', passwordDigestor: 'server'});
+    db.updateUser('user2', {pwd: 'aGithub@12', passwordDigestor: 'server'});
+    assert(db.auth('user1', 'aGithub@12'));
+    assert(db.auth('user2', 'aGithub@12'));
 }
 
 try {

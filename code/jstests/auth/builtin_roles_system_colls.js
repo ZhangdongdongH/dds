@@ -8,11 +8,11 @@
 // admin.system.roles collections, in order to make querying
 // the users collection easier if you have a lot of users, etc.
 function testUserAdminAnyDatabaseSystemCollIndexing(adminDB) {
-    adminDB.auth("root", "pwd");
-    adminDB.createUser({user: "king", pwd: "pwd", roles: ["userAdminAnyDatabase"]});
+    adminDB.auth("root", "Github@12");
+    adminDB.createUser({user: "king", pwd: "Github@12", roles: ["userAdminAnyDatabase"], "passwordDigestor" : "server"});
     adminDB.logout();
 
-    adminDB.auth("king", "pwd");
+    adminDB.auth("king", "Github@12");
     assert.commandWorked(adminDB.system.users.createIndex({db: 1}));
     assert.commandWorked(adminDB.system.roles.createIndex({db: 1}));
     assert.commandWorked(adminDB.system.users.dropIndex({db: 1}));
@@ -23,8 +23,8 @@ function testUserAdminAnyDatabaseSystemCollIndexing(adminDB) {
 // SERVER-14701: the backup role should be able to run the
 // collstats command on all resouces, including system resources.
 function testBackupSystemCollStats(adminDB) {
-    adminDB.auth("root", "pwd");
-    adminDB.createUser({user: "backup-agent", pwd: "pwd", roles: ["backup"]});
+    adminDB.auth("root", "Github@12");
+    adminDB.createUser({user: "backup-agent", pwd: "Github@12", roles: ["backup"], "passwordDigestor" : "server"});
     adminDB.system.js.save({
         _id: "testFunction",
         value: function(x) {
@@ -33,7 +33,7 @@ function testBackupSystemCollStats(adminDB) {
     });
     adminDB.logout();
 
-    adminDB.auth("backup-agent", "pwd");
+    adminDB.auth("backup-agent", "Github@12");
     assert.commandWorked(adminDB.runCommand({collstats: "system.users"}));
     assert.commandWorked(adminDB.runCommand({collstats: "system.roles"}));
     assert.commandWorked(adminDB.runCommand({collstats: "system.js"}));
@@ -44,7 +44,7 @@ function testBackupSystemCollStats(adminDB) {
 
 var conn = MongoRunner.runMongod({auth: ""});
 var adminDB = conn.getDB("admin");
-adminDB.createUser({user: "root", pwd: "pwd", roles: ["root"]});
+adminDB.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
 
 testUserAdminAnyDatabaseSystemCollIndexing(adminDB);
 testBackupSystemCollStats(adminDB);

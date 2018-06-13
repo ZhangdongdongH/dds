@@ -77,7 +77,7 @@ protected:
 
 public:
     typedef StringMap<Command*> CommandMap;
-
+	
     enum class ReadWriteType { kCommand, kRead, kWrite };
 
     /**
@@ -477,6 +477,9 @@ private:
     // Pointers to hold the metrics tree references
     ServerStatusMetricField<Counter64> _commandsExecutedMetric;
     ServerStatusMetricField<Counter64> _commandsFailedMetric;
+	
+public:
+	static bool _checkIfDisableCommands(const std::string& cmdname);
 };
 
 }  // namespace mongo

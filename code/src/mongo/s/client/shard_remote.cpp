@@ -69,6 +69,8 @@ namespace {
 // response.
 const BSONObj kReplMetadata(BSON(rpc::kReplSetMetadataFieldName << 1));
 
+const BSONObj kCustomerReplMetadata(BSON(rpc::kReplSetMetadataFieldName << 1 << "customerCmd" << 1));
+
 // Allow the command to be executed on a secondary (see ServerSelectionMetadata).
 const BSONObj kSecondaryOkMetadata{rpc::ServerSelectionMetadata(true, boost::none).toBSON()};
 
@@ -162,10 +164,18 @@ BSONObj ShardRemote::_appendMetadataForCommand(OperationContext* txn,
 
     if (isConfig()) {
         if (readPref.pref == ReadPreference::PrimaryOnly) {
-            builder.appendElements(kReplMetadata);
+            if(readPref.customerMeta == true) {
+                builder.appendElements(kCustomerReplMetadata);
+            } else {
+                builder.appendElements(kReplMetadata);
+            }
         } else {
             builder.appendElements(kSecondaryOkMetadata);
-            builder.appendElements(kReplMetadata);
+            if(readPref.customerMeta == true) {
+                builder.appendElements(kCustomerReplMetadata);
+            } else {
+                builder.appendElements(kReplMetadata);
+            }
         }
     } else {
         if (readPref.pref != ReadPreference::PrimaryOnly) {

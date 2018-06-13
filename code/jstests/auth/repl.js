@@ -22,8 +22,8 @@ var AuthReplTest = function(spec) {
     secondaryConn = spec.secondaryConn;
 
     adminPri = primaryConn.getDB("admin");
-    adminPri.createUser({user: "super", pwd: "super", roles: ["__system"]});
-    assert(adminPri.auth("super", "super"), "could not authenticate as superuser");
+    adminPri.createUser({user: "super", pwd: "Github@12", roles: ["__system"], "passwordDigestor" : "server"});
+    assert(adminPri.auth("super", "Github@12"), "could not authenticate as superuser");
 
     if (secondaryConn != null) {
         secondaryConn.setSlaveOk(true);
@@ -33,7 +33,7 @@ var AuthReplTest = function(spec) {
     /* --- private functions --- */
 
     var authOnSecondary = function() {
-        assert(adminSec.auth(testUser, testUser), "could not authenticate as test user");
+        assert(adminSec.auth(testUser, 'Github@12'), "could not authenticate as test user");
     };
 
     /**
@@ -140,7 +140,7 @@ var AuthReplTest = function(spec) {
 
         var res = adminPri.runCommand({
             createUser: testUser,
-            pwd: testUser,
+            pwd: 'Github@12',
             roles: [testRole],
             writeConcern: {w: numNodes, wtimeout: 15000}
         });
@@ -225,8 +225,8 @@ master = rt.start(true, mongoOptions, true);
 slave = rt.start(false, mongoOptions, true);
 var masterDB = master.getDB("admin");
 
-masterDB.createUser({user: "root", pwd: "pass", roles: ["root"]});
-masterDB.auth("root", "pass");
+masterDB.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+masterDB.auth("root", "Github@12");
 
 // ensure that master/slave replication is up and running
 masterDB.foo.save({}, {writeConcern: {w: 2, wtimeout: 15000}});

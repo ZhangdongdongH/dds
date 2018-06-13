@@ -106,6 +106,16 @@ Status TicketHolder::resize(int newSize) {
                       str::stream() << "Maximum value for semaphore is " << SEM_VALUE_MAX
                                     << "; given "
                                     << newSize);
+    int usedSize = used();
+    if (usedSize > newSize) {
+        std::stringstream ss;
+        ss << "can't resize since we're using (" << usedSize << ") "
+           << "more than newSize(" << newSize << ")";
+
+        std::string errmsg = ss.str();
+        log() << errmsg;
+        return Status(ErrorCodes::BadValue, errmsg);
+    }
 
     while (_outof.load() < newSize) {
         release();

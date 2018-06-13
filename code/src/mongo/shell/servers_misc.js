@@ -23,6 +23,11 @@ ToolTest.prototype.startDB = function(coll) {
         bind_ip: "127.0.0.1"
     };
 
+    // 
+    if(MongoRunner.laterThan(opts.binVersion, "3.2.18.1") && !opts.adminWhiteListPath) {
+        opts.adminWhiteListPath = "/tmp/adminWhiteList";
+    }
+
     Object.extend(options, this.options);
 
     this.m = startMongoProgram.apply(null, MongoRunner.arrOptions("mongod", options));
@@ -97,6 +102,10 @@ ReplTest.prototype.getOptions = function(master, extra, putBinaryFirst, norepl) 
 
     if (!extra.oplogSize)
         extra.oplogSize = "40";
+        
+    if(!extra.adminWhiteListPath) {
+        extra.adminWhiteListPath = "/tmp/adminWhiteList";
+    }
 
     var a = [];
     if (putBinaryFirst)

@@ -29,6 +29,7 @@
 #pragma once
 
 #include <vector>
+#include <set>
 
 #include "mongo/config.h"
 #include "mongo/logger/log_severity.h"
@@ -126,6 +127,8 @@ public:
      */
     virtual SockAddr localAddr() const = 0;
 
+    virtual HostAndPort local() const = 0;
+
     /**
      * Whether or not this is still connected.
      */
@@ -171,6 +174,8 @@ public:
      */
     virtual void setConnectionId(const long long connectionId) = 0;
 
+
+
     /**
      * Get the connection ID.
      */
@@ -194,6 +199,43 @@ public:
      * remoteHost - The hostname of the remote server.
      */
     virtual bool secure(SSLManagerInterface* ssl, const std::string& remoteHost) = 0;
+
+
+    /* whitelist interfaces */
+    void setInAdminWhiteList() {
+        _inAdminWhiteList = true;
+    }
+
+    void setPublicIp() {
+        _fromPublicIp = true;
+    }
+
+    bool inAdminWhiteList() {
+        return _inAdminWhiteList;
+    }
+    
+    bool isCustomerConnection() const {
+        return (!_inAdminWhiteList);
+    }
+
+    bool isFromPublicIp() {
+        return _fromPublicIp;
+    }
+
+    bool isFromPrivateIp1() {
+        return _fromPrivateIp;
+    }
+
+    void setPrivateIp1() {
+        _fromPrivateIp = true;
+    }
+
+private:
+    bool _inAdminWhiteList{false};
+    bool _inUserWhiteList{false};
+    bool _fromPublicIp{false};
+    bool _fromPrivateIp{false};
+
 };
 
 }  // namespace mongo

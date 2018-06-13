@@ -64,6 +64,18 @@ public:
     const HostAndPort& local() const override {
         return _local;
     }
+    
+    bool isCustomerConnection() const override {
+        return false; 
+    }
+
+    bool isFromPublicIp() const override {
+        return false;
+    }
+
+    bool isFromPrivateIp1() const override {
+        return false;
+    }
 
 protected:
     explicit MockSession(TransportLayer* tl) : _tl(tl), _remote(), _local() {}

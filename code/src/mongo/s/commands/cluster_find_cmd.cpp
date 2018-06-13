@@ -41,6 +41,8 @@
 #include "mongo/s/commands/cluster_aggregate.h"
 #include "mongo/s/commands/strategy.h"
 #include "mongo/s/query/cluster_find.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/client.h"
 
 namespace mongo {
 namespace {
@@ -160,11 +162,55 @@ public:
         // We count find command as a query op.
         globalOpCounters.gotQuery();
 
-        const NamespaceString nss(parseNs(dbname, cmdObj));
+        const std::string fullns = parseNs(dbname, cmdObj);
+        const NamespaceString nss(fullns);
         if (!nss.isValid()) {
             return appendCommandStatus(result,
                                        {ErrorCodes::InvalidNamespace,
                                         str::stream() << "Invalid collection name: " << nss.ns()});
+        }
+
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
+            bool flag = false;
+            BSONObj buildinfilter;
+            if (fullns == "admin.system.users") {
+                std::set<std::string> buildinUsers;
+                UserName::getBuildinUsers(buildinUsers); 
+
+                BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+            if (fullns == "admin.system.roles" ) {
+                std::set<std::string> buildinRoles;
+                RoleName::getBuildinRoles(buildinRoles); 
+                BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                buildinfilter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+
+            if(flag) {
+                std::string filterName = "filter";
+                BSONElement filterField = cmdObj[filterName];
+                BSONObj newFilter;
+                if (filterField.isABSONObj()) {
+                    BSONObj filter = filterField.embeddedObject();
+                    newFilter = BSON("$and" << BSON_ARRAY(filter << buildinfilter));
+                } else {
+                    newFilter = buildinfilter;
+                }
+
+                BSONObjBuilder nb(64);
+                nb.append(filterName, newFilter);
+                BSONForEach( e, cmdObj ) {
+                    if (!str::equals(filterName.c_str() , e.fieldName())) {
+                        nb.append(e);
+                    }
+                }
+                cmdObj = nb.obj();
+            }
         }
 
         const bool isExplain = false;

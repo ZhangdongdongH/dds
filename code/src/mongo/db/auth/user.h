@@ -214,6 +214,8 @@ public:
      */
     void decrementRefCount();
 
+    bool isBuildInUser() const;
+
 private:
     UserName _name;
 

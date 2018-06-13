@@ -39,7 +39,7 @@ function withMongod(extraMongodArgs, operation) {
 function expectNumLiveCursors(mongod, expectedNumLiveCursors) {
     var conn = new Mongo(mongod.host);
     var db = mongod.getDB('admin');
-    db.auth('admin', 'admin');
+    db.auth('admin', 'Github@12');
     var actualNumLiveCursors = db.serverStatus().metrics.cursor.open.total;
     assert(actualNumLiveCursors == expectedNumLiveCursors,
            "actual num live cursors (" + actualNumLiveCursors + ") != exptected (" +
@@ -51,9 +51,9 @@ withMongod({noauth: ""}, function setupTest(mongod) {
     conn = new Mongo(mongod.host);
     admin = conn.getDB('admin');
     somedb = conn.getDB('somedb');
-    admin.createUser({user: 'admin', pwd: 'admin', roles: jsTest.adminUserRoles});
-    admin.auth('admin', 'admin');
-    somedb.createUser({user: 'frim', pwd: 'fram', roles: jsTest.basicUserRoles});
+    admin.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    admin.auth('admin', 'Github@12');
+    somedb.createUser({user: 'frim', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
     somedb.data.drop();
     for (var i = 0; i < 10; ++i) {
         assert.writeOK(somedb.data.insert({val: i}));
@@ -64,7 +64,7 @@ withMongod({noauth: ""}, function setupTest(mongod) {
 withMongod({auth: ""}, function runTest(mongod) {
     var conn = new Mongo(mongod.host);
     var somedb = conn.getDB('somedb');
-    somedb.auth('frim', 'fram');
+    somedb.auth('frim', 'Github@12');
 
     expectNumLiveCursors(mongod, 0);
 

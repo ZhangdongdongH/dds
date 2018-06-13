@@ -810,6 +810,8 @@ ExitCode _initAndListen(int listenPort) {
 
     startClientCursorMonitor();
 
+    startAuditLogFlusher();
+
     PeriodicTask::startRunningPeriodicTasks();
 
     // MessageServer::run will return when exit code closes its socket and we don't need the

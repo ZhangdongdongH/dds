@@ -32,11 +32,11 @@ for (var i = 0; i < 1000; i++)
 assert.eq(1000, t.count(), "inserts failed");
 
 d.dropAllUsers();
-d.getSisterDB("admin").createUser({user: "admin", pwd: "admin", roles: jsTest.adminUserRoles});
-d.getSisterDB("admin").auth('admin', 'admin');
-d.createUser({user: "write", pwd: "write", roles: jsTest.basicUserRoles});
-d.createUser({user: "read", pwd: "read", roles: jsTest.readOnlyUserRoles});
-d.getSisterDB("admin").logout();
+d.getSisterDB("admin").createUser({user: "admin1", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+d.getSisterDB("admin").auth('admin1', 'Github@12');
+d.createUser({user: "write", pwd: "Github@12", roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+d.createUser({user: "read", pwd: "Github@12", roles: jsTest.readOnlyUserRoles, "passwordDigestor" : "server"});
+d.getSisterDB("admin1").logout();
 
 t.mapReduce(map, red, {out: {inline: 1}});
 
@@ -64,7 +64,7 @@ assert.throws(function() {
     t.mapReduce(map, red, {out: {inline: 1}});
 }, [], "m/r without login");
 
-d.auth("read", "read");
+d.auth("read", "Github@12");
 
 t.findOne();
 
@@ -88,7 +88,7 @@ assert.throws(function() {
     t.mapReduce(map, red, {out: {replace: out}});
 }, [], "m/r without login");
 
-d.auth("write", "write");
+d.auth("write", "Github@12");
 
 t.mapReduce(map, red, {out: {inline: 1}});
 

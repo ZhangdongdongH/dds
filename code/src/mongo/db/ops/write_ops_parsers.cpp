@@ -103,6 +103,8 @@ void parseWriteCommand(StringData dbName,
         } else if (fieldName == uniqueFieldName) {
             haveUniqueField = true;
             *uniqueField = field;
+        } else if (fieldName == "updateCmdFromUserManager" || fieldName == "deleteCmdFromUserManager") {
+            op->usermanagerCmd = true;
         } else if (fieldName[0] != '$') {
             std::initializer_list<StringData> ignoredFields = {
                 "writeConcern", "maxTimeMS", "shardVersion"};

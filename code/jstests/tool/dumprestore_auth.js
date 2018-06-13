@@ -7,10 +7,10 @@ var dbName = c.getDB().toString();
 print("DB is ", dbName);
 
 adminDB = c.getDB().getSiblingDB('admin');
-adminDB.createUser({user: 'admin', pwd: 'password', roles: ['root']});
-adminDB.auth('admin', 'password');
-adminDB.createUser({user: 'backup', pwd: 'password', roles: ['backup']});
-adminDB.createUser({user: 'restore', pwd: 'password', roles: ['restore']});
+adminDB.createUser({user: 'admin', pwd: 'Github@12', roles: ['root'], "passwordDigestor" : "server"});
+adminDB.auth('admin', 'Github@12');
+adminDB.createUser({user: 'backup', pwd: 'Github@12', roles: ['backup'], "passwordDigestor" : "server"});
+adminDB.createUser({user: 'restore', pwd: 'Github@12', roles: ['restore'], "passwordDigestor" : "server"});
 
 // Add user defined roles & users with those roles
 var testUserAdmin = c.getDB().getSiblingDB(dbName);
@@ -23,7 +23,7 @@ testUserAdmin.createRole({
     ],
     roles: []
 });
-testUserAdmin.createUser({user: 'backupFoo', pwd: 'password', roles: ['backupFoo']});
+testUserAdmin.createUser({user: 'backupFoo', pwd: 'Github@12', roles: ['backupFoo'], "passwordDigestor" : "server"});
 
 var restoreActions = [
     "collMod",
@@ -52,8 +52,8 @@ testUserAdmin.createRole({
     ],
     roles: []
 });
-testUserAdmin.createUser({user: 'restoreChester', pwd: 'password', roles: ['restoreChester']});
-testUserAdmin.createUser({user: 'restoreFoo', pwd: 'password', roles: ['restoreFoo']});
+testUserAdmin.createUser({user: 'restoreChester', pwd: 'Github@12', roles: ['restoreChester'], "passwordDigestor" : "server"});
+testUserAdmin.createUser({user: 'restoreFoo', pwd: 'Github@12', roles: ['restoreFoo'], "passwordDigestor" : "server"});
 
 var sysUsers = adminDB.system.users.count();
 assert.eq(0, c.count(), "setup1");
@@ -72,7 +72,7 @@ collections.forEach(function(coll) {
 assert.neq(null, fooColl, "foo collection doesn't exist");
 assert(!fooColl.options.flags, "find namespaces 1");
 
-t.runTool("dump", "--out", t.ext, "--username", "backup", "--password", "password");
+t.runTool("dump", "--out", t.ext, "--username", "backup", "--password", "Github@12");
 
 c.drop();
 assert.eq(0, c.count(), "after drop");
@@ -88,7 +88,7 @@ t.runTool("restore",
           "--username",
           "restore",
           "--password",
-          "password",
+          "Github@12",
           "--writeConcern",
           "0");
 assert.soon("c.findOne()", "no data after sleep");
@@ -114,7 +114,7 @@ t.runTool("dump",
           "--username",
           "backupFoo",
           "--password",
-          "password",
+          "Github@12",
           "--db",
           dbName,
           "--collection",
@@ -128,7 +128,7 @@ t.runTool("restore",
           "--username",
           "restoreChester",
           "--password",
-          "password",
+          "Github@12",
           "--db",
           dbName,
           "--collection",
@@ -143,7 +143,7 @@ t.runTool("restore",
           "--username",
           "restoreFoo",
           "--password",
-          "password",
+          "Github@12",
           "--db",
           dbName,
           "--collection",

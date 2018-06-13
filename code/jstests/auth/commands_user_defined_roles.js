@@ -25,11 +25,11 @@ function testProperAuthorization(conn, t, testcase, privileges) {
 
     authCommandsLib.setup(conn, t, runOnDb);
 
-    adminDb.auth("admin", "password");
+    adminDb.auth("admin", "Github@12");
     assert.commandWorked(adminDb.runCommand({updateRole: testRole, privileges: privileges}));
     adminDb.logout();
 
-    assert(adminDb.auth(testUser, "password"));
+    assert(adminDb.auth(testUser, "Github@12"));
 
     var res = runOnDb.runCommand(t.command);
 
@@ -57,11 +57,11 @@ function testInsufficientPrivileges(conn, t, testcase, privileges) {
 
     authCommandsLib.setup(conn, t, runOnDb);
 
-    adminDb.auth("admin", "password");
+    adminDb.auth("admin", "Github@12");
     assert.commandWorked(adminDb.runCommand({updateRole: testRole, privileges: privileges}));
     adminDb.logout();
 
-    assert(adminDb.auth(testUser, "password"));
+    assert(adminDb.auth(testUser, "Github@12"));
 
     var res = runOnDb.runCommand(t.command);
 
@@ -172,13 +172,13 @@ function runOneTest(conn, t) {
 function createUsers(conn) {
     var adminDb = conn.getDB(adminDbName);
     var firstDb = conn.getDB(firstDbName);
-    adminDb.createUser({user: "admin", pwd: "password", roles: ["__system"]});
+    adminDb.createUser({user: "admin", pwd: "Github@12", roles: ["__system"], "passwordDigestor" : "server"});
 
-    assert(adminDb.auth("admin", "password"));
+    assert(adminDb.auth("admin", "Github@12"));
 
     assert.commandWorked(adminDb.runCommand({createRole: testRole, privileges: [], roles: []}));
     assert.commandWorked(adminDb.runCommand(
-        {createUser: testUser, pwd: "password", roles: [{role: testRole, db: adminDbName}]}));
+        {createUser: testUser, pwd: "Github@12", roles: [{role: testRole, db: adminDbName}], "digestPassword" : true}));
 
     adminDb.logout();
 }

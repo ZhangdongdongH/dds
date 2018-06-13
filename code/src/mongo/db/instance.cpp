@@ -74,6 +74,7 @@
 #include "mongo/db/stats/top.h"
 #include "mongo/db/storage/storage_engine.h"
 #include "mongo/db/storage/storage_options.h"
+#include "mongo/logger/logger.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/rpc/command_reply_builder.h"
@@ -95,6 +96,9 @@
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
 
 namespace mongo {
 using logger::LogComponent;
@@ -361,9 +365,61 @@ void receivedQuery(OperationContext* txn,
     try {
         Client* client = txn->getClient();
         Status status = AuthorizationSession::get(client)->checkAuthForFind(nss, false);
+        /*****modify mongodb code start*****/
         audit::logQueryAuthzCheck(client, nss, q.query, status.code());
         uassertStatusOK(status);
 
+        if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
+                &&  (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
+                && (!txn->isInBuildinMode())) {
+
+            bool flag = false;
+            BSONObj filter;
+            if (nss == std::string("admin.system.users")) {
+                std::set<std::string> buildinUsers;
+                UserName::getBuildinUsers(buildinUsers); 
+                BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+            if (nss == std::string("admin.system.roles")) {
+                std::set<std::string> buildinRoles;
+                RoleName::getBuildinRoles(buildinRoles); 
+                BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                flag = true;
+            }
+            
+            if (flag) {
+                std::string queryName = "query";
+                BSONElement queryField = q.query[queryName];
+                if (!queryField.isABSONObj()) {
+                    queryName = "$query";
+                    queryField = q.query[queryName];
+                }
+
+                if (queryField.isABSONObj()) {
+                    BSONObj subQuery = queryField.embeddedObject();
+                    BSONObj newSubQuery = BSON("$and" << BSON_ARRAY(subQuery << filter));
+
+                    // rebuild new query object
+                    BSONObjBuilder nb(64);
+                    nb.append(queryName, newSubQuery);
+                    BSONForEach( e, q.query ) {
+                        if (!str::equals(queryName.c_str() , e.fieldName())) {
+                            nb.append(e);
+                        }
+                    }
+                    q.query = nb.obj();
+                } else {
+                    BSONObj query = BSON("$and" << BSON_ARRAY(q.query << filter));
+                    q.query = query;
+                }
+            }
+        }
+        /*****modify mongodb code end*****/
         dbResponse.exhaustNS = runQuery(txn, q, nss, dbResponse.response);
     } catch (const AssertionException& e) {
         // If we got a stale config, wait in case the operation is stuck in a critical section
@@ -415,6 +471,38 @@ void receivedInsert(OperationContext* txn, const NamespaceString& nsString, Mess
         audit::logInsertAuthzCheck(txn->getClient(), nsString, obj, status.code());
         uassertStatusOK(status);
     }
+
+    if(!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
+            ) {
+        if (nsString == std::string("admin.system.users")) {
+            for (const auto& obj : insertOp.documents) {
+                std::string userName;
+                std::string dbName;
+                Status status1 = bsonExtractStringField(obj, "user", &userName);
+                Status status2 = bsonExtractStringField(obj, "db", &dbName);
+                if (status1.isOK() && status2.isOK() 
+                        && UserName::isBuildinUser(userName+"@"+dbName)) {
+                    Status status(ErrorCodes::Unauthorized, "Unauthorized");
+                    uassertStatusOK(status);
+                }
+            }
+        }
+
+        if (nsString == std::string("admin.system.roles")) {
+            for (const auto& obj : insertOp.documents) {
+                std::string roleName;
+                std::string dbName;
+                Status status1 = bsonExtractStringField(obj, "role", &roleName);
+                Status status2 = bsonExtractStringField(obj, "db", &dbName);
+                if (status1.isOK() && status2.isOK() 
+                        && RoleName::isBuildinRoles(roleName+"@"+dbName)) {
+                    Status status(ErrorCodes::Unauthorized, "Unauthorized");
+                    uassertStatusOK(status);
+                }
+            }
+        }
+    }
     performInserts(txn, insertOp);
 }
 
@@ -427,6 +515,7 @@ void receivedUpdate(OperationContext* txn, const NamespaceString& nsString, Mess
         AuthorizationSession::get(txn->getClient())
             ->checkAuthForUpdate(
                 txn, nsString, singleUpdate.query, singleUpdate.update, singleUpdate.upsert);
+    /*****modify mongodb code start*****/
     audit::logUpdateAuthzCheck(txn->getClient(),
                                nsString,
                                singleUpdate.query,
@@ -436,6 +525,33 @@ void receivedUpdate(OperationContext* txn, const NamespaceString& nsString, Mess
                                status.code());
     uassertStatusOK(status);
 
+    if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
+            ) {
+
+        if (nsString == std::string("admin.system.users")) {
+            std::set<std::string> buildinUsers;
+            UserName::getBuildinUsers(buildinUsers); 
+            BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj q = BSON("$and" << BSON_ARRAY(singleUpdate.query << filter));
+            singleUpdate.query = q;
+        }
+        if (nsString == std::string("admin.system.roles")) {
+            std::set<std::string> buildinRoles;
+            RoleName::getBuildinRoles(buildinRoles); 
+            BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj q = BSON("$and" << BSON_ARRAY(singleUpdate.query << filter));
+            singleUpdate.query = q;
+        }
+    }
+
+
+    /*****modify mongodb code end*****/
+    
     performUpdates(txn, updateOp);
 }
 
@@ -446,8 +562,34 @@ void receivedDelete(OperationContext* txn, const NamespaceString& nsString, Mess
 
     Status status = AuthorizationSession::get(txn->getClient())
                         ->checkAuthForDelete(txn, nsString, singleDelete.query);
+    /*****modify mongodb code start*****/
     audit::logDeleteAuthzCheck(txn->getClient(), nsString, singleDelete.query, status.code());
     uassertStatusOK(status);
+
+    if (!AuthorizationSession::get(txn->getClient())->shouldAllowLocalhost() 
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn())
+            ) {
+        if (nsString == std::string("admin.system.users")) { 
+            std::set<std::string> buildinUsersAndRwuser;
+            UserName::getBuildinUsersAndRwuser(buildinUsersAndRwuser); 
+            BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsersAndRwuser);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj q = BSON("$and" << BSON_ARRAY(singleDelete.query << filter));
+            singleDelete.query = q;
+        }
+        if (nsString == std::string("admin.system.roles")) {
+            std::set<std::string> buildinRoles;
+            RoleName::getBuildinRoles(buildinRoles); 
+            BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj q = BSON("$and" << BSON_ARRAY(singleDelete.query << filter));
+            singleDelete.query = q;
+        }
+    }
+
+    /*****modify mongodb code end*****/
 
     performDeletes(txn, deleteOp);
 }
@@ -525,6 +667,10 @@ bool receivedGetMore(OperationContext* txn, DbResponse& dbresponse, Message& m, 
     return true;
 }
 
+}  // namespace
+
+namespace {
+const std::string CUSTOM_USER = "rwuser@admin";
 }  // namespace
 
 // Mongod on win32 defines a value for this function. In all other executables it is NULL.
@@ -697,6 +843,9 @@ void assembleResponse(OperationContext* txn,
         Locker::LockerInfo lockerInfo;
         txn->lockState()->getLockerInfo(&lockerInfo);
         log() << debug.report(&c, currentOp, lockerInfo.stats);
+        if (debug.executionTimeMicros > logThresholdMs) {
+            audit::logSlowOp(&c, currentOp, lockerInfo.stats);
+        }
     }
 
     if (currentOp.shouldDBProfile()) {

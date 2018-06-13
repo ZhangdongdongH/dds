@@ -66,6 +66,9 @@ public:
     unsigned remotePort() const override;
     SockAddr remoteAddr() const override;
     SockAddr localAddr() const override;
+	
+	virtual HostAndPort local() const;
+	virtual bool isCustomerConnection() const { return false;}
 
     bool isStillConnected() const override;
 
@@ -97,6 +100,7 @@ public:
 
 private:
     HostAndPort _remote;
+	HostAndPort _local;
     SSLPeerInfo _x509PeerInfo;
 };
 

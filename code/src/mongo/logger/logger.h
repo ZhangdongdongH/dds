@@ -29,6 +29,7 @@
 
 #include "mongo/logger/log_manager.h"
 #include "mongo/logger/message_log_domain.h"
+#include "mongo/logger/audit_log_domain.h"
 #include "mongo/logger/rotatable_file_manager.h"
 
 namespace mongo {
@@ -50,6 +51,14 @@ LogManager* globalLogManager();
 inline ComponentMessageLogDomain* globalLogDomain() {
     return globalLogManager()->getGlobalDomain();
 }
+
+/**
+ * Gets the global AuditLogDomain associated for the global log manager.
+ */
+inline AuditLogDomain* globalAuditLogDomain() {
+    return globalLogManager()->getGlobalAuditDomain();
+}
+
 
 }  // namespace logger
 }  // namespace mongo

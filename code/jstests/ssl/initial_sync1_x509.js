@@ -29,9 +29,9 @@ function runInitialSyncTest() {
     var admin_s1 = slave1.getDB("admin");
 
     print("2. Create a root user.");
-    admin.createUser({user: "root", pwd: "pass", roles: ["root"]});
-    admin.auth("root", "pass");
-    admin_s1.auth("root", "pass");
+    admin.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+    admin.auth("root", "Github@12");
+    admin_s1.auth("root", "Github@12");
 
     print("3. Insert some data");
     var bulk = foo.bar.initializeUnorderedBulkOp();

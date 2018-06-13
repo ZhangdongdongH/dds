@@ -199,6 +199,18 @@ public:
                                               "with --configsvr"));
         }
 
+        // because user may connect with inner network because some case in our clould instance,
+        // add temp fix that : when user is auth, do not check the connection way.
+        // TODO: when our cloud instance is fix, need fix this back.
+        if (dbname == "admin"
+            && (AuthorizationSession::get(txn->getClient())->isAuthWithCustomer()
+                || (txn->getClient()->isCustomerConnection() && AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser())
+               )
+            ) {
+            return appendCommandStatus(result,
+                                       Status(ErrorCodes::IllegalOperation,
+                                              "Cannot drop 'admin' database"));
+        }
         if ((repl::getGlobalReplicationCoordinator()->getReplicationMode() !=
              repl::ReplicationCoordinator::modeNone) &&
             (dbname == NamespaceString::kLocalDb)) {
@@ -1309,6 +1321,9 @@ void Command::execCommand(OperationContext* txn,
         // see SERVER-18515 for details.
         uassertStatusOK(rpc::readRequestMetadata(txn, request.getMetadata()));
         rpc::TrackingMetadata::get(txn).initWithOperName(command->getName());
+        if (request.getMetadata().hasField("customerCmd")) {
+            txn->setCustomerTxn();
+        }
 
         dassert(replyBuilder->getState() == rpc::ReplyBuilderInterface::State::kCommandReply);
 

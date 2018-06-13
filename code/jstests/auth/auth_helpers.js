@@ -11,8 +11,8 @@ var admin = conn.getDB('admin');
 // In order to test MONGODB-CR we need to "reset" the authSchemaVersion to
 // 26Final "3" or else the user won't get MONGODB-CR credentials.
 admin.system.version.save({"_id": "authSchema", "currentVersion": 3});
-admin.createUser({user: 'andy', pwd: 'a', roles: jsTest.adminUserRoles});
-admin.auth({user: 'andy', pwd: 'a'});
+admin.createUser({user: 'andy', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+admin.auth({user: 'andy', pwd: 'Github@12'});
 
 // Attempt to start with CRAM-MD5 enabled
 // If this fails the build only supports default auth mechanisms
@@ -41,20 +41,20 @@ var testedSomething = false;
 // Try all the ways to call db.auth that uses SCRAM-SHA-1 or MONGODB-CR.
 if (hasCR) {
     testedSomething = true;
-    assert(admin.auth('andy', 'a'));
+    assert(admin.auth('andy', 'Github@12'));
     admin.logout();
-    assert(admin.auth({user: 'andy', pwd: 'a'}));
+    assert(admin.auth({user: 'andy', pwd: 'Github@12'}));
     admin.logout();
-    assert(admin.auth({mechanism: 'SCRAM-SHA-1', user: 'andy', pwd: 'a'}));
+    assert(admin.auth({mechanism: 'SCRAM-SHA-1', user: 'andy', pwd: 'Github@12'}));
     admin.logout();
-    assert(admin.auth({mechanism: 'MONGODB-CR', user: 'andy', pwd: 'a'}));
+    assert(admin.auth({mechanism: 'MONGODB-CR', user: 'andy', pwd: 'Github@12'}));
     admin.logout();
 }
 
 // If the server supports CRAM-MD5, try it out.
 if (hasCramMd5) {
     testedSomething = true;
-    assert(admin.auth({mechanism: 'CRAM-MD5', user: 'andy', pwd: 'a'}));
+    assert(admin.auth({mechanism: 'CRAM-MD5', user: 'andy', pwd: 'Github@12'}));
     admin.logout();
 }
 
@@ -62,4 +62,4 @@ if (hasCramMd5) {
 assert(testedSomething, "No candidate authentication mechanisms matched.");
 
 // Invalid mechanisms shouldn't lead to authentication, but also shouldn't crash.
-assert(!admin.auth({mechanism: 'this-mechanism-is-fake', user: 'andy', pwd: 'a'}));
+assert(!admin.auth({mechanism: 'this-mechanism-is-fake', user: 'andy', pwd: 'Github@12'}));

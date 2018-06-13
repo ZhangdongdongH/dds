@@ -137,6 +137,13 @@ public:
      */
     virtual MessageCompressorManager& getCompressorManager();
 
+
+    virtual bool isCustomerConnection() const = 0;
+
+    virtual bool isFromPublicIp() const = 0;
+
+    virtual bool isFromPrivateIp1() const = 0;
+
 protected:
     /**
      * Construct a new session.

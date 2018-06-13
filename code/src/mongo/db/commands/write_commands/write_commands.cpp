@@ -26,6 +26,7 @@
  *    it in the license file.
  */
 
+
 #include "mongo/base/init.h"
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/element.h"
@@ -51,6 +52,10 @@
 #include "mongo/db/stats/counters.h"
 #include "mongo/db/write_concern.h"
 #include "mongo/s/stale_exception.h"
+#include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/auth/user_name.h"
+#include "mongo/db/auth/role_name.h"
+
 
 namespace mongo {
 
@@ -256,6 +261,37 @@ public:
                  const BSONObj& cmdObj,
                  BSONObjBuilder& result) final {
         const auto batch = parseInsertCommand(dbname, cmdObj);
+
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() 
+                || txn->isCustomerTxn()) {
+            if(batch.ns.ns() == std::string("admin.system.users")) {
+                for (auto&& doc : batch.documents) {
+                    std::string userName;
+                    std::string dbName;
+                    Status status1 = bsonExtractStringField(doc, "user", &userName);
+                    Status status2 = bsonExtractStringField(doc, "db", &dbName);
+                    if (status1.isOK() && status2.isOK() 
+                            && UserName::isBuildinUser(userName+"@"+dbName)) {
+                        appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized"));
+                        return;
+                    }
+                }
+            }
+
+            if (batch.ns.ns() == std::string("admin.system.roles")) {
+                for (auto&& doc : batch.documents) {
+                    std::string roleName;
+                    std::string dbName;
+                    Status status1 = bsonExtractStringField(doc, "role", &roleName);
+                    Status status2 = bsonExtractStringField(doc, "db", &dbName);
+                    if (status1.isOK() && status2.isOK() 
+                            && RoleName::isBuildinRoles(roleName+"@"+dbName)) {
+                        appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized"));
+                        return;
+                    }
+                }
+            }
+        }
         const auto reply = performInserts(txn, batch);
         serializeReply(txn,
                        ReplyStyle::kNotUpdate,
@@ -291,7 +327,44 @@ public:
                  const std::string& dbname,
                  const BSONObj& cmdObj,
                  BSONObjBuilder& result) final {
-        const auto batch = parseUpdateCommand(dbname, cmdObj);
+        auto batch = parseUpdateCommand(dbname, cmdObj);
+
+        // if no usermanagerCmd want to change the users or roles, disable it and suggest use usermanager command
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn()) {
+            if(batch.ns.ns() == std::string("admin.system.users")) {
+                if(batch.usermanagerCmd == false) {
+                    appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateUser cmd."));
+                    return;
+                } else {
+                    std::set<std::string> buildinUsers;
+                    UserName::getBuildinUsers(buildinUsers); 
+                    BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                    BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                    BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                    for(auto & singleUpdate : batch.updates) {
+                        BSONObj q = BSON("$and" << BSON_ARRAY(singleUpdate.query << filter));
+                        singleUpdate.query = q;
+                    }
+                }
+            }
+
+            if (batch.ns.ns() == std::string("admin.system.roles")) {
+                if(batch.usermanagerCmd == false) {
+                    appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateRole cmd."));
+                    return;
+                } else {
+                    std::set<std::string> buildinRoles;
+                    RoleName::getBuildinRoles(buildinRoles); 
+                    BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                    BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                    BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                    for(auto & singleUpdate : batch.updates) {
+                        BSONObj q = BSON("$and" << BSON_ARRAY(singleUpdate.query << filter));
+                        singleUpdate.query = q;
+                    }
+                }
+            }
+        }
         const auto reply = performUpdates(txn, batch);
         serializeReply(
             txn, ReplyStyle::kUpdate, batch.continueOnError, batch.updates.size(), reply, &result);
@@ -359,7 +432,44 @@ public:
                  const std::string& dbname,
                  const BSONObj& cmdObj,
                  BSONObjBuilder& result) final {
-        const auto batch = parseDeleteCommand(dbname, cmdObj);
+        auto batch = parseDeleteCommand(dbname, cmdObj);
+
+        // if no usermanagerCmd want to change the users or roles, disable it and suggest use usermanager command
+        if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser() || txn->isCustomerTxn()) {
+            if(batch.ns.ns() == std::string("admin.system.users")) {
+                if(batch.usermanagerCmd == false) {
+                    appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropUser cmd."));
+                    return;
+                } else {
+                    std::set<std::string> buildinUsers;
+                    UserName::getBuildinUsersAndRwuser(buildinUsers); 
+                    BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+                    BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                    BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                    for(auto & singleDelete : batch.deletes) {
+                        BSONObj q = BSON("$and" << BSON_ARRAY(singleDelete.query << filter));
+                        singleDelete.query = q;
+                    }
+                }
+            }
+
+            if (batch.ns.ns() == std::string("admin.system.roles")) {
+                if(batch.usermanagerCmd == false) {
+                    appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropRole cmd."));
+                    return;
+                } else {
+                    std::set<std::string> buildinRoles;
+                    RoleName::getBuildinRoles(buildinRoles); 
+                    BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+                    BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+                    BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+                    for(auto & singleDelete : batch.deletes) {
+                        BSONObj q = BSON("$and" << BSON_ARRAY(singleDelete.query << filter));
+                        singleDelete.query = q;
+                    }
+                }
+            }
+        }
         const auto reply = performDeletes(txn, batch);
         serializeReply(txn,
                        ReplyStyle::kNotUpdate,

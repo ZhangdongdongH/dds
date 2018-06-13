@@ -14,8 +14,8 @@
     // Setup toDb with auth
     var toDb = MongoRunner.runMongod({auth: ""});
     var admin = toDb.getDB("admin");
-    admin.createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles});
-    admin.auth("foo", "bar");
+    admin.createUser({user: "foo", pwd: "Github@12", roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+    admin.auth("foo", "Github@12");
 
     admin.copyDatabase('test', 'test', fromDb.host);
 

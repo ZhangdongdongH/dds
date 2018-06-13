@@ -159,6 +159,18 @@ private:
         SessionEntry getIter() const {
             return _entry;
         }
+    
+        bool isCustomerConnection() const override {
+            return _customerConnection; 
+        }
+
+        bool isFromPublicIp() const override {
+            return _fromPublicIp;
+        }
+
+        bool isFromPrivateIp1() const override {
+            return _fromPrivateIp;
+        }
 
     private:
         explicit LegacySession(std::unique_ptr<AbstractMessagingPort> amp,
@@ -172,6 +184,12 @@ private:
         TagMask _tags;
 
         MessageCompressorManager _messageCompressorManager;
+        
+        bool _customerConnection;
+
+        bool _fromPublicIp;
+
+        bool _fromPrivateIp;
 
         std::unique_ptr<Connection> _connection;
 

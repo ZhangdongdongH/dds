@@ -65,11 +65,43 @@ using std::stringstream;
 
 namespace repl {
 
-void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level) {
+void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level, bool shouldReplacePrivateIpToPublicIp, bool shouldReplacePrivateIpToPrivateIp) {
     ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
     if (replCoord->getSettings().usingReplSets()) {
         IsMasterResponse isMasterResponse;
         replCoord->fillIsMasterForReplSet(&isMasterResponse);
+
+        if(shouldReplacePrivateIpToPrivateIp == true && txn->getClient()->isFromPrivateIp1()) {
+            PrivateIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPrivateIpPrivateIpRange();
+
+            std::vector<HostAndPort> tmpVector;
+            for(auto & hp : isMasterResponse.getHosts()) {
+                tmpVector.push_back(HostAndPort(range.getMapIp(hp.host()), hp.port()));
+            }
+            isMasterResponse.setHosts(tmpVector);
+
+            auto meHpOld = isMasterResponse.getMe();
+            auto meHpNew = HostAndPort(range.getMapIp(meHpOld.host()), meHpOld.port());
+            isMasterResponse.setMe(meHpNew);
+            if (isMasterResponse.isMaster()) {
+                isMasterResponse.setPrimary(meHpNew);
+            }
+        } else if(shouldReplacePrivateIpToPublicIp == true && txn->getClient()->isFromPublicIp()) {
+            PublicIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPublicIpPrivateIpRange();
+
+            std::vector<HostAndPort> tmpVector;
+            for(auto & hp : isMasterResponse.getHosts()) {
+                tmpVector.push_back(HostAndPort(range.getPublicIp(hp.host()), hp.port()));
+            }
+            isMasterResponse.setHosts(tmpVector);
+
+            auto meHpOld = isMasterResponse.getMe();
+            auto meHpNew = HostAndPort(range.getPublicIp(meHpOld.host()), meHpOld.port());
+            isMasterResponse.setMe(meHpNew);
+            if (isMasterResponse.isMaster()) {
+                isMasterResponse.setPrimary(meHpNew);
+            }
+        }
         result.appendElements(isMasterResponse.toBSON());
         if (level) {
             replCoord->appendSlaveInfoData(&result);
@@ -166,7 +198,7 @@ public:
         int level = configElement.numberInt();
 
         BSONObjBuilder result;
-        appendReplicationInfo(txn, result, level);
+        appendReplicationInfo(txn, result, level, false, false);
         getGlobalReplicationCoordinator()->processReplSetGetRBID(&result);
 
         return result.obj();
@@ -276,7 +308,7 @@ public:
                 txn->getClient(), std::move(swParseClientMetadata.getValue()));
         }
 
-        appendReplicationInfo(txn, result, 0);
+        appendReplicationInfo(txn, result, 0, true, true);
 
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
             // If we have feature compatibility version 3.4, use a config server mode that 3.2

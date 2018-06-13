@@ -110,6 +110,13 @@ public:
     bool shouldBypassValidation() const {
         return _shouldBypassValidation;
     }
+    void setUsermanagerCmd(bool usermanager) {
+        _isCmdFromUserManager = usermanager;
+    }
+
+    bool isUserManagerCmd() const {
+        return _isCmdFromUserManager;
+    }
 
 private:
     // Convention: (M)andatory, (O)ptional
@@ -132,6 +139,11 @@ private:
 
     // (O)  should document validation be bypassed (default false)
     bool _shouldBypassValidation;
+    
+    // (O)  (default false)
+    bool _isCmdFromUserManager{false};
+    
+    static const std::string UPDATE_IS_CMD_FROM_USER_MANAGER_KEY;
 };
 
 }  // namespace mongo

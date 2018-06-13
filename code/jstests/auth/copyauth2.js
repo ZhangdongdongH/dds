@@ -1,11 +1,11 @@
 // Basic test that copydb works with auth enabled when copying within the same cluster
 
 function runTest(a, b) {
-    a.createUser({user: "chevy", pwd: "chase", roles: ["read", {role: 'readWrite', db: b._name}]});
+    a.createUser({user: "chevy", pwd: "Github@12", roles: ["read", {role: 'readWrite', db: b._name}], "passwordDigestor" : "server"});
     a.foo.insert({a: 1});
     b.getSiblingDB("admin").logout();
 
-    a.auth("chevy", "chase");
+    a.auth("chevy", "Github@12");
 
     assert.eq(1, a.foo.count(), "A");
     assert.eq(0, b.foo.count(), "B");
@@ -20,8 +20,8 @@ var conn = MongoRunner.runMongod({auth: ""});
 var a = conn.getDB("copydb2-test-a");
 var b = conn.getDB("copydb2-test-b");
 var adminDB = conn.getDB("admin");
-adminDB.createUser({user: "root", pwd: "root", roles: ["root"]});
-adminDB.auth("root", "root");
+adminDB.createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+adminDB.auth("root", "Github@12");
 runTest(a, b);
 MongoRunner.stopMongod(conn);
 
@@ -34,8 +34,8 @@ var st = new ShardingTest({
 });
 var a = st.s.getDB( "copydb2-test-a" );
 var b = st.s.getDB( "copydb2-test-b" );
-st.s.getDB( "admin" ).createUser({user: "root", pwd: "root", roles: ["root"]});
-st.s.getDB( "admin" ).auth("root", "root");
+st.s.getDB( "admin" ).createUser({user: "root", pwd: "Github@12", roles: ["root"], "passwordDigestor" : "server"});
+st.s.getDB( "admin" ).auth("root", "Github@12");
 runTest(a, b);
 st.stop();
 */

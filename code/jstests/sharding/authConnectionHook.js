@@ -10,9 +10,9 @@
     var adminDB = mongos.getDB('admin');
     var db = mongos.getDB('test');
 
-    adminDB.createUser({user: 'admin', pwd: 'password', roles: jsTest.adminUserRoles});
+    adminDB.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
 
-    adminDB.auth('admin', 'password');
+    adminDB.auth('admin', 'Github@12');
 
     adminDB.runCommand({enableSharding: "test"});
     st.ensurePrimaryShard('test', 'shard0001');

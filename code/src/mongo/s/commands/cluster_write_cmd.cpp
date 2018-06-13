@@ -49,6 +49,9 @@
 #include "mongo/s/write_ops/batched_command_request.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/util/timer.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/auth/authorization_session.h"
+#include "mongo/bson/util/bson_extract.h"
 
 namespace mongo {
 
@@ -157,9 +160,61 @@ public:
                 response.setErrCode(ErrorCodes::FailedToParse);
                 response.setErrMessage(errmsg);
             } else {
-                writer.write(txn, request, &response);
-            }
+                bool flag = true;
+                if (AuthorizationSession::get(txn->getClient())->isAuthWithCustomerOrNoAuthUser()) {
+                    if (_writeType == BatchedCommandRequest::BatchType_Insert) {
+                        const std::vector<BSONObj>& docs = request.getInsertRequest()->getDocuments();
+                        if (request.getNS().ns() == std::string("admin.system.users")) {
+                            for (unsigned int i = 0; i < docs.size(); i++) {
+                                std::string userName;
+                                std::string dbName;
+                                Status status1 = bsonExtractStringField(docs[i], "user", &userName);
+                                Status status2 = bsonExtractStringField(docs[i], "db", &dbName);
+                                if (status1.isOK() && status2.isOK() && UserName::isBuildinUser(userName+"@"+dbName)) {
+                                    response.setOk(false);
+                                    response.setErrCode(ErrorCodes::Unauthorized);
+                                    response.setErrMessage("unauthorized");
+                                    flag = false;
+                                    // it is better to use goto, but code guide forbid to use goto
+                                    break;
+                                }
+                            }
+                        } else if (request.getNS().ns() == std::string("admin.system.roles")) {
+                            for (unsigned int i = 0; i < docs.size(); i++) {
+                                std::string roleName;
+                                std::string dbName;
+                                Status status1 = bsonExtractStringField(docs[i], "role", &roleName);
+                                Status status2 = bsonExtractStringField(docs[i], "db", &dbName);
+                                if (status1.isOK() && status2.isOK() 
+                                        && RoleName::isBuildinRoles(roleName+"@"+dbName)) {
+                                    response.setOk(false);
+                                    response.setErrCode(ErrorCodes::Unauthorized);
+                                    response.setErrMessage("unauthorized");
+                                    flag = false;
+                                    // it is better to use goto, but code guide forbid to use goto
+                                    break;
+                                }
+                            }
+                        }
+                    } else if(_writeType == BatchedCommandRequest::BatchType_Update) {
+                        if (request.getNS().ns() == std::string("admin.system.users")) {
+                            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateUser cmd."));
+                        } else if (request.getNS().ns() == std::string("admin.system.roles")) {
+                            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use updateRole cmd."));
+                        }
 
+                    } else if(_writeType == BatchedCommandRequest::BatchType_Delete) {
+                        if (request.getNS().ns() == std::string("admin.system.users")) {
+                            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropUser cmd."));
+                        } else if (request.getNS().ns() == std::string("admin.system.roles")) {
+                            return appendCommandStatus(result, Status(ErrorCodes::Unauthorized, "unauthorized. Suggest use dropRole cmd."));
+                        }
+                    }
+                }
+                if(flag) {
+                    writer.write(txn, request, &response);
+                }
+            }
             dassert(response.isValid(NULL));
         }
 

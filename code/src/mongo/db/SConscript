@@ -513,6 +513,9 @@ env.Library(
         "audit.cpp",
     ],
     LIBDEPS=[
+        'auth/authorization_manager_global',
+        '$BUILD_DIR/mongo/db/auth/authcore',
+        '$BUILD_DIR/mongo/util/net/hostandport',
     ],
 )
 

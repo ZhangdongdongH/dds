@@ -164,6 +164,7 @@ Listener::~Listener() {
 
 bool Listener::setupSockets() {
     checkTicketNumbers();
+    checkInternalTicketNumbers();
 
 #if !defined(_WIN32)
     _mine = ipToAddrs(_ip.c_str(), _port, (!serverGlobalParams.noUnixSocket && useUnixSockets()));
@@ -345,7 +346,7 @@ void Listener::initAndListen() {
             long long myConnectionNumber = globalConnectionNumber.addAndFetch(1);
 
             if (_logConnect && !serverGlobalParams.quiet) {
-                int conns = globalTicketHolder.used() + 1;
+                int conns = globalTicketHolder.used() + internalTicketHolder.used() + 1;
                 const char* word = (conns == 1 ? " connection" : " connections");
                 log() << "connection accepted from " << from.toString() << " #"
                       << myConnectionNumber << " (" << conns << word << " now open)";
@@ -563,7 +564,7 @@ void Listener::initAndListen() {
         long long myConnectionNumber = globalConnectionNumber.addAndFetch(1);
 
         if (_logConnect && !serverGlobalParams.quiet) {
-            int conns = globalTicketHolder.used() + 1;
+            int conns = globalTicketHolder.used() + internalTicketHolder.used() + 1;
             const char* word = (conns == 1 ? " connection" : " connections");
             log() << "connection accepted from " << from.toString() << " #" << myConnectionNumber
                   << " (" << conns << word << " now open)";
@@ -598,7 +599,7 @@ void Listener::waitUntilListening() const {
 void Listener::_accepted(const std::shared_ptr<Socket>& psocket, long long connectionId) {
     std::unique_ptr<AbstractMessagingPort> port;
     if (isMessagePortImplASIO()) {
-        port = stdx::make_unique<ASIOMessagingPort>(psocket->stealSD(), psocket->remoteAddr());
+        port = stdx::make_unique<ASIOMessagingPort>(psocket->stealSD(), psocket->remoteAddr(), psocket->localAddr());
     } else {
         port = stdx::make_unique<MessagingPort>(psocket);
     }
@@ -632,7 +633,7 @@ int getMaxConnections() {
 #endif
 }
 
-void Listener::checkTicketNumbers() {
+Status Listener::checkTicketNumbers() {
     int want = getMaxConnections();
     int current = globalTicketHolder.outof();
     if (current != DEFAULT_MAX_CONN) {
@@ -640,13 +641,30 @@ void Listener::checkTicketNumbers() {
             // they want fewer than they can handle
             // which is fine
             LOG(1) << " only allowing " << current << " connections";
-            return;
+            return Status::OK();
         }
         if (current > want) {
             log() << " --maxConns too high, can only handle " << want;
         }
     }
-    globalTicketHolder.resize(want);
+    return globalTicketHolder.resize(want);
+}
+
+Status Listener::checkInternalTicketNumbers() {
+    int want = getMaxConnections();
+    int current = internalTicketHolder.outof();
+    if (current != DEFAULT_MAX_CONN_INTERNAL) {
+        if (current < want) {
+            // they want fewer than they can handle
+            // which is fine
+            LOG(1) << " only allowing " << current << " internal connections";
+            return Status::OK();
+        }
+        if (current > want) {
+            log() << " --maxIncomingConnections too high, can only handle " << want;
+        }
+    }
+    return internalTicketHolder.resize(want);
 }
 
 void Listener::shutdown() {
@@ -654,6 +672,8 @@ void Listener::shutdown() {
 }
 
 TicketHolder Listener::globalTicketHolder(DEFAULT_MAX_CONN);
+TicketHolder Listener::internalTicketHolder(DEFAULT_MAX_CONN_INTERNAL);
+
 AtomicInt64 Listener::globalConnectionNumber;
 
 void ListeningSockets::closeAll() {

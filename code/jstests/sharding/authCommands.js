@@ -25,12 +25,12 @@
     var testDB = mongos.getDB('test');
 
     jsTestLog('Setting up initial users');
-    var rwUser = 'rwUser';
+    var rwUser = 'admin';
     var roUser = 'roUser';
-    var password = 'password';
+    var password = 'Github@12';
     var expectedDocs = 1000;
 
-    adminDB.createUser({user: rwUser, pwd: password, roles: jsTest.adminUserRoles});
+    adminDB.createUser({user: rwUser, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
 
     assert(adminDB.auth(rwUser, password));
 
@@ -39,17 +39,17 @@
     awaitRSClientHosts(mongos, st.rs0.getSecondaries(), {ok: true, secondary: true});
     awaitRSClientHosts(mongos, st.rs1.getSecondaries(), {ok: true, secondary: true});
 
-    testDB.createUser({user: rwUser, pwd: password, roles: jsTest.basicUserRoles});
-    testDB.createUser({user: roUser, pwd: password, roles: jsTest.readOnlyUserRoles});
+    testDB.createUser({user: rwUser, pwd: password, roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
+    testDB.createUser({user: roUser, pwd: password, roles: jsTest.readOnlyUserRoles, "passwordDigestor" : "server"});
 
     var authenticatedConn = new Mongo(mongos.host);
     authenticatedConn.getDB('admin').auth(rwUser, password);
 
     // Add user to shards to prevent localhost connections from having automatic full access
     st.rs0.getPrimary().getDB('admin').createUser(
-        {user: 'user', pwd: 'password', roles: jsTest.basicUserRoles}, {w: 3, wtimeout: 30000});
+        {user: 'user', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"}, {w: 3, wtimeout: 30000});
     st.rs1.getPrimary().getDB('admin').createUser(
-        {user: 'user', pwd: 'password', roles: jsTest.basicUserRoles}, {w: 3, wtimeout: 30000});
+        {user: 'user', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"}, {w: 3, wtimeout: 30000});
 
     jsTestLog('Creating initial data');
 

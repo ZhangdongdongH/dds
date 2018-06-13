@@ -21,16 +21,16 @@ assert.commandWorked(adminDB.runCommand({replSetGetStatus: 1}));
 
 // Add admin user using direct connection to primary to simulate connection from remote host
 var priAdminDB = primary.getDB('admin');
-priAdminDB.createUser({user: 'user', pwd: 'user', roles: jsTest.adminUserRoles},
+priAdminDB.createUser({user: 'admin', pwd: 'Github@12', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"},
                       {w: nodeCount, wtimeout: 30000});
-priAdminDB.auth('user', 'user');
+priAdminDB.auth('admin', 'Github@12');
 
 var priTestDB = primary.getDB('test');
-priTestDB.createUser({user: 'a', pwd: 'a', roles: jsTest.basicUserRoles},
+priTestDB.createUser({user: 'a', pwd: 'Github@12', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"},
                      {w: nodeCount, wtimeout: 30000});
 
 // Authenticate the replSet connection
-assert.eq(1, testDB.auth('a', 'a'));
+assert.eq(1, testDB.auth('a', 'Github@12'));
 
 jsTest.log('Sending an authorized query that should be ok');
 assert.writeOK(testColl.insert({x: 1}, {writeConcern: {w: nodeCount}}));
@@ -89,7 +89,7 @@ queryToPriShouldFail();
 queryToSecShouldFail();
 
 // Repeat logout test, with secondary first, then primary
-assert.eq(1, testDB.auth('a', 'a'));
+assert.eq(1, testDB.auth('a', 'Github@12'));
 assert(testDB.logout().ok);
 
 // re-initialize the underlying connections to primary and secondary
@@ -98,7 +98,7 @@ queryToSecShouldFail();
 queryToPriShouldFail();
 
 // Repeat logout test, now with the cached secondary down
-assert.eq(1, testDB.auth('a', 'a'));
+assert.eq(1, testDB.auth('a', 'Github@12'));
 
 // Find out the current cached secondary in the repl connection
 conn.setSlaveOk(true);
@@ -117,7 +117,7 @@ for (var x = 0; x < nodeCount; x++) {
 assert(secNodeIdx >= 0);  // test sanity check
 
 // Kill the cached secondary
-replTest.stop(secNodeIdx, 15, {auth: {user: 'user', pwd: 'user'}});
+replTest.stop(secNodeIdx, 15, {auth: {user: 'admin', pwd: 'Github@12'}});
 
 assert(testDB.logout().ok);
 

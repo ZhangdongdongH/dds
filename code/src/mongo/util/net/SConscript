@@ -36,6 +36,7 @@ networkEnv.Library(
         "hostname_canonicalization.cpp",
         "httpclient.cpp",
         "listen.cpp",
+        "whitelist.cpp",
         "message.cpp",
         "message_port.cpp",
         "message_port_startup_param.cpp",
@@ -47,6 +48,9 @@ networkEnv.Library(
         "ssl_manager.cpp",
         "ssl_options.cpp",
         "thread_idle_callback.cpp",
+        "externalconfig.cpp",
+        "publicip_privateiprange.cpp",
+        "privateip_privateiprange.cpp"
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/auth/auth_rolename',

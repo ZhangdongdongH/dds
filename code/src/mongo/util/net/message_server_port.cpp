@@ -117,6 +117,10 @@ public:
             portWithHandler->setPublicIp();
         }
 
+        if(serverGlobalParams.externalConfig.getPrivateIpPrivateIpRange().isPrivateIp(portWithHandler->remote().host())) {
+            portWithHandler->setPrivateIp1();
+        }
+
         if (!portWithHandler->inAdminWhiteList()) {
             if (!Listener::globalTicketHolder.tryAcquire()) {
                 log() << "connection refused because too many open connections: "

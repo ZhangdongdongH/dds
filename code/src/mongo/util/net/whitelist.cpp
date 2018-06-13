@@ -285,7 +285,7 @@ namespace mongo {
         uint32_t nipval = htonl(ipval);
         char str[64] = {0};
         unsigned char *bytes = (unsigned char *)&nipval;
-        sprintf(str, "%d.%d.%d.%d", bytes[0], bytes[1], bytes[2], bytes[3]);
+        snprintf(str, sizeof(str), "%d.%d.%d.%d", bytes[0], bytes[1], bytes[2], bytes[3]);
         addr.assign(str);
     }
 

@@ -37,7 +37,8 @@ env.Library(
         "ssl_manager.cpp",
         "ssl_options.cpp",
         "externalconfig.cpp",
-        "publicip_privateiprange.cpp"
+        "publicip_privateiprange.cpp",
+        "privateip_privateiprange.cpp"
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/server_options_core',

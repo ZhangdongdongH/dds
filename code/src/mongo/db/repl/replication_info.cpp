@@ -57,14 +57,29 @@ using std::stringstream;
 
 namespace repl {
 
-void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level, bool shouldReplacePrivateIpToPublicIp) {
+void appendReplicationInfo(OperationContext* txn, BSONObjBuilder& result, int level, bool shouldReplacePrivateIpToPublicIp, bool shouldReplacePrivateIpToPrivateIp) {
     ReplicationCoordinator* replCoord = getGlobalReplicationCoordinator();
     if (replCoord->getSettings().usingReplSets()) {
         IsMasterResponse isMasterResponse;
         replCoord->fillIsMasterForReplSet(&isMasterResponse);
-        if(shouldReplacePrivateIpToPublicIp == true && txn->getClient()->isFromPublicIp()) {
-            PublicIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPublicIpPrivateIpRange();
 
+        if(shouldReplacePrivateIpToPrivateIp == true && txn->getClient()->isFromPrivateIp1()) {
+            PrivateIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPrivateIpPrivateIpRange();
+
+            std::vector<HostAndPort> tmpVector;
+            for(auto & hp : isMasterResponse.getHosts()) {
+                tmpVector.push_back(HostAndPort(range.getMapIp(hp.host()), hp.port()));
+            }
+            isMasterResponse.setHosts(tmpVector);
+
+            auto meHpOld = isMasterResponse.getMe();
+            auto meHpNew = HostAndPort(range.getMapIp(meHpOld.host()), meHpOld.port());
+            isMasterResponse.setMe(meHpNew);
+            if (isMasterResponse.isMaster()) {
+                isMasterResponse.setPrimary(meHpNew);
+            }
+        } else if(shouldReplacePrivateIpToPublicIp == true && txn->getClient()->isFromPublicIp()) {
+            PublicIpPrivateIpRange & range = serverGlobalParams.externalConfig.getPublicIpPrivateIpRange();
 
             std::vector<HostAndPort> tmpVector;
             for(auto & hp : isMasterResponse.getHosts()) {
@@ -172,7 +187,7 @@ public:
         int level = configElement.numberInt();
 
         BSONObjBuilder result;
-        appendReplicationInfo(txn, result, level, false);
+        appendReplicationInfo(txn, result, level, false, false);
         getGlobalReplicationCoordinator()->processReplSetGetRBID(&result);
 
         return result.obj();
@@ -242,7 +257,7 @@ public:
         if (cmdObj["forShell"].trueValue())
             LastError::get(txn->getClient()).disable();
 
-        appendReplicationInfo(txn, result, 0, true);
+        appendReplicationInfo(txn, result, 0, true, true);
 
         if (serverGlobalParams.configsvrMode == CatalogManager::ConfigServerMode::CSRS) {
             result.append("configsvr", 1);

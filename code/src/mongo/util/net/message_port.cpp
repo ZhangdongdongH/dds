@@ -112,7 +112,7 @@ MessagingPort::MessagingPort(double timeout, logger::LogSeverity ll)
     : MessagingPort(std::make_shared<Socket>(timeout, ll)) {}
 
 MessagingPort::MessagingPort(std::shared_ptr<Socket> sock) 
-    : psock(std::move(sock)), _inAdminWhiteList(false), _inUserWhiteList(false), _fromPublicIp(false) {
+    : psock(std::move(sock)), _inAdminWhiteList(false), _inUserWhiteList(false), _fromPublicIp(false), _fromPrivateIp1(false) {
     SockAddr sa = psock->remoteAddr();
     _remoteParsed = HostAndPort(sa.getAddr(), sa.getPort());
     SockAddr lsa = psock->localAddr();

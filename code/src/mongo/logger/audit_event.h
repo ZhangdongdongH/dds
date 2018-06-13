@@ -29,6 +29,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 #include "mongo/base/error_codes.h"
 #include "mongo/base/string_data.h"

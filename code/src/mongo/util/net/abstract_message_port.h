@@ -73,6 +73,8 @@ public:
     virtual bool isCustomerConnection() const = 0;
     virtual bool isFromPublicIp() {return false;}
     virtual void setPublicIp() {  }
+    virtual bool isFromPrivateIp1() {return false;}
+    virtual void setPrivateIp1() {  }
 
 public:
     // TODO make this private with some helpers

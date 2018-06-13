@@ -208,14 +208,14 @@ Status collMod(OperationContext* txn,
                                     << nss.ns());
     }
 
+    WriteUnitOfWork wunit(txn);
+
     auto statusW = parseCollModRequest(txn, nss, coll, cmdObj, result);
     if (!statusW.isOK()) {
         return statusW.getStatus();
     }
 
     CollModRequest cmr = statusW.getValue();
-
-    WriteUnitOfWork wunit(txn);
 
     if (!cmr.indexExpireAfterSeconds.eoo()) {
         BSONElement& newExpireSecs = cmr.indexExpireAfterSeconds;

@@ -100,6 +100,13 @@ public:
         return false;
     }
 
+    bool isFromPrivateIp1() const {
+        if(_messagingPort) {
+            return _messagingPort->isFromPrivateIp1();
+        }
+        return false;
+    }
+
 protected:
     ClientBasic(ServiceContext* serviceContext, AbstractMessagingPort* messagingPort);
     ~ClientBasic();

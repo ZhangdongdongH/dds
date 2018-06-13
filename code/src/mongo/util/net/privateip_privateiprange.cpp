@@ -38,18 +38,18 @@
 #include "mongo/util/text.h"
 #include "mongo/util/log.h"
 #include "mongo/util/concurrency/rwlock.h"
-#include "mongo/util/net/publicip_privateiprange.h"
+#include "mongo/util/net/privateip_privateiprange.h"
 
 namespace mongo {
 
     // eg: 192.168.1.100,192.168.1.100/24
-    bool PublicIpPrivateIpRange::parseFromString(const std::string& line) {
+    bool PrivateIpPrivateIpRange::parseFromString(const std::string& line) {
 
         std::vector<std::string> keys;
         boost::split(keys, line, boost::is_any_of(":"));
 
         if(!keys.empty()) {
-            if(keys[0] == "publicIpPrivateRange") {
+            if(keys[0] == "privateIpPrivateRange") {
                 if(keys[1] == "001") {
                     return parseFromString001(keys);
                 }
@@ -59,9 +59,9 @@ namespace mongo {
         return false;
     }
 
-    bool PublicIpPrivateIpRange::parseFromString(std::vector<std::string>& keys) {
+    bool PrivateIpPrivateIpRange::parseFromString(std::vector<std::string>& keys) {
         if(!keys.empty()) {
-            if(keys[0] == "publicIpPrivateRange") {
+            if(keys[0] == "privateIpPrivateRange") {
                 if(keys[1] == "001") {
                     return parseFromString001(keys);
                 }
@@ -71,7 +71,7 @@ namespace mongo {
         return false;
     }
 
-    bool PublicIpPrivateIpRange::parseFromString001(std::vector<std::string>& keys) {
+    bool PrivateIpPrivateIpRange::parseFromString001(std::vector<std::string>& keys) {
 
         if(keys.empty()) {
             return false;
@@ -81,7 +81,7 @@ namespace mongo {
             return false;
         }
 
-        if(!(keys[0] == "publicIpPrivateRange" && keys[1] == "001")) {
+        if(!(keys[0] == "privateIpPrivateRange" && keys[1] == "001")) {
             return false;
         }
 
@@ -95,21 +95,21 @@ namespace mongo {
             reset();
             return true;
         }
-        std::map<std::string, std::string> tmpPublicIpMap;
+        std::map<std::string, std::string> tmpIpMap;
         std::map<uint32_t, IpRange> tmpRangeMap;
 
-        parsePublicIp(keys[2], tmpPublicIpMap);
+        parsePrivateIp(keys[2], tmpIpMap);
         parsePrivateIpRange(keys[3], tmpRangeMap);
 
         // swap to update
         rwlock lk(_lock, true);
-        publicIpMap.swap(tmpPublicIpMap);
+        ipMap.swap(tmpIpMap);
         privateIpRangeMap.swap(tmpRangeMap);
 
         return true;
     }
 
-    bool PublicIpPrivateIpRange::parsePrivateIpRange(std::string & range, std::map<uint32_t, IpRange> & tmpRangeMap) {
+    bool PrivateIpPrivateIpRange::parsePrivateIpRange(std::string & range, std::map<uint32_t, IpRange> & tmpRangeMap) {
         // parse each item
         std::multimap<uint32_t, IpRange> tmpRangeMultiMap;
         std::vector<std::string> items = StringSplitter::split(range, ",");
@@ -147,14 +147,14 @@ namespace mongo {
         return true;
     }
 
-    void PublicIpPrivateIpRange::parsePublicIp(std::string publicIp, std::map<std::string, std::string> & tmpPublicIpMap) {
+    void PrivateIpPrivateIpRange::parsePrivateIp(std::string privateIp, std::map<std::string, std::string> & tmpPrivateIpMap) {
 
-        if(publicIp.empty()) {
-            tmpPublicIpMap.clear();
+        if(privateIp.empty()) {
+            tmpPrivateIpMap.clear();
             return;
         }
 
-        std::vector<std::string> items = StringSplitter::split(publicIp, ",");
+        std::vector<std::string> items = StringSplitter::split(privateIp, ",");
         for(auto & item : items) {
             std::vector<std::string> key_value = StringSplitter::split(item, "=");
             if(key_value.size() != 2) {
@@ -162,12 +162,12 @@ namespace mongo {
             }
             boost::trim(key_value[0]);
             boost::trim(key_value[1]);
-            tmpPublicIpMap.insert(std::make_pair(key_value[0], key_value[1]));
+            tmpPrivateIpMap.insert(std::make_pair(key_value[0], key_value[1]));
         }
 
 
     }
-    bool PublicIpPrivateIpRange::isInPrivateIpRange(const std::string& ipstr)
+    bool PrivateIpPrivateIpRange::isInPrivateIpRange(const std::string& ipstr)
     {
         uint32_t ipval = 0;
         if (!addrToUint(ipstr, ipval)) {
@@ -176,9 +176,9 @@ namespace mongo {
         return isInPrivateIpRange(ipval);
     }
 
-    bool PublicIpPrivateIpRange::isPublicIp(const std::string& ipstr) {
+    bool PrivateIpPrivateIpRange::isPrivateIp(const std::string& ipstr) {
 
-        if(!isPublicIpUsed()) {
+        if(!isPrivateIpUsed()) {
             return false;
         }
 
@@ -187,15 +187,15 @@ namespace mongo {
             return false;
         }
 
-        return !isInPrivateIpRange(ipval);
+        return isInPrivateIpRange(ipval);
     }
 
-    int PublicIpPrivateIpRange::rangeSize() {
+    int PrivateIpPrivateIpRange::rangeSize() {
         rwlock lk(_lock, false);
         return privateIpRangeMap.size();
     }
 
-    bool PublicIpPrivateIpRange::isInPrivateIpRange(const uint32_t ip) {
+    bool PrivateIpPrivateIpRange::isInPrivateIpRange(const uint32_t ip) {
         rwlock lk(_lock, false);
 
         if (privateIpRangeMap.empty()) {
@@ -222,7 +222,7 @@ namespace mongo {
     // valid format
     // 192.168.1.100 or 192.168.1.100/24  or 192.168.1.100-192.168.1.200
     // rds rule: 0.0.0.0/0 means all ips
-    bool PublicIpPrivateIpRange::parseItem(const std::string& raw, IpRange& range) {
+    bool PrivateIpPrivateIpRange::parseItem(const std::string& raw, IpRange& range) {
         std::string item = raw;
         boost::trim(item);
           
@@ -270,11 +270,11 @@ namespace mongo {
         return true;
     }
 
-    std::string PublicIpPrivateIpRange::toString() {
+    std::string PrivateIpPrivateIpRange::toString() {
         std::stringstream ss;
         rwlock lk(_lock, false);
-        ss << " publice Ip: [ ";
-        for (auto it = publicIpMap.begin(); it != publicIpMap.end(); it++ ) {
+        ss << " private Ip: [ ";
+        for (auto it = ipMap.begin(); it != ipMap.end(); it++ ) {
             ss << it->first << "=" << it->second << " ";
         }
         ss << "]. privateIpRange: ";
@@ -288,7 +288,7 @@ namespace mongo {
         return ss.str();
     }
 
-    bool PublicIpPrivateIpRange::addrToUint(const std::string& addr, uint32_t& ipval) {
+    bool PrivateIpPrivateIpRange::addrToUint(const std::string& addr, uint32_t& ipval) {
         struct in_addr inaddr;
         int ret = inet_aton(addr.c_str(), &inaddr);
         if (!ret) {
@@ -299,7 +299,7 @@ namespace mongo {
         return true;
     }
 
-    void PublicIpPrivateIpRange::uintToAddr(uint32_t ipval, std::string& addr) {
+    void PrivateIpPrivateIpRange::uintToAddr(uint32_t ipval, std::string& addr) {
         uint32_t nipval = htonl(ipval);
         char str[64] = {0};
         unsigned char *bytes = (unsigned char *)&nipval;

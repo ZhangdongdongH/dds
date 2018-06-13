@@ -122,10 +122,6 @@ public:
         _inAdminWhiteList = true;
     }
 
-    virtual void setPublicIp() {
-        _fromPublicIp = true;
-    }
-
     virtual bool inAdminWhiteList() {
         return _inAdminWhiteList;
     }
@@ -134,8 +130,20 @@ public:
         return (!_inAdminWhiteList);
     }
 
+    virtual void setPublicIp() {
+        _fromPublicIp = true;
+    }
+
     virtual bool isFromPublicIp() {
         return _fromPublicIp;
+    }
+
+    virtual void setPrivateIp1() {
+        _fromPrivateIp1 = true;
+    }
+
+    virtual bool isFromPrivateIp1() {
+        return _fromPrivateIp1;
     }
 
 private:
@@ -146,6 +154,7 @@ private:
     bool _inAdminWhiteList;
     bool _inUserWhiteList;
     bool _fromPublicIp;
+    bool _fromPrivateIp1;
 
 public:
     static void closeAllSockets(unsigned tagMask = 0xffffffff);

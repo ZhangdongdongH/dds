@@ -51,6 +51,7 @@ namespace mongo {
         _path = path;
 
         bool hasReloadPublicIpPrivateIpRange = false;
+        bool hasReloadPrivateIpPrivateIpRange = false;
 
         std::ifstream f(path.c_str(), std::ifstream::in);
         if (f.is_open()) {
@@ -64,6 +65,9 @@ namespace mongo {
                     if(keys[0] == "publicIpPrivateRange") {
                         hasReloadPublicIpPrivateIpRange = true;
                         publicIpPrivateIpRange.parseFromString(keys);
+                    } else if(keys[0] == "privateIpPrivateRange") {
+                        hasReloadPrivateIpPrivateIpRange = true;
+                        privateIpPrivateIpRange.parseFromString(keys);
                     }
                 }
                 readCnt++;
@@ -75,7 +79,14 @@ namespace mongo {
             publicIpPrivateIpRange.reset();
         }
 
-        log() << "parseFromFile is done. publicIpPrivateIpRange is " << publicIpPrivateIpRange.toString() << std::endl;
+        if(!hasReloadPrivateIpPrivateIpRange) {
+            // do not reload means no configuration for privateIpPrivateRange, need reset it.
+            privateIpPrivateIpRange.reset();
+        }
+
+        log() << "parseFromFile is done." << std::endl;
+        log() << "publicIpPrivateIpRange is " << publicIpPrivateIpRange.toString() << std::endl;
+        log() << "privateIpPrivateIpRange is " << privateIpPrivateIpRange.toString() << std::endl;
 
         return true;
     }
@@ -83,6 +94,7 @@ namespace mongo {
     std::string ExternalConfig::toString() {
         std::stringstream ss;
         ss << publicIpPrivateIpRange.toString();
+        ss << privateIpPrivateIpRange.toString();
         return ss.str();
     }
 }

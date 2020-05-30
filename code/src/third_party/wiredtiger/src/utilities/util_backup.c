@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -11,53 +11,31 @@
 static int copy(WT_SESSION *, const char *, const char *);
 static int usage(void);
 
-/*
- * append_target --
- *	Build a list of comma-separated targets.
- */
-static int
-append_target(WT_SESSION *session, const char *target, char **bufp)
-{
-	static bool first = true;
-	static size_t len = 0, remain = 0;
-	static char *buf = NULL;
-
-						/* 20 bytes of slop */
-	if (buf == NULL || remain < strlen(target) + 20) {
-		len += strlen(target) + 512;
-		remain += strlen(target) + 512;
-		if ((buf = realloc(buf, len)) == NULL)
-			return (util_err(session, errno, NULL));
-		*bufp = buf;
-	}
-	if (first) {
-		first = false;
-		strcpy(buf, "target=(");
-	} else
-		buf[strlen(buf) - 1] = ',';	/* overwrite previous ")" */
-	strcat(buf, "\"");
-	strcat(buf, target);
-	strcat(buf, "\")");
-	remain -= strlen(target) + 1;
-
-	return (0);
-}
-
 int
 util_backup(WT_SESSION *session, int argc, char *argv[])
 {
 	WT_CURSOR *cursor;
+	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;
+	WT_SESSION_IMPL *session_impl;
 	int ch;
-	char *config;
 	const char *directory, *name;
+	bool target;
 
-	config = NULL;
+	session_impl = (WT_SESSION_IMPL *)session;
+
+	target = false;
 	while ((ch = __wt_getopt(progname, argc, argv, "t:")) != EOF)
 		switch (ch) {
 		case 't':
-			if (append_target(session, __wt_optarg, &config))
-				return (1);
+			if (!target) {
+				WT_ERR(__wt_scr_alloc(session_impl, 0, &tmp));
+				WT_ERR(__wt_buf_fmt(
+				    session_impl, tmp, "%s", "target=("));
+			}
+			WT_ERR(__wt_buf_catfmt(session_impl, tmp,
+			    "%s\"%s\"", target ? "," : "", __wt_optarg));
+			target = true;
 			break;
 		case '?':
 		default:
@@ -72,8 +50,12 @@ util_backup(WT_SESSION *session, int argc, char *argv[])
 	}
 	directory = *argv;
 
-	if ((ret = session->open_cursor(
-	    session, "backup:", NULL, config, &cursor)) != 0) {
+	/* Terminate any target. */
+	if (target)
+		WT_ERR(__wt_buf_catfmt(session_impl, tmp, "%s", ")"));
+
+	if ((ret = session->open_cursor(session, "backup:",
+	    NULL, target ? (char *)tmp->data : NULL, &cursor)) != 0) {
 		fprintf(stderr, "%s: cursor open(backup:) failed: %s\n",
 		    progname, session->strerror(session, ret));
 		goto err;
@@ -94,7 +76,7 @@ util_backup(WT_SESSION *session, int argc, char *argv[])
 		goto err;
 	}
 
-err:	free(config);
+err:	__wt_scr_free(session_impl, &tmp);
 	return (ret);
 }
 
@@ -109,9 +91,14 @@ copy(WT_SESSION *session, const char *directory, const char *name)
 
 	/* Build the target pathname. */
 	len = strlen(directory) + strlen(name) + 2;
-	if ((to = malloc(len)) == NULL)
-		goto memerr;
-	(void)snprintf(to, len, "%s/%s", directory, name);
+	if ((to = malloc(len)) == NULL) {
+		fprintf(stderr, "%s: %s\n", progname, strerror(errno));
+		return (1);
+	}
+	if ((ret = __wt_snprintf(to, len, "%s/%s", directory, name)) != 0) {
+		fprintf(stderr, "%s: %s\n", progname, strerror(ret));
+		goto err;
+	}
 
 	if (verbose && printf("Backing up %s/%s to %s\n", home, name, to) < 0) {
 		fprintf(stderr, "%s: %s\n", progname, strerror(EIO));
@@ -126,11 +113,7 @@ copy(WT_SESSION *session, const char *directory, const char *name)
 		fprintf(stderr, "%s/%s to %s: backup copy: %s\n",
 		    home, name, to, session->strerror(session, ret));
 
-	if (0) {
-memerr:		fprintf(stderr, "%s: %s\n", progname, strerror(errno));
-	}
 err:	free(to);
-
 	return (ret);
 }
 

@@ -32,6 +32,8 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/index/index_descriptor.h"
 
 #include <algorithm>
@@ -116,21 +118,8 @@ Status IndexDescriptor::isIndexVersionAllowedForCreation(
         case IndexVersion::kV0:
             break;
         case IndexVersion::kV1:
+        case IndexVersion::kV2:
             return Status::OK();
-        case IndexVersion::kV2: {
-            if (ServerGlobalParams::FeatureCompatibility::Version::k32 ==
-                    featureCompatibility.version.load() &&
-                featureCompatibility.validateFeaturesAsMaster.load()) {
-                return {ErrorCodes::CannotCreateIndex,
-                        str::stream() << "Invalid index specification " << indexSpec
-                                      << "; cannot create an index with v="
-                                      << static_cast<int>(IndexVersion::kV2)
-                                      << " when the featureCompatibilityVersion is 3.2. See "
-                                         "http://dochub.mongodb.org/core/"
-                                         "3.4-feature-compatibility."};
-            }
-            return Status::OK();
-        }
     }
     return {ErrorCodes::CannotCreateIndex,
             str::stream() << "Invalid index specification " << indexSpec
@@ -138,26 +127,20 @@ Status IndexDescriptor::isIndexVersionAllowedForCreation(
                           << static_cast<int>(indexVersion)};
 }
 
-IndexVersion IndexDescriptor::getDefaultIndexVersion(
-    ServerGlobalParams::FeatureCompatibility::Version featureCompatibilityVersion) {
-    ServerGlobalParams::FeatureCompatibility featureCompatibility;
-    featureCompatibility.version.store(featureCompatibilityVersion);
-    // We always pass validateFeaturesAsMaster=true since this flag should not affect our
-    // determination of the default index version.
-    featureCompatibility.validateFeaturesAsMaster.store(true);
-    // We pass in an empty object for the index specification because it is only used within the
-    // error reason.
-    if (!IndexDescriptor::isIndexVersionAllowedForCreation(
-             IndexVersion::kV2, featureCompatibility, BSONObj())
-             .isOK()) {
-        // When the featureCompatibilityVersion is 3.2, we use index version v=1 as the default
-        // index version.
-        return IndexVersion::kV1;
-    }
-
-    // When the featureCompatibilityVersion is 3.4, we use index version v=2 as the default index
-    // version.
+IndexVersion IndexDescriptor::getDefaultIndexVersion() {
     return IndexVersion::kV2;
+}
+
+bool IndexDescriptor::isMultikey(OperationContext* opCtx) const {
+    return _collection->getIndexCatalog()->isMultikey(opCtx, this);
+}
+
+MultikeyPaths IndexDescriptor::getMultikeyPaths(OperationContext* opCtx) const {
+    return _collection->getIndexCatalog()->getMultikeyPaths(opCtx, this);
+}
+
+const IndexCatalog* IndexDescriptor::getIndexCatalog() const {
+    return _collection->getIndexCatalog();
 }
 
 bool IndexDescriptor::areIndexOptionsEquivalent(const IndexDescriptor* other) const {

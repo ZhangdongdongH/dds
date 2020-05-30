@@ -35,10 +35,12 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/feature_compatibility_version.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/add_shard_request_type.h"
@@ -55,17 +57,17 @@ const long long kMaxSizeMBDefault = 0;
 /**
  * Internal sharding command run on config servers to add a shard to the cluster.
  */
-class ConfigSvrAddShardCommand : public Command {
+class ConfigSvrAddShardCommand : public BasicCommand {
 public:
-    ConfigSvrAddShardCommand() : Command("_configsvrAddShard") {}
+    ConfigSvrAddShardCommand() : BasicCommand("_configsvrAddShard") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Validates and adds a new shard to the cluster.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Validates and adds a new shard to the cluster.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -78,7 +80,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -86,32 +88,33 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
-            return appendCommandStatus(
-                result,
-                Status(ErrorCodes::IllegalOperation,
-                       "_configsvrAddShard can only be run on config servers"));
+            uasserted(ErrorCodes::IllegalOperation,
+                      "_configsvrAddShard can only be run on config servers");
         }
+
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
 
         auto swParsedRequest = AddShardRequest::parseFromConfigCommand(cmdObj);
-        if (!swParsedRequest.isOK()) {
-            return appendCommandStatus(result, swParsedRequest.getStatus());
-        }
+        uassertStatusOK(swParsedRequest.getStatus());
         auto parsedRequest = std::move(swParsedRequest.getValue());
 
-        auto replCoord = repl::ReplicationCoordinator::get(txn);
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
         auto rsConfig = replCoord->getConfig();
 
         auto validationStatus = parsedRequest.validate(rsConfig.isLocalHostAllowed());
-        if (!validationStatus.isOK()) {
-            return appendCommandStatus(result, validationStatus);
-        }
+        uassertStatusOK(validationStatus);
+
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "addShard must be called with majority writeConcern, got "
+                              << cmdObj,
+                opCtx->getWriteConcern().wMode == WriteConcernOptions::kMajority);
 
         audit::logAddShard(Client::getCurrent(),
                            parsedRequest.hasName() ? parsedRequest.getName() : "",
@@ -119,8 +122,8 @@ public:
                            parsedRequest.hasMaxSize() ? parsedRequest.getMaxSize()
                                                       : kMaxSizeMBDefault);
 
-        StatusWith<string> addShardResult = Grid::get(txn)->catalogManager()->addShard(
-            txn,
+        StatusWith<string> addShardResult = ShardingCatalogManager::get(opCtx)->addShard(
+            opCtx,
             parsedRequest.hasName() ? &parsedRequest.getName() : nullptr,
             parsedRequest.getConnString(),
             parsedRequest.hasMaxSize() ? parsedRequest.getMaxSize() : kMaxSizeMBDefault);
@@ -128,7 +131,7 @@ public:
         if (!addShardResult.isOK()) {
             log() << "addShard request '" << parsedRequest << "'"
                   << "failed" << causedBy(addShardResult.getStatus());
-            return appendCommandStatus(result, addShardResult.getStatus());
+            uassertStatusOK(addShardResult.getStatus());
         }
 
         result << "shardAdded" << addShardResult.getValue();

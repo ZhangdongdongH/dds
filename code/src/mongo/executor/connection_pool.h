@@ -31,10 +31,14 @@
 #include <queue>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/executor/egress_tag_closer.h"
+#include "mongo/executor/egress_tag_closer_manager.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/transport/session.h"
+#include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -55,8 +59,7 @@ struct ConnectionPoolStats;
  * The overall workflow here is to manage separate pools for each unique
  * HostAndPort. See comments on the various Options for how the pool operates.
  */
-class ConnectionPool {
-    class ConnectionHandleDeleter;
+class ConnectionPool : public EgressTagCloser {
     class SpecificPool;
 
 public:
@@ -64,6 +67,7 @@ public:
     class DependentTypeFactoryInterface;
     class TimerInterface;
 
+    using ConnectionHandleDeleter = stdx::function<void(ConnectionInterface* connection)>;
     using ConnectionHandle = std::unique_ptr<ConnectionInterface, ConnectionHandleDeleter>;
 
     using GetConnectionCallback = stdx::function<void(StatusWith<ConnectionHandle>)>;
@@ -71,6 +75,7 @@ public:
     static constexpr Milliseconds kDefaultHostTimeout = Milliseconds(300000);  // 5mins
     static const size_t kDefaultMaxConns;
     static const size_t kDefaultMinConns;
+    static const size_t kDefaultMaxConnecting;
     static constexpr Milliseconds kDefaultRefreshRequirement = Milliseconds(60000);  // 1min
     static constexpr Milliseconds kDefaultRefreshTimeout = Milliseconds(20000);      // 20secs
 
@@ -93,6 +98,13 @@ public:
         size_t maxConnections = kDefaultMaxConns;
 
         /**
+         * The maximum number of processing connections for a host.  This includes pending
+         * connections in setup/refresh. It's designed to rate limit connection storms rather than
+         * steady state processing (as maxConnections does).
+         */
+        size_t maxConnecting = kDefaultMaxConnecting;
+
+        /**
          * Amount of time to wait before timing out a refresh attempt
          */
         Milliseconds refreshTimeout = kDefaultRefreshTimeout;
@@ -109,19 +121,38 @@ public:
          * out connections or new requests
          */
         Milliseconds hostTimeout = kDefaultHostTimeout;
+
+        /**
+         * An egress tag closer manager which will provide global access to this connection pool.
+         * The manager set's tags and potentially drops connections that don't match those tags.
+         *
+         * The manager will hold this pool for the lifetime of the pool.
+         */
+        EgressTagCloserManager* egressTagCloserManager = nullptr;
     };
 
-    explicit ConnectionPool(std::unique_ptr<DependentTypeFactoryInterface> impl,
+    explicit ConnectionPool(std::shared_ptr<DependentTypeFactoryInterface> impl,
                             std::string name,
                             Options options = Options{});
 
     ~ConnectionPool();
 
+    void shutdown();
+
     void dropConnections(const HostAndPort& hostAndPort);
 
+    void dropConnections(transport::Session::TagMask tags) override;
+
+    void mutateTags(const HostAndPort& hostAndPort,
+                    const stdx::function<transport::Session::TagMask(transport::Session::TagMask)>&
+                        mutateFunc) override;
+
+    Future<ConnectionHandle> get(const HostAndPort& hostAndPort, Milliseconds timeout);
     void get(const HostAndPort& hostAndPort, Milliseconds timeout, GetConnectionCallback cb);
 
     void appendConnectionStats(ConnectionPoolStats* stats) const;
+
+    size_t getNumConnectionsPerHost(const HostAndPort& hostAndPort) const;
 
 private:
     void returnConnection(ConnectionInterface* connection);
@@ -132,25 +163,13 @@ private:
     // accessed outside the lock
     const Options _options;
 
-    const std::unique_ptr<DependentTypeFactoryInterface> _factory;
+    const std::shared_ptr<DependentTypeFactoryInterface> _factory;
 
     // The global mutex for specific pool access and the generation counter
     mutable stdx::mutex _mutex;
-    stdx::unordered_map<HostAndPort, std::unique_ptr<SpecificPool>> _pools;
-};
+    stdx::unordered_map<HostAndPort, std::shared_ptr<SpecificPool>> _pools;
 
-class ConnectionPool::ConnectionHandleDeleter {
-public:
-    ConnectionHandleDeleter() = default;
-    ConnectionHandleDeleter(ConnectionPool* pool) : _pool(pool) {}
-
-    void operator()(ConnectionInterface* connection) {
-        if (_pool && connection)
-            _pool->returnConnection(connection);
-    }
-
-private:
-    ConnectionPool* _pool = nullptr;
+    EgressTagCloserManager* _manager;
 };
 
 /**
@@ -194,7 +213,6 @@ class ConnectionPool::ConnectionInterface : public TimerInterface {
 
 public:
     ConnectionInterface() = default;
-
     virtual ~ConnectionInterface() = default;
 
     /**
@@ -209,6 +227,17 @@ public:
      * indicateSuccess() before returning connections to the pool.
      */
     virtual void indicateFailure(Status status) = 0;
+
+    /**
+     * This method updates a 'liveness' timestamp to avoid unnecessarily refreshing
+     * the connection.
+     *
+     * This method should be invoked whenever we perform an operation on the connection that must
+     * have done work.  I.e. actual networking was performed.  If a connection was checked out, then
+     * back in without use, one would expect an indicateSuccess without an indicateUsed.  Only if we
+     * checked it out and did work would we call indicateUsed.
+     */
+    virtual void indicateUsed() = 0;
 
     /**
      * The HostAndPort for the connection. This should be the same as the
@@ -230,12 +259,6 @@ protected:
     using RefreshCallback = stdx::function<void(ConnectionInterface*, Status)>;
 
 private:
-    /**
-     * This method updates a 'liveness' timestamp to avoid unnecessarily refreshing
-     * the connection.
-     */
-    virtual void indicateUsed() = 0;
-
     /**
      * Returns the last used time point for the connection
      */
@@ -291,18 +314,23 @@ public:
     /**
      * Makes a new connection given a host and port
      */
-    virtual std::unique_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
+    virtual std::shared_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
                                                                 size_t generation) = 0;
 
     /**
      * Makes a new timer
      */
-    virtual std::unique_ptr<TimerInterface> makeTimer() = 0;
+    virtual std::shared_ptr<TimerInterface> makeTimer() = 0;
 
     /**
      * Returns the current time point
      */
     virtual Date_t now() = 0;
+
+    /**
+     * shutdown
+     */
+    virtual void shutdown() = 0;
 };
 
 }  // namespace executor

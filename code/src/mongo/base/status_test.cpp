@@ -33,19 +33,25 @@
 #include <boost/exception/exception.hpp>
 
 #include "mongo/base/status.h"
+#include "mongo/config.h"
+#include "mongo/db/json.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
+namespace mongo {
 namespace {
 
-using mongo::ErrorCodes;
-using mongo::Status;
-
 TEST(Basic, Accessors) {
-    Status status(ErrorCodes::MaxError, "error", 9999);
+    Status status(ErrorCodes::MaxError, "error");
     ASSERT_EQUALS(status.code(), ErrorCodes::MaxError);
     ASSERT_EQUALS(status.reason(), "error");
-    ASSERT_EQUALS(status.location(), 9999);
+}
+
+TEST(Basic, IsA) {
+    ASSERT(!Status(ErrorCodes::BadValue, "").isA<ErrorCategory::Interruption>());
+    ASSERT(Status(ErrorCodes::Interrupted, "").isA<ErrorCategory::Interruption>());
+    ASSERT(!Status(ErrorCodes::Interrupted, "").isA<ErrorCategory::ShutdownError>());
 }
 
 TEST(Basic, OKIsAValidStatus) {
@@ -55,11 +61,31 @@ TEST(Basic, OKIsAValidStatus) {
 
 TEST(Basic, Compare) {
     Status errMax(ErrorCodes::MaxError, "error");
-    ASSERT_TRUE(errMax.compare(errMax));
-    ASSERT_FALSE(errMax.compare(Status::OK()));
+    ASSERT_EQ(errMax, errMax);
+    ASSERT_NE(errMax, Status::OK());
+}
 
-    Status errMaxWithLoc(ErrorCodes::MaxError, "error", 9998);
-    ASSERT_FALSE(errMaxWithLoc.compare(errMax));
+TEST(Basic, WithReason) {
+    const Status orig(ErrorCodes::MaxError, "error");
+
+    const auto copy = orig.withReason("reason");
+    ASSERT_EQ(copy.code(), ErrorCodes::MaxError);
+    ASSERT_EQ(copy.reason(), "reason");
+
+    ASSERT_EQ(orig.code(), ErrorCodes::MaxError);
+    ASSERT_EQ(orig.reason(), "error");
+}
+
+TEST(Basic, WithContext) {
+    const Status orig(ErrorCodes::MaxError, "error");
+
+    const auto copy = orig.withContext("context");
+    ASSERT_EQ(copy.code(), ErrorCodes::MaxError);
+    ASSERT(str::startsWith(copy.reason(), "context ")) << copy.reason();
+    ASSERT(str::endsWith(copy.reason(), " error")) << copy.reason();
+
+    ASSERT_EQ(orig.code(), ErrorCodes::MaxError);
+    ASSERT_EQ(orig.reason(), "error");
 }
 
 TEST(Cloning, Copy) {
@@ -199,10 +225,10 @@ TEST(Cloning, OKIsNotRefCounted) {
 }
 
 TEST(Parsing, CodeToEnum) {
-    ASSERT_EQUALS(ErrorCodes::TypeMismatch, ErrorCodes::fromInt(ErrorCodes::TypeMismatch));
-    ASSERT_EQUALS(ErrorCodes::UnknownError, ErrorCodes::fromInt(ErrorCodes::UnknownError));
-    ASSERT_EQUALS(ErrorCodes::MaxError, ErrorCodes::fromInt(ErrorCodes::MaxError));
-    ASSERT_EQUALS(ErrorCodes::OK, ErrorCodes::fromInt(0));
+    ASSERT_EQUALS(ErrorCodes::TypeMismatch, ErrorCodes::Error(int(ErrorCodes::TypeMismatch)));
+    ASSERT_EQUALS(ErrorCodes::UnknownError, ErrorCodes::Error(int(ErrorCodes::UnknownError)));
+    ASSERT_EQUALS(ErrorCodes::MaxError, ErrorCodes::Error(int(ErrorCodes::MaxError)));
+    ASSERT_EQUALS(ErrorCodes::OK, ErrorCodes::duplicateCodeForTest(0));
 }
 
 TEST(Transformers, ExceptionToStatus) {
@@ -213,7 +239,7 @@ TEST(Transformers, ExceptionToStatus) {
 
     Status fromDBExcept = [=]() {
         try {
-            throw DBException(reason, ErrorCodes::TypeMismatch);
+            uasserted(ErrorCodes::TypeMismatch, reason);
         } catch (...) {
             return exceptionToStatus();
         }
@@ -253,4 +279,44 @@ TEST(Transformers, ExceptionToStatus) {
     ASSERT_TRUE(fromBoostExcept.reason().find("boost::exception") != std::string::npos);
 }
 
-}  // unnamed namespace
+DEATH_TEST(ErrorExtraInfo, InvariantAllRegistered, "Invariant failure parsers::") {
+    ErrorExtraInfo::invariantHaveAllParsers();
+}
+
+#ifdef MONGO_CONFIG_DEBUG_BUILD
+DEATH_TEST(ErrorExtraInfo, DassertShouldHaveExtraInfo, "Fatal Assertion 40680") {
+    Status(ErrorCodes::ForTestingErrorExtraInfo, "");
+}
+#else
+TEST(ErrorExtraInfo, ConvertCodeOnMissingExtraInfo) {
+    auto status = Status(ErrorCodes::ForTestingErrorExtraInfo, "");
+    ASSERT_EQ(status, ErrorCodes::duplicateCodeForTest(40671));
+}
+#endif
+
+TEST(ErrorExtraInfo, TypedConstructorWorks) {
+    const auto status = Status(ErrorExtraInfoExample(123), "");
+    ASSERT_EQ(status, ErrorCodes::ForTestingErrorExtraInfo);
+    ASSERT(status.extraInfo());
+    ASSERT(status.extraInfo<ErrorExtraInfoExample>());
+    ASSERT_EQ(status.extraInfo<ErrorExtraInfoExample>()->data, 123);
+}
+
+TEST(ErrorExtraInfo, StatusWhenParserThrows) {
+    auto status = Status(ErrorCodes::ForTestingErrorExtraInfo, "", fromjson("{data: 123}"));
+    ASSERT_EQ(status, ErrorCodes::duplicateCodeForTest(40681));
+    ASSERT(!status.extraInfo());
+    ASSERT(!status.extraInfo<ErrorExtraInfoExample>());
+}
+
+TEST(ErrorExtraInfo, StatusParserWorks) {
+    ErrorExtraInfoExample::EnableParserForTest whenInScope;
+    auto status = Status(ErrorCodes::ForTestingErrorExtraInfo, "", fromjson("{data: 123}"));
+    ASSERT_EQ(status, ErrorCodes::ForTestingErrorExtraInfo);
+    ASSERT(status.extraInfo());
+    ASSERT(status.extraInfo<ErrorExtraInfoExample>());
+    ASSERT_EQ(status.extraInfo<ErrorExtraInfoExample>()->data, 123);
+}
+
+}  // namespace
+}  // namespace mongo

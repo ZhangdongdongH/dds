@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns, requires_fastcount, requires_profiling]
+
 // Confirms that profiled count execution contains all expected metrics with proper values.
 
 (function() {
@@ -68,7 +70,7 @@
 
     assert.eq(profileObj.command.query, query, tojson(profileObj));
     assert.eq(profileObj.keysExamined, 6, tojson(profileObj));
-    assert.eq(profileObj.planSummary, "COUNT_SCAN { a: 1.0 }", tojson(profileObj));
+    assert.eq(profileObj.planSummary, "COUNT_SCAN { a: 1 }", tojson(profileObj));
     assert(profileObj.execStats.hasOwnProperty("stage"), tojson(profileObj));
     assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
 

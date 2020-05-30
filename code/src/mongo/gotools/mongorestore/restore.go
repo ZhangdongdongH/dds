@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongorestore
 
 import (
@@ -111,6 +117,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 
 	var options bson.D
 	var indexes []IndexDocument
+	var uuid string
 
 	// get indexes from system.indexes dump if we have it but don't have metadata files
 	if intent.MetadataFile == nil {
@@ -132,13 +139,49 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 		defer intent.MetadataFile.Close()
 
 		log.Logvf(log.Always, "reading metadata for %v from %v", intent.Namespace(), intent.MetadataLocation)
-		metadata, err := ioutil.ReadAll(intent.MetadataFile)
+		metadataJSON, err := ioutil.ReadAll(intent.MetadataFile)
 		if err != nil {
 			return fmt.Errorf("error reading metadata from %v: %v", intent.MetadataLocation, err)
 		}
-		options, indexes, err = restore.MetadataFromJSON(metadata)
+		metadata, err := restore.MetadataFromJSON(metadataJSON)
 		if err != nil {
 			return fmt.Errorf("error parsing metadata from %v: %v", intent.MetadataLocation, err)
+		}
+		if metadata != nil {
+			options = metadata.Options
+			indexes = metadata.Indexes
+			if restore.OutputOptions.PreserveUUID {
+				if metadata.UUID == "" {
+					return fmt.Errorf("--preserveUUID used but no UUID found in %v", intent.MetadataLocation)
+				}
+				uuid = metadata.UUID
+			}
+		}
+
+		// The only way to specify options on the idIndex is at collection creation time.
+		// This loop pulls out the idIndex from `indexes` and sets it in `options`.
+		for i, index := range indexes {
+			// The index with the name "_id_" will always be the idIndex.
+			if index.Options["name"].(string) == "_id_" {
+				// Remove the index version (to use the default) unless otherwise specified.
+				// If preserving UUID, we have to create a collection via
+				// applyops, which requires the "v" key.
+				if !restore.OutputOptions.KeepIndexVersion && !restore.OutputOptions.PreserveUUID {
+					delete(index.Options, "v")
+				}
+				index.Options["ns"] = intent.Namespace()
+
+				// If the collection has an idIndex, then we are about to create it, so
+				// ignore the value of autoIndexId.
+				for j, opt := range options {
+					if opt.Name == "autoIndexId" {
+						options = append(options[:j], options[j+1:]...)
+					}
+				}
+				options = append(options, bson.DocElem{"idIndex", index})
+				indexes = append(indexes[:i], indexes[i+1:]...)
+				break
+			}
 		}
 
 		if restore.OutputOptions.NoOptionsRestore {
@@ -150,7 +193,7 @@ func (restore *MongoRestore) RestoreIntent(intent *intents.Intent) error {
 	if !collectionExists {
 		log.Logvf(log.Info, "creating collection %v %s", intent.Namespace(), logMessageSuffix)
 		log.Logvf(log.DebugHigh, "using collection options: %#v", options)
-		err = restore.CreateCollection(intent, options)
+		err = restore.CreateCollection(intent, options, uuid)
 		if err != nil {
 			return fmt.Errorf("error creating collection %v: %v", intent.Namespace(), err)
 		}

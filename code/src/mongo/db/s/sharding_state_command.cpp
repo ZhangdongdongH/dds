@@ -32,27 +32,26 @@
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/log.h"
-#include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace {
 
-class ShardingStateCmd : public Command {
+class ShardingStateCmd : public BasicCommand {
 public:
-    ShardingStateCmd() : Command("shardingState") {}
+    ShardingStateCmd() : BasicCommand("shardingState") {}
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -61,19 +60,30 @@ public:
 
     void addRequiredPrivileges(const std::string& dbname,
                                const BSONObj& cmdObj,
-                               std::vector<Privilege>* out) override {
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::shardingState);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
-        ShardingState::get(txn)->appendInfo(txn, result);
+        auto const shardingState = ShardingState::get(opCtx);
+        const bool isEnabled = shardingState->enabled();
+        result.appendBool("enabled", isEnabled);
+
+        if (isEnabled) {
+            auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
+            result.append("configServer",
+                          shardRegistry->getConfigServerConnectionString().toString());
+            result.append("shardName", shardingState->shardId());
+            result.append("clusterId", shardingState->clusterId());
+
+            CollectionShardingState::report(opCtx, &result);
+        }
+
         return true;
     }
 

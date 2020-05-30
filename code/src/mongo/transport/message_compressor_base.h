@@ -39,6 +39,7 @@ namespace mongo {
 enum class MessageCompressor : uint8_t {
     kNoop = 0,
     kSnappy = 1,
+    kZlib = 2,
     kExtended = 255,
 };
 
@@ -52,7 +53,7 @@ public:
     virtual ~MessageCompressorBase() = default;
 
     /*
-     * Returns the name for subclass compressors (e.g. "snappy" or "noop")
+     * Returns the name for subclass compressors (e.g. "snappy", "zlib", or "noop")
      */
     const std::string& getName() const {
         return _name;
@@ -88,28 +89,28 @@ public:
     /*
      * This returns the number of bytes passed in the input for compressData
      */
-    int64_t getCompressedBytesIn() const {
+    int64_t getCompressorBytesIn() const {
         return _compressBytesIn.loadRelaxed();
     }
 
     /*
      * This returns the number of bytes written to output for compressData
      */
-    int64_t getCompressedBytesOut() const {
+    int64_t getCompressorBytesOut() const {
         return _compressBytesOut.loadRelaxed();
     }
 
     /*
      * This returns the number of bytes passed in the input for decompressData
      */
-    int64_t getDecompressedBytesIn() const {
+    int64_t getDecompressorBytesIn() const {
         return _decompressBytesIn.loadRelaxed();
     }
 
     /*
      * This returns the number of bytes written to output for decompressData
      */
-    int64_t getDecompressedBytesOut() const {
+    int64_t getDecompressorBytesOut() const {
         return _decompressBytesOut.loadRelaxed();
     }
 

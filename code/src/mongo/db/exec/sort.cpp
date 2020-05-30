@@ -101,7 +101,7 @@ bool SortStage::isEOF() {
 }
 
 PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     if (_memUsage > maxBytes) {
         mongoutils::str::stream ss;
         ss << "Sort operation used more than the maximum " << maxBytes
@@ -159,16 +159,10 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
             _sorted = true;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+            // The stage which produces a failure is responsible for allocating a working set member
+            // with error details.
+            invariant(WorkingSet::INVALID_ID != id);
             *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "sort stage failed to read in results to sort from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-            }
             return code;
         } else if (PlanStage::NEED_YIELD == code) {
             *out = id;
@@ -193,7 +187,7 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
     return PlanStage::ADVANCED;
 }
 
-void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void SortStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // If we have a deletion, we can fetch and carry on.
     // If we have a mutation, it's easier to fetch and use the previous document.
     // So, no matter what, fetch and keep the doc in play.
@@ -209,7 +203,7 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
         WorkingSetMember* member = _ws->get(it->second);
         verify(member->recordId == dl);
 
-        WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+        WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
 
         // Remove the RecordId from our set of active DLs.
         _wsidByRecordId.erase(it);
@@ -219,7 +213,7 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
 
 unique_ptr<PlanStageStats> SortStage::getStats() {
     _commonStats.isEOF = isEOF();
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     _specificStats.memLimit = maxBytes;
     _specificStats.memUsage = _memUsage;
     _specificStats.limit = _limit;

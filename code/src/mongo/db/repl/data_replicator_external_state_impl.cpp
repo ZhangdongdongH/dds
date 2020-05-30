@@ -32,12 +32,45 @@
 
 #include "mongo/db/repl/data_replicator_external_state_impl.h"
 
+#include "mongo/base/init.h"
+#include "mongo/db/repl/oplog_buffer_blocking_queue.h"
+#include "mongo/db/repl/oplog_buffer_collection.h"
+#include "mongo/db/repl/oplog_buffer_proxy.h"
+#include "mongo/db/repl/replication_consistency_markers.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
+#include "mongo/db/repl/replication_process.h"
+#include "mongo/db/repl/storage_interface.h"
+#include "mongo/db/repl/sync_tail.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace repl {
+namespace {
+
+const char kCollectionOplogBufferName[] = "collection";
+const char kBlockingQueueOplogBufferName[] = "inMemoryBlockingQueue";
+
+// Set this to specify whether to use a collection to buffer the oplog on the destination server
+// during initial sync to prevent rolling over the oplog.
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(initialSyncOplogBuffer,
+                                      std::string,
+                                      kCollectionOplogBufferName);
+
+// Set this to specify size of read ahead buffer in the OplogBufferCollection.
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(initialSyncOplogBufferPeekCacheSize, int, 10000);
+
+MONGO_INITIALIZER(initialSyncOplogBuffer)(InitializerContext*) {
+    if ((initialSyncOplogBuffer != kCollectionOplogBufferName) &&
+        (initialSyncOplogBuffer != kBlockingQueueOplogBufferName)) {
+        return Status(ErrorCodes::BadValue,
+                      "unsupported initial sync oplog buffer option: " + initialSyncOplogBuffer);
+    }
+    return Status::OK();
+}
+
+}  // namespace
 
 DataReplicatorExternalStateImpl::DataReplicatorExternalStateImpl(
     ReplicationCoordinator* replicationCoordinator,
@@ -49,10 +82,6 @@ executor::TaskExecutor* DataReplicatorExternalStateImpl::getTaskExecutor() const
     return _replicationCoordinatorExternalState->getTaskExecutor();
 }
 
-OldThreadPool* DataReplicatorExternalStateImpl::getDbWorkThreadPool() const {
-    return _replicationCoordinatorExternalState->getDbWorkThreadPool();
-}
-
 OpTimeWithTerm DataReplicatorExternalStateImpl::getCurrentTermAndLastCommittedOpTime() {
     if (!_replicationCoordinator->isV1ElectionProtocol()) {
         return {OpTime::kUninitializedTerm, OpTime()};
@@ -60,54 +89,90 @@ OpTimeWithTerm DataReplicatorExternalStateImpl::getCurrentTermAndLastCommittedOp
     return {_replicationCoordinator->getTerm(), _replicationCoordinator->getLastCommittedOpTime()};
 }
 
-void DataReplicatorExternalStateImpl::processMetadata(const rpc::ReplSetMetadata& metadata) {
-    _replicationCoordinator->processReplSetMetadata(metadata);
-    if (metadata.getPrimaryIndex() != rpc::ReplSetMetadata::kNoPrimary) {
+void DataReplicatorExternalStateImpl::processMetadata(
+    const rpc::ReplSetMetadata& replMetadata, boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
+    OpTime newCommitPoint;
+    // If OplogQueryMetadata was provided, use its values, otherwise use the ones in
+    // ReplSetMetadata.
+    if (oqMetadata) {
+        newCommitPoint = oqMetadata->getLastOpCommitted();
+    } else {
+        newCommitPoint = replMetadata.getLastOpCommitted();
+    }
+    _replicationCoordinator->advanceCommitPoint(newCommitPoint);
+
+    _replicationCoordinator->processReplSetMetadata(replMetadata);
+
+    if ((oqMetadata && (oqMetadata->getPrimaryIndex() != rpc::OplogQueryMetadata::kNoPrimary)) ||
+        (replMetadata.getPrimaryIndex() != rpc::ReplSetMetadata::kNoPrimary)) {
         _replicationCoordinator->cancelAndRescheduleElectionTimeout();
     }
 }
 
-bool DataReplicatorExternalStateImpl::shouldStopFetching(const HostAndPort& source,
-                                                         const rpc::ReplSetMetadata& metadata) {
+bool DataReplicatorExternalStateImpl::shouldStopFetching(
+    const HostAndPort& source,
+    const rpc::ReplSetMetadata& replMetadata,
+    boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
     // Re-evaluate quality of sync target.
-    if (_replicationCoordinator->shouldChangeSyncSource(source, metadata)) {
-        LOG(1) << "Canceling oplog query because we have to choose a sync source. Current source: "
-               << source << ", OpTime " << metadata.getLastOpVisible()
-               << ", its sync source index:" << metadata.getSyncSourceIndex();
+    if (_replicationCoordinator->shouldChangeSyncSource(source, replMetadata, oqMetadata)) {
+        // If OplogQueryMetadata was provided, its values were used to determine if we should
+        // change sync sources.
+        if (oqMetadata) {
+            log() << "Canceling oplog query due to OplogQueryMetadata. We have to choose a new "
+                     "sync source. Current source: "
+                  << source << ", OpTime " << oqMetadata->getLastOpApplied()
+                  << ", its sync source index:" << oqMetadata->getSyncSourceIndex();
+
+        } else {
+            log() << "Canceling oplog query due to ReplSetMetadata. We have to choose a new sync "
+                     "source. Current source: "
+                  << source << ", OpTime " << replMetadata.getLastOpVisible()
+                  << ", its sync source index:" << replMetadata.getSyncSourceIndex();
+        }
         return true;
     }
     return false;
 }
 
 std::unique_ptr<OplogBuffer> DataReplicatorExternalStateImpl::makeInitialSyncOplogBuffer(
-    OperationContext* txn) const {
-    return _replicationCoordinatorExternalState->makeInitialSyncOplogBuffer(txn);
+    OperationContext* opCtx) const {
+    if (initialSyncOplogBuffer == kCollectionOplogBufferName) {
+        invariant(initialSyncOplogBufferPeekCacheSize >= 0);
+        OplogBufferCollection::Options options;
+        options.peekCacheSize = std::size_t(initialSyncOplogBufferPeekCacheSize);
+        return stdx::make_unique<OplogBufferProxy>(
+            stdx::make_unique<OplogBufferCollection>(StorageInterface::get(opCtx), options));
+    } else {
+        return stdx::make_unique<OplogBufferBlockingQueue>();
+    }
 }
 
-std::unique_ptr<OplogBuffer> DataReplicatorExternalStateImpl::makeSteadyStateOplogBuffer(
-    OperationContext* txn) const {
-    return _replicationCoordinatorExternalState->makeSteadyStateOplogBuffer(txn);
+StatusWith<OplogApplier::Operations> DataReplicatorExternalStateImpl::getNextApplierBatch(
+    OperationContext* opCtx, OplogBuffer* oplogBuffer) {
+    OplogApplier oplogApplier(
+        nullptr, oplogBuffer, nullptr, nullptr, nullptr, nullptr, {}, nullptr);
+    OplogApplier::BatchLimits batchLimits;
+    batchLimits.bytes = SyncTail::replBatchLimitBytes;
+    batchLimits.ops = std::size_t(SyncTail::replBatchLimitOperations.load());
+    return oplogApplier.getNextApplierBatch(opCtx, batchLimits);
 }
 
-StatusWith<ReplicaSetConfig> DataReplicatorExternalStateImpl::getCurrentConfig() const {
+StatusWith<ReplSetConfig> DataReplicatorExternalStateImpl::getCurrentConfig() const {
     return _replicationCoordinator->getConfig();
 }
 
-StatusWith<OpTime> DataReplicatorExternalStateImpl::_multiApply(
-    OperationContext* txn,
-    MultiApplier::Operations ops,
-    MultiApplier::ApplyOperationFn applyOperation) {
-    return _replicationCoordinatorExternalState->multiApply(txn, std::move(ops), applyOperation);
-}
-
-Status DataReplicatorExternalStateImpl::_multiSyncApply(MultiApplier::OperationPtrs* ops) {
-    return _replicationCoordinatorExternalState->multiSyncApply(ops);
-}
-
-Status DataReplicatorExternalStateImpl::_multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                                               const HostAndPort& source,
-                                                               AtomicUInt32* fetchCount) {
-    return _replicationCoordinatorExternalState->multiInitialSyncApply(ops, source, fetchCount);
+StatusWith<OpTime> DataReplicatorExternalStateImpl::_multiApply(OperationContext* opCtx,
+                                                                MultiApplier::Operations ops,
+                                                                OplogApplier::Observer* observer,
+                                                                const HostAndPort& source,
+                                                                ThreadPool* writerPool) {
+    auto replicationProcess = ReplicationProcess::get(opCtx);
+    auto consistencyMarkers = replicationProcess->getConsistencyMarkers();
+    auto storageInterface = StorageInterface::get(opCtx);
+    SyncTail syncTail(
+        observer, consistencyMarkers, storageInterface, repl::multiInitialSyncApply, writerPool);
+    syncTail.setHostname(source.toString());
+    return syncTail.multiApply(opCtx, std::move(ops));
 }
 
 ReplicationCoordinator* DataReplicatorExternalStateImpl::getReplicationCoordinator() const {

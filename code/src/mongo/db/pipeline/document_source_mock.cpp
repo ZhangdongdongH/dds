@@ -31,6 +31,8 @@
 #include "mongo/db/pipeline/document_source_mock.h"
 
 #include "mongo/db/pipeline/document.h"
+#include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 
 namespace mongo {
 
@@ -38,7 +40,7 @@ using boost::intrusive_ptr;
 using std::deque;
 
 DocumentSourceMock::DocumentSourceMock(deque<GetNextResult> results)
-    : DocumentSource(nullptr),
+    : DocumentSource(new ExpressionContextForTest()),
       queue(std::move(results)),
       sorts(SimpleBSONObjComparator::kInstance.makeBSONObjSet()) {}
 
@@ -52,11 +54,11 @@ const char* DocumentSourceMock::getSourceName() const {
     return "mock";
 }
 
-Value DocumentSourceMock::serialize(bool explain) const {
+Value DocumentSourceMock::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value(Document{{getSourceName(), Document()}});
 }
 
-void DocumentSourceMock::dispose() {
+void DocumentSourceMock::doDispose() {
     isDisposed = true;
 }
 

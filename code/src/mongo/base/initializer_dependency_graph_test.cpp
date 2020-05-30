@@ -34,9 +34,12 @@
 #include "mongo/base/make_string_vector.h"
 #include "mongo/unittest/unittest.h"
 
-#define ADD_INITIALIZER(GRAPH, NAME, FN, PREREQS, DEPS) \
-    (GRAPH).addInitializer(                             \
-        (NAME), (FN), MONGO_MAKE_STRING_VECTOR PREREQS, MONGO_MAKE_STRING_VECTOR DEPS)
+#define ADD_INITIALIZER(GRAPH, NAME, FN, PREREQS, DEPS)      \
+    (GRAPH).addInitializer((NAME),                           \
+                           (FN),                             \
+                           DeinitializerFunction(),          \
+                           MONGO_MAKE_STRING_VECTOR PREREQS, \
+                           MONGO_MAKE_STRING_VECTOR DEPS)
 
 #define ASSERT_ADD_INITIALIZER(GRAPH, NAME, FN, PREREQS, DEPS) \
     ASSERT_EQUALS(Status::OK(), ADD_INITIALIZER(GRAPH, NAME, FN, PREREQS, DEPS))
@@ -272,7 +275,9 @@ TEST(InitializerDependencyGraphTest, TopSortFailsWhenMissingPrerequisite) {
     InitializerDependencyGraph graph;
     std::vector<std::string> nodeNames;
     ASSERT_ADD_INITIALIZER(graph, "B", doNothing, ("A"), MONGO_NO_DEPENDENTS);
-    ASSERT_EQUALS(ErrorCodes::BadValue, graph.topSort(&nodeNames));
+    auto status = graph.topSort(&nodeNames);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "depends on missing initializer A");
 }
 
 TEST(InitializerDependencyGraphTest, TopSortFailsWhenMissingDependent) {
@@ -282,7 +287,9 @@ TEST(InitializerDependencyGraphTest, TopSortFailsWhenMissingDependent) {
     InitializerDependencyGraph graph;
     std::vector<std::string> nodeNames;
     ASSERT_ADD_INITIALIZER(graph, "A", doNothing, MONGO_NO_PREREQUISITES, ("B"));
-    ASSERT_EQUALS(ErrorCodes::BadValue, graph.topSort(&nodeNames));
+    auto status = graph.topSort(&nodeNames);
+    ASSERT_EQUALS(ErrorCodes::BadValue, status);
+    ASSERT_STRING_CONTAINS(status.reason(), "No implementation provided for initializer B");
 }
 
 }  // namespace

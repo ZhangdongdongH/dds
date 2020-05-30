@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Package intents provides utilities for performing dump/restore operations.
 package intents
 
@@ -55,6 +61,9 @@ type Intent struct {
 	// Collection options
 	Options *bson.D
 
+	// UUID (for MongoDB 3.6+) as a big-endian hex string
+	UUID string
+
 	// File/collection size, for some prioritizer implementations.
 	// Units don't matter as long as they are consistent for a given use case.
 	Size int64
@@ -105,8 +114,12 @@ func (it *Intent) IsSystemIndexes() bool {
 	return it.C == "system.indexes"
 }
 
+func (it *Intent) IsSystemProfile() bool {
+	return it.C == "system.profile"
+}
+
 func (intent *Intent) IsSpecialCollection() bool {
-	return intent.IsSystemIndexes() || intent.IsUsers() || intent.IsRoles() || intent.IsAuthVersion()
+	return intent.IsSystemIndexes() || intent.IsUsers() || intent.IsRoles() || intent.IsAuthVersion() || intent.IsSystemProfile() || intent.IsOplog()
 }
 
 func (it *Intent) IsView() bool {
@@ -285,6 +298,7 @@ func (manager *Manager) putNormalIntentWithNamespace(ns string, intent *Intent) 
 // Put inserts an intent into the manager with the same source namespace as
 // its destinations.
 func (manager *Manager) Put(intent *Intent) {
+	log.Logvf(log.DebugLow, "enqueued collection '%v'", intent.Namespace())
 	manager.PutWithNamespace(intent.Namespace(), intent)
 }
 

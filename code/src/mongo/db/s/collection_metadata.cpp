@@ -34,6 +34,7 @@
 
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -41,197 +42,58 @@
 
 namespace mongo {
 
-using std::unique_ptr;
-using std::make_pair;
-using std::string;
-using std::vector;
-using str::stream;
+CollectionMetadata::CollectionMetadata(std::shared_ptr<ChunkManager> cm, const ShardId& thisShardId)
+    : _cm(std::move(cm)), _thisShardId(thisShardId) {}
 
-CollectionMetadata::CollectionMetadata()
-    : _pendingMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()),
-      _chunksMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()),
-      _rangesMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()) {}
+RangeMap CollectionMetadata::getChunks() const {
+    invariant(isSharded());
 
-CollectionMetadata::CollectionMetadata(const BSONObj& keyPattern, ChunkVersion collectionVersion)
-    : _collVersion(collectionVersion),
-      _shardVersion(ChunkVersion(0, 0, collectionVersion.epoch())),
-      _keyPattern(keyPattern.getOwned()),
-      _pendingMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()),
-      _chunksMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()),
-      _rangesMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<CachedChunkInfo>()) {}
+    RangeMap chunksMap(SimpleBSONObjComparator::kInstance.makeBSONObjIndexedMap<BSONObj>());
 
-CollectionMetadata::~CollectionMetadata() = default;
+    for (const auto& chunk : _cm->chunks()) {
+        if (chunk.getShardId() != _thisShardId)
+            continue;
 
-unique_ptr<CollectionMetadata> CollectionMetadata::clonePlusChunk(
-    const BSONObj& minKey, const BSONObj& maxKey, const ChunkVersion& chunkVersion) const {
-    invariant(chunkVersion.epoch() == _shardVersion.epoch());
-    invariant(chunkVersion.isSet());
-    invariant(chunkVersion > _shardVersion);
-    invariant(minKey.woCompare(maxKey) < 0);
-    invariant(!rangeMapOverlaps(_chunksMap, minKey, maxKey));
-
-    unique_ptr<CollectionMetadata> metadata(stdx::make_unique<CollectionMetadata>());
-    metadata->_keyPattern = _keyPattern.getOwned();
-    metadata->fillKeyPatternFields();
-    metadata->_pendingMap = _pendingMap;
-    metadata->_chunksMap = _chunksMap;
-    metadata->_chunksMap.insert(
-        make_pair(minKey.getOwned(), CachedChunkInfo(maxKey.getOwned(), chunkVersion)));
-    metadata->_shardVersion = chunkVersion;
-    metadata->_collVersion = chunkVersion > _collVersion ? chunkVersion : _collVersion;
-    metadata->fillRanges();
-
-    invariant(metadata->isValid());
-    return metadata;
-}
-
-std::unique_ptr<CollectionMetadata> CollectionMetadata::cloneMinusPending(
-    const ChunkType& chunk) const {
-    invariant(rangeMapContains(_pendingMap, chunk.getMin(), chunk.getMax()));
-
-    unique_ptr<CollectionMetadata> metadata(stdx::make_unique<CollectionMetadata>());
-    metadata->_keyPattern = _keyPattern.getOwned();
-    metadata->fillKeyPatternFields();
-    metadata->_pendingMap = _pendingMap;
-    metadata->_pendingMap.erase(chunk.getMin());
-
-    metadata->_chunksMap = _chunksMap;
-    metadata->_rangesMap = _rangesMap;
-    metadata->_shardVersion = _shardVersion;
-    metadata->_collVersion = _collVersion;
-
-    invariant(metadata->isValid());
-    return metadata;
-}
-
-std::unique_ptr<CollectionMetadata> CollectionMetadata::clonePlusPending(
-    const ChunkType& chunk) const {
-    invariant(!rangeMapOverlaps(_chunksMap, chunk.getMin(), chunk.getMax()));
-
-    unique_ptr<CollectionMetadata> metadata(stdx::make_unique<CollectionMetadata>());
-    metadata->_keyPattern = _keyPattern.getOwned();
-    metadata->fillKeyPatternFields();
-    metadata->_pendingMap = _pendingMap;
-    metadata->_chunksMap = _chunksMap;
-    metadata->_rangesMap = _rangesMap;
-    metadata->_shardVersion = _shardVersion;
-    metadata->_collVersion = _collVersion;
-
-    // If there are any pending chunks on the interval to be added this is ok, since pending chunks
-    // aren't officially tracked yet and something may have changed on servers we do not see yet.
-    //
-    // We remove any chunks we overlap because the remote request starting a chunk migration is what
-    // is authoritative.
-
-    if (rangeMapOverlaps(_pendingMap, chunk.getMin(), chunk.getMax())) {
-        RangeVector pendingOverlap;
-        getRangeMapOverlap(_pendingMap, chunk.getMin(), chunk.getMax(), &pendingOverlap);
-
-        warning() << "new pending chunk " << redact(rangeToString(chunk.getMin(), chunk.getMax()))
-                  << " overlaps existing pending chunks " << redact(overlapToString(pendingOverlap))
-                  << ", a migration may not have completed";
-
-        for (RangeVector::iterator it = pendingOverlap.begin(); it != pendingOverlap.end(); ++it) {
-            metadata->_pendingMap.erase(it->first);
-        }
+        chunksMap.emplace_hint(chunksMap.end(), chunk.getMin(), chunk.getMax());
     }
 
-    // The pending map entry cannot contain a specific chunk version because we don't know what
-    // version would be generated for it at commit time. That's why we insert an IGNORED value.
-    metadata->_pendingMap.insert(
-        make_pair(chunk.getMin(), CachedChunkInfo(chunk.getMax(), ChunkVersion::IGNORED())));
-
-    invariant(metadata->isValid());
-    return metadata;
-}
-
-bool CollectionMetadata::keyBelongsToMe(const BSONObj& key) const {
-    // For now, collections don't move. So if the collection is not sharded, assume
-    // the document with the given key can be accessed.
-    if (_keyPattern.isEmpty()) {
-        return true;
-    }
-
-    if (_rangesMap.size() <= 0) {
-        return false;
-    }
-
-    RangeMap::const_iterator it = _rangesMap.upper_bound(key);
-    if (it != _rangesMap.begin())
-        it--;
-
-    return rangeContains(it->first, it->second.getMaxKey(), key);
-}
-
-bool CollectionMetadata::keyIsPending(const BSONObj& key) const {
-    // If we aren't sharded, then the key is never pending (though it belongs-to-me)
-    if (_keyPattern.isEmpty()) {
-        return false;
-    }
-
-    if (_pendingMap.size() <= 0) {
-        return false;
-    }
-
-    RangeMap::const_iterator it = _pendingMap.upper_bound(key);
-    if (it != _pendingMap.begin())
-        it--;
-
-    bool isPending = rangeContains(it->first, it->second.getMaxKey(), key);
-    return isPending;
+    return chunksMap;
 }
 
 bool CollectionMetadata::getNextChunk(const BSONObj& lookupKey, ChunkType* chunk) const {
-    RangeMap::const_iterator upperChunkIt = _chunksMap.upper_bound(lookupKey);
-    RangeMap::const_iterator lowerChunkIt = upperChunkIt;
+    invariant(isSharded());
 
-    if (upperChunkIt != _chunksMap.begin()) {
-        --lowerChunkIt;
-    } else {
-        lowerChunkIt = _chunksMap.end();
-    }
+    auto foundIt = _cm->getNextChunkOnShard(lookupKey, _thisShardId);
+    if (foundIt.begin() == foundIt.end())
+        return false;
 
-    if (lowerChunkIt != _chunksMap.end() &&
-        lowerChunkIt->second.getMaxKey().woCompare(lookupKey) > 0) {
-        chunk->setMin(lowerChunkIt->first);
-        chunk->setMax(lowerChunkIt->second.getMaxKey());
-        chunk->setVersion(lowerChunkIt->second.getVersion());
-        return true;
-    }
-
-    if (upperChunkIt != _chunksMap.end()) {
-        chunk->setMin(upperChunkIt->first);
-        chunk->setMax(upperChunkIt->second.getMaxKey());
-        chunk->setVersion(upperChunkIt->second.getVersion());
-        return true;
-    }
-
-    return false;
+    const auto& nextChunk = *foundIt.begin();
+    chunk->setMin(nextChunk.getMin());
+    chunk->setMax(nextChunk.getMax());
+    return true;
 }
 
 bool CollectionMetadata::getDifferentChunk(const BSONObj& chunkMinKey,
                                            ChunkType* differentChunk) const {
-    RangeMap::const_iterator upperChunkIt = _chunksMap.end();
-    RangeMap::const_iterator lowerChunkIt = _chunksMap.begin();
-
-    while (lowerChunkIt != upperChunkIt) {
-        if (lowerChunkIt->first.woCompare(chunkMinKey) != 0) {
-            differentChunk->setMin(lowerChunkIt->first);
-            differentChunk->setMax(lowerChunkIt->second.getMaxKey());
-            differentChunk->setVersion(lowerChunkIt->second.getVersion());
-            return true;
+    for (const auto& found : _cm->chunks()) {
+        if (found.getShardId() == _thisShardId) {
+            if (found.getMin().woCompare(chunkMinKey) != 0) {
+                differentChunk->setMin(found.getMin());
+                differentChunk->setMax(found.getMax());
+                return true;
+            }
         }
-        ++lowerChunkIt;
     }
-
     return false;
 }
 
-Status CollectionMetadata::checkChunkIsValid(const ChunkType& chunk) {
+Status CollectionMetadata::checkChunkIsValid(const ChunkType& chunk) const {
+    invariant(isSharded());
+
     ChunkType existingChunk;
 
     if (!getNextChunk(chunk.getMin(), &existingChunk)) {
-        return {ErrorCodes::IncompatibleShardingMetadata,
+        return {ErrorCodes::StaleShardVersion,
                 str::stream() << "Chunk with bounds "
                               << ChunkRange(chunk.getMin(), chunk.getMax()).toString()
                               << " is not owned by this shard."};
@@ -239,235 +101,137 @@ Status CollectionMetadata::checkChunkIsValid(const ChunkType& chunk) {
 
     if (existingChunk.getMin().woCompare(chunk.getMin()) ||
         existingChunk.getMax().woCompare(chunk.getMax())) {
-        return {ErrorCodes::IncompatibleShardingMetadata,
+        return {ErrorCodes::StaleShardVersion,
                 str::stream() << "Unable to find chunk with the exact bounds "
                               << ChunkRange(chunk.getMin(), chunk.getMax()).toString()
                               << " at collection version "
                               << getCollVersion().toString()};
     }
 
-    if (chunk.isVersionSet() && !chunk.getVersion().isStrictlyEqualTo(existingChunk.getVersion())) {
-        return {ErrorCodes::IncompatibleShardingMetadata,
-                str::stream() << "Chunk with the specified bounds exists but the version does not "
-                                 "match. Expected: "
-                              << chunk.getVersion().toString()
-                              << ", actual: "
-                              << existingChunk.getVersion().toString()};
-    }
-
     return Status::OK();
 }
 
+BSONObj CollectionMetadata::extractDocumentKey(BSONObj const& doc) const {
+    BSONObj key;
+
+    if (isSharded()) {
+        auto const& pattern = getChunkManager()->getShardKeyPattern();
+        key = dotted_path_support::extractElementsBasedOnTemplate(doc, pattern.toBSON());
+        if (pattern.hasId()) {
+            return key;
+        }
+        // else, try to append an _id field from the document.
+    }
+
+    if (auto id = doc["_id"]) {
+        return key.isEmpty() ? id.wrap() : BSONObjBuilder(std::move(key)).append(id).obj();
+    }
+
+    // For legacy documents that lack an _id, use the document itself as its key.
+    return doc;
+}
+
 void CollectionMetadata::toBSONBasic(BSONObjBuilder& bb) const {
-    _collVersion.addToBSON(bb, "collVersion");
-    _shardVersion.addToBSON(bb, "shardVersion");
-    bb.append("keyPattern", _keyPattern);
+    if (isSharded()) {
+        _cm->getVersion().appendLegacyWithField(&bb, "collVersion");
+        getShardVersion().appendLegacyWithField(&bb, "shardVersion");
+        bb.append("keyPattern", _cm->getShardKeyPattern().toBSON());
+    } else {
+        ChunkVersion::UNSHARDED().appendLegacyWithField(&bb, "collVersion");
+        ChunkVersion::UNSHARDED().appendLegacyWithField(&bb, "shardVersion");
+    }
 }
 
 void CollectionMetadata::toBSONChunks(BSONArrayBuilder& bb) const {
-    if (_chunksMap.empty())
+    if (!isSharded())
         return;
 
-    for (RangeMap::const_iterator it = _chunksMap.begin(); it != _chunksMap.end(); ++it) {
-        BSONArrayBuilder chunkBB(bb.subarrayStart());
-        chunkBB.append(it->first);
-        chunkBB.append(it->second.getMaxKey());
-        chunkBB.done();
+    for (const auto& chunk : _cm->chunks()) {
+        if (chunk.getShardId() == _thisShardId) {
+            BSONArrayBuilder chunkBB(bb.subarrayStart());
+            chunkBB.append(chunk.getMin());
+            chunkBB.append(chunk.getMax());
+            chunkBB.done();
+        }
     }
 }
 
-void CollectionMetadata::toBSONPending(BSONArrayBuilder& bb) const {
-    if (_pendingMap.empty())
-        return;
-
-    for (RangeMap::const_iterator it = _pendingMap.begin(); it != _pendingMap.end(); ++it) {
-        BSONArrayBuilder pendingBB(bb.subarrayStart());
-        pendingBB.append(it->first);
-        pendingBB.append(it->second.getMaxKey());
-        pendingBB.done();
-    }
-}
-
-string CollectionMetadata::toStringBasic() const {
-    return stream() << "collection version: " << _collVersion.toString()
-                    << ", shard version: " << _shardVersion.toString();
-}
-
-bool CollectionMetadata::getNextOrphanRange(const BSONObj& origLookupKey, KeyRange* range) const {
-    if (_keyPattern.isEmpty())
-        return false;
-
-    BSONObj lookupKey = origLookupKey;
-    BSONObj maxKey = getMaxKey();  // so we don't keep rebuilding
-    while (lookupKey.woCompare(maxKey) < 0) {
-        RangeMap::const_iterator lowerChunkIt = _chunksMap.end();
-        RangeMap::const_iterator upperChunkIt = _chunksMap.end();
-
-        if (!_chunksMap.empty()) {
-            upperChunkIt = _chunksMap.upper_bound(lookupKey);
-            lowerChunkIt = upperChunkIt;
-            if (upperChunkIt != _chunksMap.begin())
-                --lowerChunkIt;
-            else
-                lowerChunkIt = _chunksMap.end();
-        }
-
-        // If we overlap, continue after the overlap
-        // TODO: Could optimize slightly by finding next non-contiguous chunk
-        if (lowerChunkIt != _chunksMap.end() &&
-            lowerChunkIt->second.getMaxKey().woCompare(lookupKey) > 0) {
-            lookupKey = lowerChunkIt->second.getMaxKey();
-            continue;
-        }
-
-        RangeMap::const_iterator lowerPendingIt = _pendingMap.end();
-        RangeMap::const_iterator upperPendingIt = _pendingMap.end();
-
-        if (!_pendingMap.empty()) {
-            upperPendingIt = _pendingMap.upper_bound(lookupKey);
-            lowerPendingIt = upperPendingIt;
-            if (upperPendingIt != _pendingMap.begin())
-                --lowerPendingIt;
-            else
-                lowerPendingIt = _pendingMap.end();
-        }
-
-        // If we overlap, continue after the overlap
-        // TODO: Could optimize slightly by finding next non-contiguous chunk
-        if (lowerPendingIt != _pendingMap.end() &&
-            lowerPendingIt->second.getMaxKey().woCompare(lookupKey) > 0) {
-            lookupKey = lowerPendingIt->second.getMaxKey();
-            continue;
-        }
-
-        //
-        // We know that the lookup key is not covered by a chunk or pending range, and where the
-        // previous chunk and pending chunks are.  Now we fill in the bounds as the closest
-        // bounds of the surrounding ranges in both maps.
-        //
-
-        range->keyPattern = _keyPattern;
-        range->minKey = getMinKey();
-        range->maxKey = maxKey;
-
-        if (lowerChunkIt != _chunksMap.end() &&
-            lowerChunkIt->second.getMaxKey().woCompare(range->minKey) > 0) {
-            range->minKey = lowerChunkIt->second.getMaxKey();
-        }
-
-        if (upperChunkIt != _chunksMap.end() && upperChunkIt->first.woCompare(range->maxKey) < 0) {
-            range->maxKey = upperChunkIt->first;
-        }
-
-        if (lowerPendingIt != _pendingMap.end() &&
-            lowerPendingIt->second.getMaxKey().woCompare(range->minKey) > 0) {
-            range->minKey = lowerPendingIt->second.getMaxKey();
-        }
-
-        if (upperPendingIt != _pendingMap.end() &&
-            upperPendingIt->first.woCompare(range->maxKey) < 0) {
-            range->maxKey = upperPendingIt->first;
-        }
-
-        return true;
-    }
-
-    return false;
-}
-
-BSONObj CollectionMetadata::getMinKey() const {
-    BSONObjIterator it(_keyPattern);
-    BSONObjBuilder minKeyB;
-    while (it.more())
-        minKeyB << it.next().fieldName() << MINKEY;
-    return minKeyB.obj();
-}
-
-BSONObj CollectionMetadata::getMaxKey() const {
-    BSONObjIterator it(_keyPattern);
-    BSONObjBuilder maxKeyB;
-    while (it.more())
-        maxKeyB << it.next().fieldName() << MAXKEY;
-    return maxKeyB.obj();
-}
-
-bool CollectionMetadata::isValid() const {
-    if (_shardVersion > _collVersion)
-        return false;
-    if (_collVersion.majorVersion() == 0)
-        return false;
-    if (_collVersion.epoch() != _shardVersion.epoch())
-        return false;
-
-    if (_shardVersion.majorVersion() > 0) {
-        // Must be chunks
-        if (_rangesMap.size() == 0 || _chunksMap.size() == 0)
-            return false;
+std::string CollectionMetadata::toStringBasic() const {
+    if (isSharded()) {
+        return str::stream() << "collection version: " << _cm->getVersion().toString()
+                             << ", shard version: " << getShardVersion().toString();
     } else {
-        // No chunks
-        if (_shardVersion.minorVersion() > 0)
-            return false;
-        if (_rangesMap.size() > 0 || _chunksMap.size() > 0)
-            return false;
+        return "collection version: <unsharded>";
     }
-
-    return true;
 }
 
-bool CollectionMetadata::isValidKey(const BSONObj& key) const {
-    BSONObjIterator it(_keyPattern);
-    while (it.more()) {
-        BSONElement next = it.next();
-        if (!key.hasField(next.fieldName()))
-            return false;
-    }
-    return key.nFields() == _keyPattern.nFields();
-}
+boost::optional<ChunkRange> CollectionMetadata::getNextOrphanRange(
+    RangeMap const& receivingChunks, BSONObj const& origLookupKey) const {
+    invariant(isSharded());
 
-void CollectionMetadata::fillRanges() {
-    if (_chunksMap.empty())
-        return;
+    const BSONObj maxKey = getMaxKey();
+    BSONObj lookupKey = origLookupKey;
 
-    // Load the chunk information, coallesceing their ranges. The version for this shard would be
-    // the highest version for any of the chunks.
-    BSONObj min, max;
-    for (const auto& entry : _chunksMap) {
-        BSONObj currMin = entry.first;
-        BSONObj currMax = entry.second.getMaxKey();
+    auto chunksMap = getChunks();
 
-        // coalesce the chunk's bounds in ranges if they are adjacent chunks
-        if (min.isEmpty()) {
-            min = currMin;
-            max = currMax;
+    while (lookupKey.woCompare(maxKey) < 0) {
+        using Its = std::pair<RangeMap::const_iterator, RangeMap::const_iterator>;
+
+        const auto patchLookupKey = [&](RangeMap const& map) -> boost::optional<Its> {
+            auto lowerIt = map.end(), upperIt = map.end();
+
+            if (!map.empty()) {
+                upperIt = map.upper_bound(lookupKey);
+                lowerIt = upperIt;
+                if (upperIt != map.begin())
+                    --lowerIt;
+                else
+                    lowerIt = map.end();
+            }
+
+            // If we overlap, continue after the overlap
+            //
+            // TODO: Could optimize slightly by finding next non-contiguous chunk
+            if (lowerIt != map.end() && lowerIt->second.woCompare(lookupKey) > 0) {
+                lookupKey = lowerIt->second;  // note side effect
+                return boost::none;
+            } else {
+                return Its(lowerIt, upperIt);
+            }
+        };
+
+        boost::optional<Its> chunksIts, pendingIts;
+        if (!(chunksIts = patchLookupKey(chunksMap)) ||
+            !(pendingIts = patchLookupKey(receivingChunks))) {
             continue;
         }
-        if (SimpleBSONObjComparator::kInstance.evaluate(max == currMin)) {
-            max = currMax;
-            continue;
-        }
 
-        _rangesMap.insert(make_pair(min, CachedChunkInfo(max, ChunkVersion::IGNORED())));
+        BSONObj rangeMin = getMinKey();
+        BSONObj rangeMax = maxKey;
 
-        min = currMin;
-        max = currMax;
+        const auto patchArgRange = [&rangeMin, &rangeMax](RangeMap const& map, Its const& its) {
+            // We know that the lookup key is not covered by a chunk or pending range, and where the
+            // previous chunk and pending chunks are.  Now we fill in the bounds as the closest
+            // bounds of the surrounding ranges in both maps.
+            const auto& lowerIt = its.first;
+            const auto& upperIt = its.second;
+
+            if (lowerIt != map.end() && lowerIt->second.woCompare(rangeMin) > 0) {
+                rangeMin = lowerIt->second;
+            }
+
+            if (upperIt != map.end() && upperIt->first.woCompare(rangeMax) < 0) {
+                rangeMax = upperIt->first;
+            }
+        };
+
+        patchArgRange(chunksMap, *chunksIts);
+        patchArgRange(receivingChunks, *pendingIts);
+
+        return ChunkRange(rangeMin.getOwned(), rangeMax.getOwned());
     }
 
-    invariant(!min.isEmpty());
-    invariant(!max.isEmpty());
-
-    _rangesMap.insert(make_pair(min, CachedChunkInfo(max, ChunkVersion::IGNORED())));
-}
-
-void CollectionMetadata::fillKeyPatternFields() {
-    // Parse the shard keys into the states 'keys' and 'keySet' members.
-    BSONObjIterator patternIter = _keyPattern.begin();
-    while (patternIter.more()) {
-        BSONElement current = patternIter.next();
-
-        _keyFields.mutableVector().push_back(new FieldRef);
-        FieldRef* const newFieldRef = _keyFields.mutableVector().back();
-        newFieldRef->parse(current.fieldNameStringData());
-    }
+    return boost::none;
 }
 
 }  // namespace mongo

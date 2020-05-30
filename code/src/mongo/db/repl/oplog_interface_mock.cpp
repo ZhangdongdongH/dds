@@ -64,6 +64,10 @@ OplogInterfaceMock::OplogInterfaceMock(std::initializer_list<Operation> operatio
 
 OplogInterfaceMock::OplogInterfaceMock(const Operations& operations) : _operations(operations) {}
 
+void OplogInterfaceMock::setOperations(const Operations& operations) {
+    _operations = operations;
+}
+
 std::string OplogInterfaceMock::toString() const {
     return "OplogInterfaceMock";
 }
@@ -71,6 +75,11 @@ std::string OplogInterfaceMock::toString() const {
 std::unique_ptr<OplogInterface::Iterator> OplogInterfaceMock::makeIterator() const {
     return std::unique_ptr<OplogInterface::Iterator>(
         new OplogIteratorMock(_operations.begin(), _operations.end()));
+}
+
+HostAndPort OplogInterfaceMock::hostAndPort() const {
+    // Returns a default-constructed HostAndPort, which has an empty hostname and an invalid port.
+    return {};
 }
 
 }  // namespace repl

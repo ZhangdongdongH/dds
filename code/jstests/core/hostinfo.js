@@ -1,3 +1,7 @@
+// @tags: [
+//     # `hostInfo` command is not available on embedded
+//     incompatible_with_embedded,
+// ]
 // SERVER-4615:  Ensure hostInfo() command returns expected results on each platform
 
 assert.commandWorked(db.hostInfo());
@@ -30,4 +34,14 @@ if (hostinfo.os.type != "") {
     assert.neq(hostinfo.system.numCores, "" || null || 0, "Missing Number of Cores");
     assert.neq(hostinfo.system.cpuArch, "" || null, "Missing CPU Architecture");
     assert.neq(hostinfo.system.numaEnabled, "" || null, "Missing NUMA flag");
+}
+
+var buildInfo = assert.commandWorked(db.runCommand({buildInfo: 1}));
+if (buildInfo.buildEnvironment && buildInfo.buildEnvironment.target_arch) {
+    let targetArch = buildInfo.buildEnvironment.target_arch;
+    if (targetArch == "i386")
+        assert.eq(hostinfo.system.cpuAddrSize, 32);
+    else
+        assert.eq(hostinfo.system.cpuAddrSize, 64);
+    assert.eq(hostinfo.system.cpuAddrSize, buildInfo.bits);
 }

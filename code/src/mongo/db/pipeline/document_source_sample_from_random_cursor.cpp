@@ -52,6 +52,7 @@ DocumentSourceSampleFromRandomCursor::DocumentSourceSampleFromRandomCursor(
     : DocumentSource(pExpCtx),
       _size(size),
       _idField(std::move(idField)),
+      _seenDocs(pExpCtx->getValueComparator().makeUnorderedValueSet()),
       _nDocsInColl(nDocsInCollection) {}
 
 const char* DocumentSourceSampleFromRandomCursor::getSourceName() const {
@@ -76,7 +77,7 @@ double smallestFromSampleOfUniform(PseudoRandom* prng, size_t N) {
 DocumentSource::GetNextResult DocumentSourceSampleFromRandomCursor::getNext() {
     pExpCtx->checkForInterrupt();
 
-    if (_seenDocs->size() >= static_cast<size_t>(_size))
+    if (_seenDocs.size() >= static_cast<size_t>(_size))
         return GetNextResult::makeEOF();
 
     auto nextResult = getNextNonDuplicateDocument();
@@ -91,6 +92,11 @@ DocumentSource::GetNextResult DocumentSourceSampleFromRandomCursor::getNext() {
 
     MutableDocument md(nextResult.releaseDocument());
     md.setRandMetaField(_randMetaFieldVal);
+    if (pExpCtx->needsMerge) {
+        // This stage will be merged by sorting results according to this random metadata field, but
+        // the merging logic expects to sort by the sort key metadata.
+        md.setSortKeyMetaField(BSON("" << _randMetaFieldVal));
+    }
     return md.freeze();
 }
 
@@ -114,7 +120,7 @@ DocumentSource::GetNextResult DocumentSourceSampleFromRandomCursor::getNextNonDu
                             << nextInput.getDocument().toString(),
                         !idField.missing());
 
-                if (_seenDocs->insert(std::move(idField)).second) {
+                if (_seenDocs.insert(std::move(idField)).second) {
                     return nextInput;
                 }
                 LOG(1) << "$sample encountered duplicate document: "
@@ -137,7 +143,8 @@ DocumentSource::GetNextResult DocumentSourceSampleFromRandomCursor::getNextNonDu
                                "sporadic failure, please try again.");
 }
 
-Value DocumentSourceSampleFromRandomCursor::serialize(bool explain) const {
+Value DocumentSourceSampleFromRandomCursor::serialize(
+    boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value(DOC(getSourceName() << DOC("size" << _size)));
 }
 
@@ -147,10 +154,6 @@ DocumentSource::GetDepsReturn DocumentSourceSampleFromRandomCursor::getDependenc
     return SEE_NEXT;
 }
 
-void DocumentSourceSampleFromRandomCursor::doInjectExpressionContext() {
-    _seenDocs = pExpCtx->getValueComparator().makeUnorderedValueSet();
-}
-
 intrusive_ptr<DocumentSourceSampleFromRandomCursor> DocumentSourceSampleFromRandomCursor::create(
     const intrusive_ptr<ExpressionContext>& expCtx,
     long long size,
@@ -158,7 +161,6 @@ intrusive_ptr<DocumentSourceSampleFromRandomCursor> DocumentSourceSampleFromRand
     long long nDocsInCollection) {
     intrusive_ptr<DocumentSourceSampleFromRandomCursor> source(
         new DocumentSourceSampleFromRandomCursor(expCtx, size, idField, nDocsInCollection));
-    source->injectExpressionContext(expCtx);
     return source;
 }
 }  // mongo

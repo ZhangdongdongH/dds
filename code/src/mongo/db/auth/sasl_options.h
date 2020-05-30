@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "mongo/base/status.h"
+#include "mongo/platform/atomic_word.h"
 
 namespace mongo {
 
@@ -48,8 +49,9 @@ struct SASLGlobalParams {
     std::string hostName;
     std::string serviceName;
     std::string authdPath;
-    std::atomic<int> scramIterationCount;  // NOLINT
-    std::atomic<int> authFailedDelay;      // NOLINT
+    AtomicInt32 scramSHA1IterationCount;
+    AtomicInt32 scramSHA256IterationCount;
+    AtomicInt32 authFailedDelay;
 
     SASLGlobalParams();
 };

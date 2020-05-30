@@ -28,9 +28,9 @@
 
 #pragma once
 
-
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/logical_session_id.h"
 
 namespace mongo {
 
@@ -62,6 +62,9 @@ struct DeleteStageParams {
     // Should we return the document we just deleted?
     bool returnDeleted;
 
+    // The stmtId for this particular delete.
+    StmtId stmtId = kUninitializedStmtId;
+
     // The parsed query predicate for this delete. Not owned here.
     CanonicalQuery* canonicalQuery;
 
@@ -84,7 +87,7 @@ class DeleteStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(DeleteStage);
 
 public:
-    DeleteStage(OperationContext* txn,
+    DeleteStage(OperationContext* opCtx,
                 const DeleteStageParams& params,
                 WorkingSet* ws,
                 Collection* collection,

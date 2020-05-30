@@ -90,6 +90,12 @@ public:
         const Document& rhs;
     };
 
+    static constexpr StringData metaFieldTextScore = "$textScore"_sd;
+    static constexpr StringData metaFieldRandVal = "$randVal"_sd;
+    static constexpr StringData metaFieldSortKey = "$sortKey"_sd;
+
+    static const std::vector<StringData> allMetadataFieldNames;
+
     /// Empty Document (does no allocation)
     Document() {}
 
@@ -123,14 +129,13 @@ public:
         return storage().getField(pos).val;
     }
 
-    /** Similar to extractAllElementsAlongPath(), but using FieldPath rather than a dotted string.
-     *  If you pass a non-NULL positions vector, you get back a path suitable
-     *  to pass to MutableDocument::setNestedField.
-     *
-     *  TODO a version that doesn't use FieldPath
+    /**
+     * Returns the Value stored at the location given by 'path', or Value() if no such path exists.
+     * If 'positions' is non-null, it will be filled with a path suitable to pass to
+     * MutableDocument::setNestedField().
      */
-    const Value getNestedField(const FieldPath& fieldNames,
-                               std::vector<Position>* positions = NULL) const;
+    const Value getNestedField(const FieldPath& path,
+                               std::vector<Position>* positions = nullptr) const;
 
     /// Number of fields in this document. O(n)
     size_t size() const {
@@ -192,10 +197,11 @@ public:
     void hash_combine(size_t& seed, const StringData::ComparatorInterface* stringComparator) const;
 
     /**
-     * Add this document to the BSONObj under construction with the given BSONObjBuilder.
-     * Does not include metadata.
+     * Serializes this document to the BSONObj under construction in 'builder'. Metadata is not
+     * included. Throws a AssertionException if 'recursionLevel' exceeds the maximum allowable
+     * depth.
      */
-    void toBson(BSONObjBuilder* pBsonObjBuilder) const;
+    void toBson(BSONObjBuilder* builder, size_t recursionLevel = 1) const;
     BSONObj toBson() const;
 
     /**
@@ -210,6 +216,12 @@ public:
      * with metaField.
      */
     static Document fromBsonWithMetaData(const BSONObj& bson);
+
+    /**
+     * Given a BSON object that may have metadata fields added as part of toBsonWithMetadata(),
+     * returns the same object without any of the metadata fields.
+     */
+    static BSONObj stripMetadataFields(const BSONObj& bsonWithMetadata);
 
     // Support BSONObjBuilder and BSONArrayBuilder "stream" API
     friend BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d);
@@ -233,7 +245,6 @@ public:
         return Document(storage().clone().get());
     }
 
-    static const StringData metaFieldTextScore;  // "$textScore"
     bool hasTextScore() const {
         return storage().hasTextScore();
     }
@@ -241,12 +252,18 @@ public:
         return storage().getTextScore();
     }
 
-    static const StringData metaFieldRandVal;  // "$randVal"
     bool hasRandMetaField() const {
         return storage().hasRandMetaField();
     }
     double getRandMetaField() const {
         return storage().getRandMetaField();
+    }
+
+    bool hasSortKeyMetaField() const {
+        return storage().hasSortKeyMetaField();
+    }
+    BSONObj getSortKeyMetaField() const {
+        return storage().getSortKeyMetaField();
     }
 
     /// members for Sorter
@@ -442,6 +459,10 @@ public:
         return MutableValue(storage().getField(key));
     }
 
+    bool hasField(StringData key) {
+        return storage().findField(key).found();
+    }
+
     /// Update field by Position. Must already be a valid Position.
     MutableValue operator[](Position pos) {
         return getField(pos);
@@ -493,6 +514,10 @@ public:
         storage().setRandMetaField(val);
     }
 
+    void setSortKeyMetaField(BSONObj sortKey) {
+        storage().setSortKeyMetaField(sortKey);
+    }
+
     /** Convert to a read-only document and release reference.
      *
      *  Call this to indicate that you are done with this Document and will
@@ -522,6 +547,10 @@ public:
      */
     Document peek() {
         return Document(storagePtr());
+    }
+
+    size_t getApproximateSize() {
+        return peek().getApproximateSize();
     }
 
 private:

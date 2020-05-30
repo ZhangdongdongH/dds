@@ -43,6 +43,7 @@ const char kMaxChunkSizeBytes[] = "maxChunkSizeBytes";
 const char kToShardId[] = "toShard";
 const char kSecondaryThrottle[] = "secondaryThrottle";
 const char kWaitForDelete[] = "waitForDelete";
+const char kWaitForDeleteDeprecated[] = "_waitForDelete";
 
 const WriteConcernOptions kMajorityWriteConcernNoTimeout(WriteConcernOptions::kMajority,
                                                          WriteConcernOptions::SyncMode::UNSET,
@@ -55,7 +56,7 @@ BalanceChunkRequest::BalanceChunkRequest(ChunkType chunk,
     : _chunk(std::move(chunk)), _secondaryThrottle(std::move(secondaryThrottle)) {}
 
 StatusWith<BalanceChunkRequest> BalanceChunkRequest::parseFromConfigCommand(const BSONObj& obj) {
-    auto chunkStatus = ChunkType::fromBSON(obj);
+    auto chunkStatus = ChunkType::fromConfigBSON(obj);
     if (!chunkStatus.isOK()) {
         return chunkStatus.getStatus();
     }
@@ -89,6 +90,15 @@ StatusWith<BalanceChunkRequest> BalanceChunkRequest::parseFromConfigCommand(cons
     {
         Status status =
             bsonExtractBooleanFieldWithDefault(obj, kWaitForDelete, false, &request._waitForDelete);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    // Check for the deprecated name '_waitForDelete' 'waitForDelete' was false.
+    if (!request._waitForDelete) {
+        Status status = bsonExtractBooleanFieldWithDefault(
+            obj, kWaitForDeleteDeprecated, false, &request._waitForDelete);
         if (!status.isOK()) {
             return status;
         }
@@ -128,11 +138,11 @@ BSONObj BalanceChunkRequest::serializeToMoveCommandForConfig(
     int64_t maxChunkSizeBytes,
     const MigrationSecondaryThrottleOptions& secondaryThrottle,
     bool waitForDelete) {
-    invariantOK(chunk.validate());
+    invariant(chunk.validate());
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(kConfigSvrMoveChunk, 1);
-    cmdBuilder.appendElements(chunk.toBSON());
+    cmdBuilder.appendElements(chunk.toConfigBSON());
     cmdBuilder.append(kToShardId, newShardId.toString());
     cmdBuilder.append(kMaxChunkSizeBytes, static_cast<long long>(maxChunkSizeBytes));
     {
@@ -148,11 +158,11 @@ BSONObj BalanceChunkRequest::serializeToMoveCommandForConfig(
 }
 
 BSONObj BalanceChunkRequest::serializeToRebalanceCommandForConfig(const ChunkType& chunk) {
-    invariantOK(chunk.validate());
+    invariant(chunk.validate());
 
     BSONObjBuilder cmdBuilder;
     cmdBuilder.append(kConfigSvrMoveChunk, 1);
-    cmdBuilder.appendElements(chunk.toBSON());
+    cmdBuilder.appendElements(chunk.toConfigBSON());
     cmdBuilder.append(WriteConcernOptions::kWriteConcernField,
                       kMajorityWriteConcernNoTimeout.toBSON());
 

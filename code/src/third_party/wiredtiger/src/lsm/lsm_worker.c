@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -21,12 +21,30 @@ __wt_lsm_worker_start(WT_SESSION_IMPL *session, WT_LSM_WORKER_ARGS *args)
 {
 	__wt_verbose(session, WT_VERB_LSM_MANAGER,
 	    "Start LSM worker %u type %#" PRIx32, args->id, args->type);
-	return (__wt_thread_create(session, &args->tid, __lsm_worker, args));
+
+	args->running = true;
+	WT_RET(__wt_thread_create(session, &args->tid, __lsm_worker, args));
+	args->tid_set = true;
+	return (0);
+}
+
+/*
+ * __wt_lsm_worker_stop --
+ *	A wrapper around the LSM worker thread stop.
+ */
+int
+__wt_lsm_worker_stop(WT_SESSION_IMPL *session, WT_LSM_WORKER_ARGS *args)
+{
+	args->running = false;
+	args->tid_set = false;
+	return (__wt_thread_join(session, &args->tid));
 }
 
 /*
  * __lsm_worker_general_op --
- *	Execute a single bloom, drop or flush work unit.
+ *	Execute a single medium importance maintenance operation that should
+ *	not be super long running. That includes bloom creation, drop or flush
+ *	work unit types.
  */
 static int
 __lsm_worker_general_op(
@@ -38,11 +56,8 @@ __lsm_worker_general_op(
 	bool force;
 
 	*completed = false;
-	/*
-	 * Return if this thread cannot process a bloom, drop or flush.
-	 */
-	if (!FLD_ISSET(cookie->type,
-	    WT_LSM_WORK_BLOOM | WT_LSM_WORK_DROP | WT_LSM_WORK_FLUSH))
+
+	if (!FLD_ISSET(cookie->type, WT_LSM_WORK_GENERAL_OPS))
 		return (WT_NOTFOUND);
 
 	if ((ret = __wt_lsm_manager_pop_entry(session,
@@ -71,6 +86,8 @@ __lsm_worker_general_op(
 		WT_ERR(__wt_lsm_free_chunks(session, entry->lsm_tree));
 	else if (entry->type == WT_LSM_WORK_BLOOM)
 		WT_ERR(__wt_lsm_work_bloom(session, entry->lsm_tree));
+	else if (entry->type == WT_LSM_WORK_ENABLE_EVICT)
+		WT_ERR(__wt_lsm_work_enable_evict(session, entry->lsm_tree));
 	*completed = true;
 
 err:	__wt_lsm_manager_free_work_unit(session, entry);
@@ -84,20 +101,17 @@ err:	__wt_lsm_manager_free_work_unit(session, entry);
 static WT_THREAD_RET
 __lsm_worker(void *arg)
 {
-	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
-	WT_LSM_WORK_UNIT *entry;
 	WT_LSM_WORKER_ARGS *cookie;
+	WT_LSM_WORK_UNIT *entry;
 	WT_SESSION_IMPL *session;
 	bool progress, ran;
 
 	cookie = (WT_LSM_WORKER_ARGS *)arg;
 	session = cookie->session;
-	conn = S2C(session);
 
 	entry = NULL;
-	while (F_ISSET(conn, WT_CONN_SERVER_RUN) &&
-	    F_ISSET(cookie, WT_LSM_WORKER_RUN)) {
+	while (cookie->running) {
 		progress = false;
 
 		/*
@@ -154,7 +168,7 @@ __lsm_worker(void *arg)
 
 		/* Don't busy wait if there was any work to do. */
 		if (!progress) {
-			__wt_cond_wait(session, cookie->work_cond, 10000);
+			__wt_cond_wait(session, cookie->work_cond, 10000, NULL);
 			continue;
 		}
 	}

@@ -34,9 +34,12 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/plan_executor.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/s/migration_chunk_cloner_source.h"
 #include "mongo/db/s/migration_session_id.h"
-#include "mongo/s/move_chunk_request.h"
+#include "mongo/db/s/session_catalog_migration_source.h"
+#include "mongo/s/request_types/move_chunk_request.h"
 #include "mongo/s/shard_key_pattern.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
@@ -48,7 +51,6 @@ class BSONArrayBuilder;
 class BSONObjBuilder;
 class Collection;
 class Database;
-class PlanExecutor;
 class RecordId;
 
 class MigrationChunkClonerSourceLegacy final : public MigrationChunkClonerSource {
@@ -61,22 +63,30 @@ public:
                                      HostAndPort recipientHost);
     ~MigrationChunkClonerSourceLegacy();
 
-    Status startClone(OperationContext* txn) override;
+    Status startClone(OperationContext* opCtx) override;
 
-    Status awaitUntilCriticalSectionIsAppropriate(OperationContext* txn,
+    Status awaitUntilCriticalSectionIsAppropriate(OperationContext* opCtx,
                                                   Milliseconds maxTimeToWait) override;
 
-    Status commitClone(OperationContext* txn) override;
+    StatusWith<BSONObj> commitClone(OperationContext* opCtx) override;
 
-    void cancelClone(OperationContext* txn) override;
+    void cancelClone(OperationContext* opCtx) override;
 
-    bool isDocumentInMigratingChunk(OperationContext* txn, const BSONObj& doc) override;
+    bool isDocumentInMigratingChunk(const BSONObj& doc) override;
 
-    void onInsertOp(OperationContext* txn, const BSONObj& insertedDoc) override;
+    void onInsertOp(OperationContext* opCtx,
+                    const BSONObj& insertedDoc,
+                    const repl::OpTime& opTime) override;
 
-    void onUpdateOp(OperationContext* txn, const BSONObj& updatedDoc) override;
+    void onUpdateOp(OperationContext* opCtx,
+                    const BSONObj& updatedDoc,
+                    const repl::OpTime& opTime,
+                    const repl::OpTime& prePostImageOpTime) override;
 
-    void onDeleteOp(OperationContext* txn, const BSONObj& deletedDocId) override;
+    void onDeleteOp(OperationContext* opCtx,
+                    const BSONObj& deletedDocId,
+                    const repl::OpTime& opTime,
+                    const repl::OpTime& preImageOpTime) override;
 
     // Legacy cloner specific functionality
 
@@ -86,6 +96,18 @@ public:
      */
     const MigrationSessionId& getSessionId() const {
         return _sessionId;
+    }
+
+    /**
+     * Returns the rollback ID recorded at the beginning of session migration. If the underlying
+     * SessionCatalogMigrationSource does not exist, that means this node is running as a standalone
+     * and doesn't support retryable writes, so we return boost::none.
+     */
+    boost::optional<int> getRollbackIdAtInit() const {
+        if (_sessionCatalogSource) {
+            return _sessionCatalogSource->getRollbackIdAtInit();
+        }
+        return boost::none;
     }
 
     /**
@@ -108,7 +130,7 @@ public:
      *
      * NOTE: Must be called with the collection lock held in at least IS mode.
      */
-    Status nextCloneBatch(OperationContext* txn,
+    Status nextCloneBatch(OperationContext* opCtx,
                           Collection* collection,
                           BSONArrayBuilder* arrBuilder);
 
@@ -119,17 +141,37 @@ public:
      *
      * NOTE: Must be called with the collection lock held in at least IS mode.
      */
-    Status nextModsBatch(OperationContext* txn, Database* db, BSONObjBuilder* builder);
+    Status nextModsBatch(OperationContext* opCtx, Database* db, BSONObjBuilder* builder);
+
+    /**
+     * Appends to the buffer oplogs that contain session information for this migration.
+     * If this function returns a valid OpTime, this means that the oplog appended are
+     * not guaranteed to be majority committed and the caller has to use wait for the
+     * returned opTime to be majority committed. If the underlying SessionCatalogMigrationSource
+     * does not exist, that means this node is running as a standalone and doesn't support retryable
+     * writes, so we return boost::none.
+     *
+     * This waiting is necessary because session migration is only allowed to send out committed
+     * entries, as opposed to chunk migration, which can send out uncommitted documents. With chunk
+     * migration, the uncommitted documents will not be visibile until the end of the migration
+     * commits, which means that if it fails, they won't be visible, whereas session oplog entries
+     * take effect immediately since they are appended to the chain.
+     */
+    boost::optional<repl::OpTime> nextSessionMigrationBatch(OperationContext* opCtx,
+                                                            BSONArrayBuilder* arrBuilder);
 
 private:
     friend class DeleteNotificationStage;
     friend class LogOpForShardingHandler;
 
+    // Represents the states in which the cloner can be
+    enum State { kNew, kCloning, kDone };
+
     /**
      * Idempotent method, which cleans up any previously initialized state. It is safe to be called
      * at any time, but no methods should be called after it.
      */
-    void _cleanup(OperationContext* txn);
+    void _cleanup(OperationContext* opCtx);
 
     /**
      * Synchronously invokes the recipient shard with the specified command and either returns the
@@ -143,7 +185,7 @@ private:
      *
      * Returns OK or any error status otherwise.
      */
-    Status _storeCurrentLocs(OperationContext* txn);
+    Status _storeCurrentLocs(OperationContext* opCtx);
 
     /**
      * Insert items from docIdList to a new array with the given fieldName in the given builder. If
@@ -153,7 +195,7 @@ private:
      *
      * Should be holding the collection lock for ns if explode is true.
      */
-    void _xfer(OperationContext* txn,
+    void _xfer(OperationContext* opCtx,
                Database* db,
                std::list<BSONObj>* docIdList,
                BSONObjBuilder* builder,
@@ -178,29 +220,31 @@ private:
 
     // Registered deletion notifications plan executor, which will listen for document deletions
     // during the cloning stage
-    std::unique_ptr<PlanExecutor> _deleteNotifyExec;
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _deleteNotifyExec;
+
+    std::unique_ptr<SessionCatalogMigrationSource> _sessionCatalogSource;
 
     // Protects the entries below
     stdx::mutex _mutex;
 
-    // Inidicates whether commit or cancel have already been called and ensures that we do not
-    // double commit or double cancel
-    bool _cloneCompleted{false};
+    // The current state of the cloner
+    State _state{kNew};
 
     // List of record ids that needs to be transferred (initial clone)
     std::set<RecordId> _cloneLocs;
 
     // The estimated average object size during the clone phase. Used for buffer size
-    // pre-allocation.
+    // pre-allocation (initial clone).
     uint64_t _averageObjectSizeForCloneLocs{0};
 
-    // List of _id of documents that were modified that must be re-cloned.
+    // List of _id of documents that were modified that must be re-cloned (xfer mods)
     std::list<BSONObj> _reload;
 
-    // List of _id of documents that were deleted during clone that should be deleted later.
+    // List of _id of documents that were deleted during clone that should be deleted later (xfer
+    // mods)
     std::list<BSONObj> _deleted;
 
-    // Total bytes in _reload + _deleted
+    // Total bytes in _reload + _deleted (xfer mods)
     uint64_t _memoryUsed{0};
 };
 

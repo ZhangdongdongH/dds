@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -14,6 +14,7 @@
  */
 const char *
 __wt_page_type_string(u_int type)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	switch (type) {
 	case WT_PAGE_INVALID:

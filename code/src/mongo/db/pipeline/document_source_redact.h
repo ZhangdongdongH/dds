@@ -40,6 +40,16 @@ public:
     const char* getSourceName() const final;
     boost::intrusive_ptr<DocumentSource> optimize() final;
 
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed,
+                ChangeStreamRequirement::kWhitelist};
+    }
+
     /**
      * Attempts to duplicate the redact-safe portion of a subsequent $match before the $redact
      * stage.
@@ -47,23 +57,20 @@ public:
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
                                                      Pipeline::SourceContainer* container) final;
 
-    void doInjectExpressionContext() final;
-
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
 private:
     DocumentSourceRedact(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                          const boost::intrusive_ptr<Expression>& previsit);
 
-    // These both work over _variables
-    boost::optional<Document> redactObject();  // redacts CURRENT
-    Value redactValue(const Value& in);
+    // These both work over pExpCtx->variables.
+    boost::optional<Document> redactObject(const Document& root);  // redacts CURRENT
+    Value redactValue(const Value& in, const Document& root);
 
     Variables::Id _currentId;
-    std::unique_ptr<Variables> _variables;
     boost::intrusive_ptr<Expression> _expression;
 };
 

@@ -75,12 +75,16 @@ LogComponent LogComponent::parent() const {
             DECLARE_LOG_COMPONENT_PARENT(kJournal, kStorage);
             DECLARE_LOG_COMPONENT_PARENT(kASIO, kNetwork);
             DECLARE_LOG_COMPONENT_PARENT(kBridge, kNetwork);
+            DECLARE_LOG_COMPONENT_PARENT(kReplicationHeartbeats, kReplication);
+            DECLARE_LOG_COMPONENT_PARENT(kReplicationRollback, kReplication);
+            DECLARE_LOG_COMPONENT_PARENT(kShardingCatalogRefresh, kSharding);
+            DECLARE_LOG_COMPONENT_PARENT(kStorageRecovery, kStorage);
         case kNumLogComponents:
             return kNumLogComponents;
         default:
             return kDefault;
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 StringData LogComponent::toStringData() const {
@@ -105,10 +109,18 @@ StringData LogComponent::toStringData() const {
             return "query"_sd;
         case kReplication:
             return "replication"_sd;
+        case kReplicationHeartbeats:
+            return "heartbeats"_sd;
+        case kReplicationRollback:
+            return "rollback"_sd;
         case kSharding:
             return "sharding"_sd;
+        case kShardingCatalogRefresh:
+            return "shardingCatalogRefresh"_sd;
         case kStorage:
             return "storage"_sd;
+        case kStorageRecovery:
+            return "recovery"_sd;
         case kJournal:
             return "journal"_sd;
         case kWrite:
@@ -121,11 +133,13 @@ StringData LogComponent::toStringData() const {
             return "bridge"_sd;
         case kTracking:
             return "tracking"_sd;
+        case kTransaction:
+            return "transaction"_sd;
         case kNumLogComponents:
             return "total"_sd;
             // No default. Compiler should complain if there's a log component that's not handled.
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 std::string LogComponent::getShortName() const {
@@ -177,10 +191,18 @@ StringData LogComponent::getNameForLog() const {
             return "QUERY   "_sd;
         case kReplication:
             return "REPL    "_sd;
+        case kReplicationHeartbeats:
+            return "REPL_HB "_sd;
+        case kReplicationRollback:
+            return "ROLLBACK"_sd;
         case kSharding:
             return "SHARDING"_sd;
+        case kShardingCatalogRefresh:
+            return "SH_REFR "_sd;
         case kStorage:
             return "STORAGE "_sd;
+        case kStorageRecovery:
+            return "RECOVERY"_sd;
         case kJournal:
             return "JOURNAL "_sd;
         case kWrite:
@@ -193,11 +215,13 @@ StringData LogComponent::getNameForLog() const {
             return "BRIDGE  "_sd;
         case kTracking:
             return "TRACKING"_sd;
+        case kTransaction:
+            return "TXN     "_sd;
         case kNumLogComponents:
             return "TOTAL   "_sd;
             // No default. Compiler should complain if there's a log component that's not handled.
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 std::ostream& operator<<(std::ostream& os, LogComponent component) {

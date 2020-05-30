@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -32,7 +32,6 @@
 #define	HOME_BASE	"WT_TEST"
 static char home[HOME_SIZE];		/* Base home directory */
 static char hometmp[HOME_SIZE];		/* Each conn home directory */
-static const char *progname;		/* Program name */
 static const char * const uri = "table:main";
 
 #define	WTOPEN_CFG_COMMON					\
@@ -77,8 +76,8 @@ static int
 get_stat(WT_SESSION *stat_session, int stat_field, uint64_t *valuep)
 {
 	WT_CURSOR *statc;
-	const char *desc, *pvalue;
 	int ret;
+	const char *desc, *pvalue;
 
 	testutil_check(stat_session->open_cursor(stat_session,
 	    "statistics:", NULL, NULL, &statc));
@@ -95,9 +94,9 @@ static void
 run_ops(int dbs)
 {
 	WT_ITEM data;
-	int db_set, i, key;
 	uint32_t db;
 	uint8_t buf[MAX_VAL];
+	int db_set, i, key;
 
 	memset(buf, 0, sizeof(buf));
 	for (i = 0; i < MAX_VAL; ++i)
@@ -125,14 +124,12 @@ main(int argc, char *argv[])
 	uint64_t cond_reset, cond_wait;
 	uint64_t *cond_reset_orig;
 	int cfg, ch, dbs, i;
-	bool idle;
-	const char *working_dir, *wt_cfg;
 	char cmd[128];
+	const char *working_dir, *wt_cfg;
+	bool idle;
 
-	if ((progname = strrchr(argv[0], DIR_DELIM)) == NULL)
-		progname = argv[0];
-	else
-		++progname;
+	(void)testutil_set_progname(argv);
+
 	dbs = MAX_DBS;
 	working_dir = HOME_BASE;
 	idle = false;
@@ -151,7 +148,6 @@ main(int argc, char *argv[])
 			usage();
 		}
 	argc -= __wt_optind;
-	argv += __wt_optind;
 	if (argc != 0)
 		usage();
 
@@ -171,7 +167,8 @@ main(int argc, char *argv[])
 	testutil_make_work_dir(home);
 	__wt_random_init(&rnd);
 	for (i = 0; i < dbs; ++i) {
-		snprintf(hometmp, HOME_SIZE, "%s/%s.%d", home, HOME_BASE, i);
+		testutil_check(__wt_snprintf(
+		    hometmp, HOME_SIZE, "%s/%s.%d", home, HOME_BASE, i));
 		testutil_make_work_dir(hometmp);
 		/*
 		 * Open each database.  Rotate different configurations

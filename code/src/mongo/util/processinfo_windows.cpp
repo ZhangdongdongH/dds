@@ -77,11 +77,11 @@ ProcessInfo::ProcessInfo(ProcessId pid) {}
 ProcessInfo::~ProcessInfo() {}
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     DWORD_PTR process_mask, system_mask;
 
     if (GetProcessAffinityMask(GetCurrentProcess(), &process_mask, &system_mask)) {
-        std::bitset<32> mask(process_mask);
+        std::bitset<sizeof(process_mask) * 8> mask(process_mask);
         if (mask.count() > 0)
             return mask.count();
     }
@@ -291,7 +291,12 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     // get OS version info
     ZeroMemory(&osvi, sizeof(osvi));
     osvi.dwOSVersionInfoSize = sizeof(osvi);
+#pragma warning(push)
+// GetVersionEx is deprecated
+#pragma warning(disable : 4996)
     if (GetVersionEx((OSVERSIONINFO*)&osvi)) {
+#pragma warning(pop)
+
         verstr << osvi.dwMajorVersion << "." << osvi.dwMinorVersion;
         if (osvi.wServicePackMajor)
             verstr << " SP" << osvi.wServicePackMajor;
@@ -299,6 +304,12 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
 
         osName = "Microsoft ";
         switch (osvi.dwMajorVersion) {
+            case 10:
+                if (osvi.wProductType == VER_NT_WORKSTATION)
+                    osName += "Windows 10";
+                else
+                    osName += "Windows Server 2016";
+                break;
             case 6:
                 switch (osvi.dwMinorVersion) {
                     case 3:
@@ -344,25 +355,8 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
                         break;
                 }
                 break;
-            case 5:
-                switch (osvi.dwMinorVersion) {
-                    case 2:
-                        osName += "Windows Server 2003";
-                        break;
-                    case 1:
-                        osName += "Windows XP";
-                        break;
-                    case 0:
-                        if (osvi.wProductType == VER_NT_WORKSTATION)
-                            osName += "Windows 2000 Professional";
-                        else
-                            osName += "Windows 2000 Server";
-                        break;
-                    default:
-                        osName += "Windows NT version ";
-                        osName += verstr.str();
-                        break;
-                }
+            default:
+                osName += "Windows";
                 break;
         }
     } else {
@@ -437,6 +431,8 @@ bool ProcessInfo::checkNumaEnabled() {
 }
 
 bool ProcessInfo::blockCheckSupported() {
+    sysInfo();  // Initialize SystemInfo, which calls collectSystemInfo(), which creates
+                // psapiGlobal.
     return psapiGlobal->supported;
 }
 

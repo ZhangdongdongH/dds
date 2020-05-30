@@ -33,15 +33,13 @@
 #include "mongo/db/catalog/drop_collection.h"
 
 #include "mongo/db/background.h"
-#include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index_builder.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/views/view_catalog.h"
@@ -49,32 +47,33 @@
 
 namespace mongo {
 
-Status dropCollection(OperationContext* txn,
+Status dropCollection(OperationContext* opCtx,
                       const NamespaceString& collectionName,
-                      BSONObjBuilder& result) {
-    if (!serverGlobalParams.quiet) {
+                      BSONObjBuilder& result,
+                      const repl::OpTime& dropOpTime,
+                      DropCollectionSystemCollectionMode systemCollectionMode) {
+    if (!serverGlobalParams.quiet.load()) {
         log() << "CMD: drop " << collectionName;
     }
 
     const std::string dbname = collectionName.db().toString();
 
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-        ScopedTransaction transaction(txn, MODE_IX);
-
-        AutoGetDb autoDb(txn, dbname, MODE_X);
+    return writeConflictRetry(opCtx, "drop", collectionName.ns(), [&] {
+        AutoGetDb autoDb(opCtx, dbname, MODE_X);
         Database* const db = autoDb.getDb();
-        Collection* coll = db ? db->getCollection(collectionName) : nullptr;
-        auto view = db && !coll ? db->getViewCatalog()->lookup(txn, collectionName.ns()) : nullptr;
+        Collection* coll = db ? db->getCollection(opCtx, collectionName) : nullptr;
+        auto view =
+            db && !coll ? db->getViewCatalog()->lookup(opCtx, collectionName.ns()) : nullptr;
 
         if (!db || (!coll && !view)) {
             return Status(ErrorCodes::NamespaceNotFound, "ns not found");
         }
 
         const bool shardVersionCheck = true;
-        OldClientContext context(txn, collectionName.ns(), shardVersionCheck);
+        OldClientContext context(opCtx, collectionName.ns(), shardVersionCheck);
 
-        bool userInitiatedWritesAndNotPrimary = txn->writesAreReplicated() &&
-            !repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(collectionName);
+        bool userInitiatedWritesAndNotPrimary = opCtx->writesAreReplicated() &&
+            !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, collectionName);
 
         if (userInitiatedWritesAndNotPrimary) {
             return Status(ErrorCodes::NotMaster,
@@ -82,16 +81,21 @@ Status dropCollection(OperationContext* txn,
                                         << collectionName.ns());
         }
 
-        WriteUnitOfWork wunit(txn);
-        result.append("ns", collectionName.ns());
+        WriteUnitOfWork wunit(opCtx);
+        if (!result.hasField("ns")) {
+            result.append("ns", collectionName.ns());
+        }
 
         if (coll) {
             invariant(!view);
-            int numIndexes = coll->getIndexCatalog()->numIndexesTotal(txn);
+            int numIndexes = coll->getIndexCatalog()->numIndexesTotal(opCtx);
 
             BackgroundOperation::assertNoBgOpInProgForNs(collectionName.ns());
 
-            Status s = db->dropCollection(txn, collectionName.ns());
+            Status s = systemCollectionMode ==
+                    DropCollectionSystemCollectionMode::kDisallowSystemCollectionDrops
+                ? db->dropCollection(opCtx, collectionName.ns(), dropOpTime)
+                : db->dropCollectionEvenIfSystem(opCtx, collectionName, dropOpTime);
 
             if (!s.isOK()) {
                 return s;
@@ -100,16 +104,15 @@ Status dropCollection(OperationContext* txn,
             result.append("nIndexesWas", numIndexes);
         } else {
             invariant(view);
-            Status status = db->dropView(txn, collectionName.ns());
+            Status status = db->dropView(opCtx, collectionName.ns());
             if (!status.isOK()) {
                 return status;
             }
         }
         wunit.commit();
-    }
-    MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "drop", collectionName.ns());
 
-    return Status::OK();
+        return Status::OK();
+    });
 }
 
 }  // namespace mongo

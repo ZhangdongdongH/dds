@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -42,7 +42,7 @@ class test_encrypt04(wttest.WiredTigerTestCase, suite_subprocess):
 
     # For tests that are mismatching, we use a secretkey. The 'rotn'
     # encryptor without a secretkey is too simple, and may leave
-    # substantional portions of its input unchanged - a root page decoded
+    # substantial portions of its input unchanged - a root page decoded
     # with simply the wrong keyid may appear valid when initially verified,
     # but may result in error on first use. The odds that a real encryptor
     # would leave a lot of its input unchanged is infinitesimally small.
@@ -77,9 +77,16 @@ class test_encrypt04(wttest.WiredTigerTestCase, suite_subprocess):
         wttest.WiredTigerTestCase.__init__(self, *args, **kwargs)
         self.part = 1
 
+    def conn_extensions(self, extlist):
+        extarg = None
+        if self.expect_forceerror:
+            extarg='(config=\"rotn_force_error=true\")'
+        extlist.skip_if_missing = True
+        extlist.extension('encryptors', self.name, extarg)
+
     # Override WiredTigerTestCase, we have extensions.
     def setUpConnectionOpen(self, dir):
-        forceerror = None
+        self.expect_forceerror = False
         if self.part == 1:
             self.name = self.name1
             self.keyid = self.keyid1
@@ -93,21 +100,20 @@ class test_encrypt04(wttest.WiredTigerTestCase, suite_subprocess):
             self.fileinclear = self.fileinclear2 if \
                                hasattr(self, 'fileinclear2') else False
             if hasattr(self, 'forceerror1') and hasattr(self, 'forceerror2'):
-                forceerror = "rotn_force_error=true"
-        self.expect_forceerror = forceerror != None
+                self.expect_forceerror = True
         self.got_forceerror = False
 
         encarg = 'encryption=(name={0},keyid={1},secretkey={2}),'.format(
             self.name, self.keyid, self.secretkey)
-        # If forceerror is set for this test, add a config arg to
-        # the extension string. That signals rotn to return a (-1000)
-        # error code, which we'll detect here.
-        extarg = self.extensionArg([('encryptors', self.name, forceerror)])
+        # If forceerror is set for this test, conn_extensions adds a
+        # config arg to the extension string. That signals rotn to
+        # return a (-1000) error code, which we'll detect here.
+        extarg = self.extensionsConfig()
         self.pr('encarg = ' + encarg + ' extarg = ' + extarg)
         completed = False
         try:
             conn = self.wiredtiger_open(dir,
-                'create,error_prefix="{0}: ",{1}{2}'.format(
+                'create,error_prefix="{0}",{1}{2}'.format(
                  self.shortid(), encarg, extarg))
         except (BaseException) as err:
             # Capture the recognizable error created by rotn
@@ -134,29 +140,6 @@ class test_encrypt04(wttest.WiredTigerTestCase, suite_subprocess):
             cursor.set_key(key)
             self.assertEqual(cursor.search(), 0)
             self.assertEquals(cursor.get_value(), val)
-
-    # Return the wiredtiger_open extension argument for a shared library.
-    def extensionArg(self, exts):
-        extfiles = []
-        for ext in exts:
-            (dirname, name, extarg) = ext
-            if name != None and name != 'none':
-                testdir = os.path.dirname(__file__)
-                extdir = os.path.join(run.wt_builddir, 'ext', dirname)
-                extfile = os.path.join(
-                    extdir, name, '.libs', 'libwiredtiger_' + name + '.so')
-                if not os.path.exists(extfile):
-                    self.skipTest('extension "' + extfile + '" not built')
-                extfile = '"' + extfile + '"'
-                if not extfile in extfiles:
-                    s = extfile
-                    if extarg != None:
-                        s += "=(config=\"" + extarg + "\")"
-                    extfiles.append(s)
-        if len(extfiles) == 0:
-            return ''
-        else:
-            return ',extensions=[' + ','.join(extfiles) + ']'
 
     # Evaluate expression, which either must succeed (if expect_okay)
     # or must fail (if !expect_okay).
@@ -192,7 +175,7 @@ class test_encrypt04(wttest.WiredTigerTestCase, suite_subprocess):
         self.create_records(cursor, r, 0, self.nrecords)
         cursor.close()
 
-        # Now intentially expose the test to mismatched configuration
+        # Now intentionally expose the test to mismatched configuration
         self.part = 2
         self.name = self.name2
         self.keyid = self.keyid2

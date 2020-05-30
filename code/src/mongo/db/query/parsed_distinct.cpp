@@ -34,13 +34,16 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/query_request.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
 const char ParsedDistinct::kKeyField[] = "key";
 const char ParsedDistinct::kQueryField[] = "query";
 const char ParsedDistinct::kCollationField[] = "collation";
+const char ParsedDistinct::kCommentField[] = "comment";
 
 StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
     BSONObjBuilder aggregationBuilder;
@@ -53,7 +56,8 @@ StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
     // pipeline that looks like this:
     //
     //      [
-    //          { $match: { ... },
+    //          { $match: { ... } },
+    //          { $unwind: { path: "$<key>", preserveNullAndEmptyArrays: true } },
     //          { $group: { _id: null, distinct: { $addToSet: "$<key>" } } }
     //      ]
     BSONArrayBuilder pipelineBuilder(aggregationBuilder.subarrayStart("pipeline"));
@@ -62,6 +66,14 @@ StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
         matchStageBuilder.append("$match", qr.getFilter());
         matchStageBuilder.doneFast();
     }
+    BSONObjBuilder unwindStageBuilder(pipelineBuilder.subobjStart());
+    {
+        BSONObjBuilder unwindBuilder(unwindStageBuilder.subobjStart("$unwind"));
+        unwindBuilder.append("path", str::stream() << "$" << _key);
+        unwindBuilder.append("preserveNullAndEmptyArrays", true);
+        unwindBuilder.doneFast();
+    }
+    unwindStageBuilder.doneFast();
     BSONObjBuilder groupStageBuilder(pipelineBuilder.subobjStart());
     {
         BSONObjBuilder groupBuilder(groupStageBuilder.subobjStart("$group"));
@@ -76,10 +88,24 @@ StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
     groupStageBuilder.doneFast();
     pipelineBuilder.doneFast();
 
-    if (_query->getQueryRequest().isExplain()) {
-        aggregationBuilder.append("explain", true);
-    }
     aggregationBuilder.append(kCollationField, qr.getCollation());
+
+    if (qr.getMaxTimeMS() > 0) {
+        aggregationBuilder.append(QueryRequest::cmdOptionMaxTimeMS, qr.getMaxTimeMS());
+    }
+
+    if (!qr.getReadConcern().isEmpty()) {
+        aggregationBuilder.append(repl::ReadConcernArgs::kReadConcernFieldName,
+                                  qr.getReadConcern());
+    }
+
+    if (!qr.getUnwrappedReadPref().isEmpty()) {
+        aggregationBuilder.append(QueryRequest::kUnwrappedReadPrefField, qr.getUnwrappedReadPref());
+    }
+
+    if (!qr.getComment().empty()) {
+        aggregationBuilder.append(kCommentField, qr.getComment());
+    }
 
     // Specify the 'cursor' option so that aggregation uses the cursor interface.
     aggregationBuilder.append("cursor", BSONObj());
@@ -87,7 +113,7 @@ StatusWith<BSONObj> ParsedDistinct::asAggregationCommand() const {
     return aggregationBuilder.obj();
 }
 
-StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* txn,
+StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
                                                  const NamespaceString& nss,
                                                  const BSONObj& cmdObj,
                                                  const ExtensionsCallback& extensionsCallback,
@@ -130,9 +156,58 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* txn,
         qr->setCollation(collationElt.embeddedObject());
     }
 
+    if (BSONElement readConcernElt = cmdObj[repl::ReadConcernArgs::kReadConcernFieldName]) {
+        if (readConcernElt.type() != BSONType::Object) {
+            return Status(ErrorCodes::TypeMismatch,
+                          str::stream() << "\"" << repl::ReadConcernArgs::kReadConcernFieldName
+                                        << "\" had the wrong type. Expected "
+                                        << typeName(BSONType::Object)
+                                        << ", found "
+                                        << typeName(readConcernElt.type()));
+        }
+        qr->setReadConcern(readConcernElt.embeddedObject());
+    }
+
+    if (BSONElement commentElt = cmdObj[kCommentField]) {
+        if (commentElt.type() != BSONType::String) {
+            return Status(ErrorCodes::TypeMismatch,
+                          str::stream() << "\"" << kCommentField
+                                        << "\" had the wrong type. Expected "
+                                        << typeName(BSONType::String)
+                                        << ", found "
+                                        << typeName(commentElt.type()));
+        }
+        qr->setComment(commentElt.str());
+    }
+
+    if (BSONElement queryOptionsElt = cmdObj[QueryRequest::kUnwrappedReadPrefField]) {
+        if (queryOptionsElt.type() != BSONType::Object) {
+            return Status(ErrorCodes::TypeMismatch,
+                          str::stream() << "\"" << QueryRequest::kUnwrappedReadPrefField
+                                        << "\" had the wrong type. Expected "
+                                        << typeName(BSONType::Object)
+                                        << ", found "
+                                        << typeName(queryOptionsElt.type()));
+        }
+        qr->setUnwrappedReadPref(queryOptionsElt.embeddedObject());
+    }
+
+    if (BSONElement maxTimeMSElt = cmdObj[QueryRequest::cmdOptionMaxTimeMS]) {
+        auto maxTimeMS = QueryRequest::parseMaxTimeMS(maxTimeMSElt);
+        if (!maxTimeMS.isOK()) {
+            return maxTimeMS.getStatus();
+        }
+        qr->setMaxTimeMS(static_cast<unsigned int>(maxTimeMS.getValue()));
+    }
+
     qr->setExplain(isExplain);
 
-    auto cq = CanonicalQuery::canonicalize(txn, std::move(qr), extensionsCallback);
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto cq = CanonicalQuery::canonicalize(opCtx,
+                                           std::move(qr),
+                                           expCtx,
+                                           extensionsCallback,
+                                           MatchExpressionParser::kAllowAllSpecialFeatures);
     if (!cq.isOK()) {
         return cq.getStatus();
     }

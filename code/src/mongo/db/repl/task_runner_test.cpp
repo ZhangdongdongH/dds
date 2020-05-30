@@ -36,7 +36,7 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/unittest/barrier.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
+#include "mongo/util/concurrency/thread_pool.h"
 
 namespace {
 
@@ -48,7 +48,7 @@ using Task = TaskRunner::Task;
 TEST_F(TaskRunnerTest, InvalidConstruction) {
     // Null thread pool.
     ASSERT_THROWS_CODE_AND_WHAT(
-        TaskRunner(nullptr), UserException, ErrorCodes::BadValue, "null thread pool");
+        TaskRunner(nullptr), AssertionException, ErrorCodes::BadValue, "null thread pool");
 }
 
 TEST_F(TaskRunnerTest, GetDiagnosticString) {
@@ -58,22 +58,22 @@ TEST_F(TaskRunnerTest, GetDiagnosticString) {
 TEST_F(TaskRunnerTest, CallbackValues) {
     stdx::mutex mutex;
     bool called = false;
-    OperationContext* txn = nullptr;
+    OperationContext* opCtx = nullptr;
     Status status = getDetectableErrorStatus();
     auto task = [&](OperationContext* theTxn, const Status& theStatus) {
         stdx::lock_guard<stdx::mutex> lk(mutex);
         called = true;
-        txn = theTxn;
+        opCtx = theTxn;
         status = theStatus;
         return TaskRunner::NextAction::kCancel;
     };
     getTaskRunner().schedule(task);
-    getThreadPool().join();
+    getThreadPool().waitForIdle();
     ASSERT_FALSE(getTaskRunner().isActive());
 
     stdx::lock_guard<stdx::mutex> lk(mutex);
     ASSERT_TRUE(called);
-    ASSERT(txn);
+    ASSERT(opCtx);
     ASSERT_OK(status);
 }
 
@@ -107,7 +107,7 @@ OpIdVector _testRunTaskTwice(TaskRunnerTest& test,
     ASSERT_TRUE(test.getTaskRunner().isActive());
     barrier.countDownAndWait();
 
-    test.getThreadPool().join();
+    test.getThreadPool().waitForIdle();
     ASSERT_FALSE(test.getTaskRunner().isActive());
 
     stdx::lock_guard<stdx::mutex> lk(mutex);
@@ -133,7 +133,7 @@ TEST_F(TaskRunnerTest, RunTaskTwiceDisposeOperationContext) {
 // thread back to pool after disposing of operation context.
 TEST_F(TaskRunnerTest, RunTaskTwiceDisposeOperationContextJoinThreadPoolBeforeScheduling) {
     auto schedule = [this](const Task& task) {
-        getThreadPool().join();
+        getThreadPool().waitForIdle();
         getTaskRunner().schedule(task);
     };
     auto txnId =
@@ -149,7 +149,7 @@ TEST_F(TaskRunnerTest, RunTaskTwiceKeepOperationContext) {
 TEST_F(TaskRunnerTest, SkipSecondTask) {
     stdx::mutex mutex;
     int i = 0;
-    OperationContext* txn[2] = {nullptr, nullptr};
+    OperationContext* opCtx[2] = {nullptr, nullptr};
     Status status[2] = {getDetectableErrorStatus(), getDetectableErrorStatus()};
     stdx::condition_variable condition;
     bool schedulingDone = false;
@@ -159,7 +159,7 @@ TEST_F(TaskRunnerTest, SkipSecondTask) {
         if (j >= 2) {
             return TaskRunner::NextAction::kCancel;
         }
-        txn[j] = theTxn;
+        opCtx[j] = theTxn;
         status[j] = theStatus;
 
         // Wait for the test code to schedule the second task.
@@ -177,21 +177,21 @@ TEST_F(TaskRunnerTest, SkipSecondTask) {
         schedulingDone = true;
         condition.notify_all();
     }
-    getThreadPool().join();
+    getThreadPool().waitForIdle();
     ASSERT_FALSE(getTaskRunner().isActive());
 
     stdx::lock_guard<stdx::mutex> lk(mutex);
     ASSERT_EQUALS(2, i);
-    ASSERT(txn[0]);
+    ASSERT(opCtx[0]);
     ASSERT_OK(status[0]);
-    ASSERT_FALSE(txn[1]);
+    ASSERT_FALSE(opCtx[1]);
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, status[1].code());
 }
 
 TEST_F(TaskRunnerTest, FirstTaskThrowsException) {
     stdx::mutex mutex;
     int i = 0;
-    OperationContext* txn[2] = {nullptr, nullptr};
+    OperationContext* opCtx[2] = {nullptr, nullptr};
     Status status[2] = {getDetectableErrorStatus(), getDetectableErrorStatus()};
     stdx::condition_variable condition;
     bool schedulingDone = false;
@@ -201,7 +201,7 @@ TEST_F(TaskRunnerTest, FirstTaskThrowsException) {
         if (j >= 2) {
             return TaskRunner::NextAction::kCancel;
         }
-        txn[j] = theTxn;
+        opCtx[j] = theTxn;
         status[j] = theStatus;
 
         // Wait for the test code to schedule the second task.
@@ -215,7 +215,7 @@ TEST_F(TaskRunnerTest, FirstTaskThrowsException) {
         uassert(ErrorCodes::OperationFailed, "task failure", false);
 
         // not reached.
-        invariant(false);
+        MONGO_UNREACHABLE;
         return TaskRunner::NextAction::kKeepOperationContext;
     };
     getTaskRunner().schedule(task);
@@ -226,14 +226,14 @@ TEST_F(TaskRunnerTest, FirstTaskThrowsException) {
         schedulingDone = true;
         condition.notify_all();
     }
-    getThreadPool().join();
+    getThreadPool().waitForIdle();
     ASSERT_FALSE(getTaskRunner().isActive());
 
     stdx::lock_guard<stdx::mutex> lk(mutex);
     ASSERT_EQUALS(2, i);
-    ASSERT(txn[0]);
+    ASSERT(opCtx[0]);
     ASSERT_OK(status[0]);
-    ASSERT_FALSE(txn[1]);
+    ASSERT_FALSE(opCtx[1]);
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, status[1].code());
 }
 
@@ -270,7 +270,7 @@ TEST_F(TaskRunnerTest, Cancel) {
     getTaskRunner().cancel();
     getTaskRunner().cancel();
 
-    getThreadPool().join();
+    getThreadPool().waitForIdle();
     ASSERT_FALSE(getTaskRunner().isActive());
 
     // This status will not be OK if canceling the task runner
@@ -345,7 +345,7 @@ TEST_F(TaskRunnerTest, DestroyShouldWaitForTasksToComplete) {
 
     destroyTaskRunner();
 
-    getThreadPool().join();
+    getThreadPool().waitForIdle();
 
     // This status will not be OK if canceling the task runner
     // before scheduling the task results in the task being canceled.

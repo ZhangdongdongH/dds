@@ -186,10 +186,11 @@ TEST(BSONValidate, Fuzz) {
         }
         BSONObj fuzzed(buffer.get());
 
-        // Check that the two validation implementations agree (and neither crashes).
-        ASSERT_EQUALS(
-            fuzzed.valid(BSONVersion::kLatest),
-            validateBSON(fuzzed.objdata(), fuzzed.objsize(), BSONVersion::kLatest).isOK());
+        // There is no assert here because there is no other BSON validator oracle
+        // to compare outputs against (BSONObj::valid() is a wrapper for validateBSON()).
+        // Thus, the reason for this test is to ensure that validateBSON() doesn't trip
+        // any ASAN or UBSAN check when fed fuzzed input.
+        validateBSON(fuzzed.objdata(), fuzzed.objsize(), BSONVersion::kLatest).isOK();
     }
 }
 
@@ -256,7 +257,9 @@ TEST(BSONValidateFast, ErrorWithId) {
     const BSONObj x = ob.done();
     const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with _id: 1");
+    ASSERT_EQUALS(
+        status.reason(),
+        "not null terminated string in element with field name 'not_id' in object with _id: 1");
 }
 
 TEST(BSONValidateFast, ErrorBeforeId) {
@@ -267,7 +270,9 @@ TEST(BSONValidateFast, ErrorBeforeId) {
     const BSONObj x = ob.done();
     const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, ErrorNoId) {
@@ -277,7 +282,9 @@ TEST(BSONValidateFast, ErrorNoId) {
     const BSONObj x = ob.done();
     const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, ErrorIsInId) {
@@ -287,7 +294,9 @@ TEST(BSONValidateFast, ErrorIsInId) {
     const BSONObj x = ob.done();
     const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(
+        status.reason(),
+        "not null terminated string in element with field name '_id' in object with unknown _id");
 }
 
 TEST(BSONValidateFast, NonTopLevelId) {
@@ -300,7 +309,9 @@ TEST(BSONValidateFast, NonTopLevelId) {
     const BSONObj x = ob.done();
     const Status status = validateBSON(x.objdata(), x.objsize(), BSONVersion::kLatest);
     ASSERT_NOT_OK(status);
-    ASSERT_EQUALS(status.reason(), "not null terminated string in object with unknown _id");
+    ASSERT_EQUALS(status.reason(),
+                  "not null terminated string in element with field name 'not_id2' in object with "
+                  "unknown _id");
 }
 
 TEST(BSONValidateFast, StringHasSomething) {

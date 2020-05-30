@@ -38,26 +38,24 @@
 #include "mongo/rpc/legacy_reply_builder.h"
 #include "mongo/rpc/legacy_request.h"
 #include "mongo/rpc/legacy_request_builder.h"
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/op_msg_rpc_impls.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace rpc {
 
-std::unique_ptr<RequestBuilderInterface> makeRequestBuilder(ProtocolSet clientProtos,
-                                                            ProtocolSet serverProtos) {
-    return makeRequestBuilder(uassertStatusOK(negotiate(clientProtos, serverProtos)));
-}
-
-std::unique_ptr<RequestBuilderInterface> makeRequestBuilder(Protocol proto) {
+Message messageFromOpMsgRequest(Protocol proto, const OpMsgRequest& request) {
     switch (proto) {
+        case Protocol::kOpMsg:
+            return request.serialize();
         case Protocol::kOpQuery:
-            return stdx::make_unique<LegacyRequestBuilder>();
+            return legacyRequestFromOpMsgRequest(request);
         case Protocol::kOpCommandV1:
-            return stdx::make_unique<CommandRequestBuilder>();
+            return opCommandRequestFromOpMsgRequest(request);
         default:
             MONGO_UNREACHABLE;
     }
@@ -65,6 +63,8 @@ std::unique_ptr<RequestBuilderInterface> makeRequestBuilder(Protocol proto) {
 
 std::unique_ptr<ReplyInterface> makeReply(const Message* unownedMessage) {
     switch (unownedMessage->operation()) {
+        case mongo::dbMsg:
+            return stdx::make_unique<OpMsgReply>(OpMsg::parseOwned(*unownedMessage));
         case mongo::opReply:
             return stdx::make_unique<LegacyReply>(unownedMessage);
         case mongo::dbCommandReply:
@@ -76,21 +76,25 @@ std::unique_ptr<ReplyInterface> makeReply(const Message* unownedMessage) {
     }
 }
 
-std::unique_ptr<RequestInterface> makeRequest(const Message* unownedMessage) {
-    switch (unownedMessage->operation()) {
+OpMsgRequest opMsgRequestFromAnyProtocol(const Message& unownedMessage) {
+    switch (unownedMessage.operation()) {
+        case mongo::dbMsg:
+            return OpMsgRequest::parse(unownedMessage);
         case mongo::dbQuery:
-            return stdx::make_unique<LegacyRequest>(unownedMessage);
+            return opMsgRequestFromLegacyRequest(unownedMessage);
         case mongo::dbCommand:
-            return stdx::make_unique<CommandRequest>(unownedMessage);
+            return opMsgRequestFromCommandRequest(unownedMessage);
         default:
             uasserted(ErrorCodes::UnsupportedFormat,
                       str::stream() << "Received a reply message with unexpected opcode: "
-                                    << unownedMessage->operation());
+                                    << unownedMessage.operation());
     }
 }
 
 std::unique_ptr<ReplyBuilderInterface> makeReplyBuilder(Protocol protocol) {
     switch (protocol) {
+        case Protocol::kOpMsg:
+            return stdx::make_unique<OpMsgReplyBuilder>();
         case Protocol::kOpQuery:
             return stdx::make_unique<LegacyReplyBuilder>();
         case Protocol::kOpCommandV1:

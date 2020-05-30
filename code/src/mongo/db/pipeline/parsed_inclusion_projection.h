@@ -62,7 +62,8 @@ public:
     /**
      * Serialize this projection.
      */
-    void serialize(MutableDocument* output, bool explain) const;
+    void serialize(MutableDocument* output,
+                   boost::optional<ExplainOptions::Verbosity> explain) const;
 
     /**
      * Adds dependencies of any fields that need to be included, or that are used by any
@@ -82,13 +83,12 @@ public:
      * and an empty 'outputDoc' will leave 'outputDoc' representing the document
      *   {a: [{b: 1}, {b: 2}], d: [{}, {}]}.
      */
-    void applyInclusions(Document inputDoc, MutableDocument* outputDoc) const;
+    void applyInclusions(const Document& inputDoc, MutableDocument* outputDoc) const;
 
     /**
-     * Add computed fields to 'outputDoc'. 'vars' is passed through to be used in Expression
-     * evaluation.
+     * Add computed fields to 'outputDoc'.
      */
-    void addComputedFields(MutableDocument* outputDoc, Variables* vars) const;
+    void addComputedFields(MutableDocument* outputDoc, const Document& root) const;
 
     /**
      * Creates the child if it doesn't already exist. 'field' is not allowed to be dotted.
@@ -119,18 +119,27 @@ public:
         return _pathToNode;
     }
 
-    void injectExpressionContext(const boost::intrusive_ptr<ExpressionContext>& expCtx);
-
     /**
      * Recursively add all paths that are preserved by this inclusion projection.
      */
     void addPreservedPaths(std::set<std::string>* preservedPaths) const;
 
+    /**
+     * Recursively adds all paths that are purely computed in this inclusion projection to
+     * 'computedPaths'.
+     *
+     * Computed paths that are identified as the result of a simple rename are instead filled out in
+     * 'renamedPaths'. Each entry in 'renamedPaths' maps from the path's new name to its old name
+     * prior to application of this inclusion projection.
+     */
+    void addComputedPaths(std::set<std::string>* computedPaths,
+                          StringMap<std::string>* renamedPaths) const;
+
 private:
     // Helpers for the Document versions above. These will apply the transformation recursively to
     // each element of any arrays, and ensure non-documents are handled appropriately.
     Value applyInclusionsToValue(Value inputVal) const;
-    Value addComputedFields(Value inputVal, Variables* vars) const;
+    Value addComputedFields(Value inputVal, const Document& root) const;
 
     /**
      * Returns nullptr if no such child exists.
@@ -175,26 +184,22 @@ private:
  */
 class ParsedInclusionProjection : public ParsedAggregationProjection {
 public:
-    ParsedInclusionProjection() : ParsedAggregationProjection(), _root(new InclusionNode()) {}
+    ParsedInclusionProjection(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ParsedAggregationProjection(expCtx), _root(new InclusionNode()) {}
 
-    ProjectionType getType() const final {
-        return ProjectionType::kInclusion;
+    TransformerType getType() const final {
+        return TransformerType::kInclusionProjection;
     }
 
     /**
      * Parses the projection specification given by 'spec', populating internal data structures.
      */
-    void parse(const BSONObj& spec) final {
-        VariablesIdGenerator idGenerator;
-        VariablesParseState variablesParseState(&idGenerator);
-        parse(spec, variablesParseState);
-        _variables = stdx::make_unique<Variables>(idGenerator.getIdCount());
-    }
+    void parse(const BSONObj& spec) final;
 
     /**
      * Serialize the projection.
      */
-    Document serialize(bool explain = false) const final {
+    Document serializeStageOptions(boost::optional<ExplainOptions::Verbosity> explain) const final {
         MutableDocument output;
         if (_idExcluded) {
             output.addField("_id", Value(false));
@@ -210,10 +215,6 @@ public:
         _root->optimize();
     }
 
-    void injectExpressionContext(const boost::intrusive_ptr<ExpressionContext>& expCtx) final {
-        _root->injectExpressionContext(expCtx);
-    }
-
     DocumentSource::GetDepsReturn addDependencies(DepsTracker* deps) const final {
         _root->addDependencies(deps);
         return DocumentSource::EXHAUSTIVE_FIELDS;
@@ -222,7 +223,14 @@ public:
     DocumentSource::GetModPathsReturn getModifiedPaths() const final {
         std::set<std::string> preservedPaths;
         _root->addPreservedPaths(&preservedPaths);
-        return {DocumentSource::GetModPathsReturn::Type::kAllExcept, std::move(preservedPaths)};
+
+        std::set<std::string> computedPaths;
+        StringMap<std::string> renamedPaths;
+        _root->addComputedPaths(&computedPaths, &renamedPaths);
+
+        return {DocumentSource::GetModPathsReturn::Type::kAllExcept,
+                std::move(preservedPaths),
+                std::move(renamedPaths)};
     }
 
     /**
@@ -234,20 +242,16 @@ public:
      * Arrays will be traversed, with any dotted/nested exclusions or computed fields applied to
      * each element in the array.
      */
-    Document applyProjection(Document inputDoc) const final {
-        _variables->setRoot(inputDoc);
-        return applyProjection(inputDoc, _variables.get());
-    }
+    Document applyProjection(const Document& inputDoc) const final;
 
-    Document applyProjection(Document inputDoc, Variables* vars) const;
+    /*
+     * Checks whether the inclusion projection represented by the InclusionNode
+     * tree is a subset of the object passed in. Projections that have any
+     * computed or renamed fields are not considered a subset.
+     */
+    bool isSubsetOfProjection(const BSONObj& proj) const final;
 
 private:
-    /**
-     * Parses 'spec' to determine which fields to include, which are computed, and whether to
-     * include '_id' or not.
-     */
-    void parse(const BSONObj& spec, const VariablesParseState& variablesParseState);
-
     /**
      * Attempts to parse 'objSpec' as an expression like {$add: [...]}. Adds a computed field to
      * '_root' and returns true if it was successfully parsed as an expression. Returns false if it
@@ -273,10 +277,6 @@ private:
 
     // The InclusionNode tree does most of the execution work once constructed.
     std::unique_ptr<InclusionNode> _root;
-
-    // This is needed to give the expressions knowledge about the context in which they are being
-    // executed.
-    std::unique_ptr<Variables> _variables;
 };
 }  // namespace parsed_aggregation_projection
 }  // namespace mongo

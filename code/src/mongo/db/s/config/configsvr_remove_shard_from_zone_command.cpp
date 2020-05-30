@@ -35,7 +35,8 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/remove_shard_from_zone_request_type.h"
 #include "mongo/util/log.h"
@@ -56,17 +57,17 @@ using std::string;
  *   writeConcern: <BSONObj>
  * }
  */
-class ConfigSvrRemoveShardFromZoneCommand : public Command {
+class ConfigSvrRemoveShardFromZoneCommand : public BasicCommand {
 public:
-    ConfigSvrRemoveShardFromZoneCommand() : Command("_configsvrRemoveShardFromZone") {}
+    ConfigSvrRemoveShardFromZoneCommand() : BasicCommand("_configsvrRemoveShardFromZone") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Validates and removes the shard from the zone.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Validates and removes the shard from the zone.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -79,7 +80,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -87,22 +88,24 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
             uasserted(ErrorCodes::IllegalOperation,
                       "_configsvrRemoveShardFromZone can only be run on config servers");
         }
 
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+
         auto parsedRequest =
             uassertStatusOK(RemoveShardFromZoneRequest::parseFromConfigCommand(cmdObj));
 
-        uassertStatusOK(Grid::get(txn)->catalogManager()->removeShardFromZone(
-            txn, parsedRequest.getShardName(), parsedRequest.getZoneName()));
+        uassertStatusOK(ShardingCatalogManager::get(opCtx)->removeShardFromZone(
+            opCtx, parsedRequest.getShardName(), parsedRequest.getZoneName()));
 
         return true;
     }

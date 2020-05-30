@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -62,7 +62,7 @@ class test_reconfig02(wttest.WiredTigerTestCase):
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
             lambda: self.conn.reconfigure("log=(path=foo)"), msg)
         self.assertRaisesWithMessage(wiredtiger.WiredTigerError,
-            lambda: self.conn.reconfigure("log=(recovery=true)"), msg)
+            lambda: self.conn.reconfigure("log=(recover=true)"), msg)
 
     # Logging starts on, but prealloc is off.  Verify it is off.
     # Reconfigure it on and run again, making sure that log files
@@ -81,7 +81,7 @@ class test_reconfig02(wttest.WiredTigerTestCase):
         #
         # Potentially loop a few times in case it is a very slow system.
         self.conn.reconfigure("log=(prealloc=true)")
-        for x in xrange(0, 20):
+        for x in xrange(0, 100):
             time.sleep(1)
             prep_logs = fnmatch.filter(os.listdir('.'), "*Prep*")
             if len(prep_logs) != 0:
@@ -100,17 +100,18 @@ class test_reconfig02(wttest.WiredTigerTestCase):
         c.close()
         # Close and reopen connection to write a checkpoint, move to the
         # next log file and verify that archive did not run.
-        orig_logs = fnmatch.filter(os.listdir('.'), "*Log*")
+        orig_logs = fnmatch.filter(os.listdir('.'), "*gerLog*")
         self.reopen_conn()
-        cur_logs = fnmatch.filter(os.listdir('.'), "*Log*")
+        cur_logs = fnmatch.filter(os.listdir('.'), "*gerLog*")
         for o in orig_logs:
             self.assertEqual(True, o in cur_logs)
 
         # Now turn on archive, sleep a bit to allow the archive thread
         # to run and then confirm that all original logs are gone.
         self.conn.reconfigure("log=(archive=true)")
+        self.session.checkpoint("force")
         time.sleep(2)
-        cur_logs = fnmatch.filter(os.listdir('.'), "*Log*")
+        cur_logs = fnmatch.filter(os.listdir('.'), "*gerLog*")
         for o in orig_logs:
             self.assertEqual(False, o in cur_logs)
 

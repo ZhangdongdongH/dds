@@ -36,11 +36,17 @@ namespace mongo {
 class BSONObj;
 class OperationContext;
 class Status;
+class Timestamp;
+
+namespace repl {
+class OpTime;
+}  // namespace repl
 
 /**
- * This state machine is responsible for the actual movement of chunk documents from donor to a
- * recipient shard. Its lifetime is owned and controlled by a single migration source manager which
- * registers it for notifications from the replication subsystem.
+ * This class is responsible for producing chunk documents to be moved from donor to a recipient
+ * shard and its methods represent cloning stages. Its lifetime is owned and controlled by a single
+ * migration source manager which registers it for notifications from the replication subsystem
+ * before calling startClone.
  *
  * Unless explicitly indicated, the methods on this class are not thread-safe.
  *
@@ -48,7 +54,7 @@ class Status;
  * it begins receiving notifications from the replication subsystem through the
  * on[insert/update/delete]Op methods. It is up to the creator to decide how these methods end up
  * being called, but currently this is done through the CollectionShardingState. The creator then
- * kicks off the migration as soon as possible by calling startClone.
+ * kicks off the cloning as soon as possible by calling startClone.
  */
 class MigrationChunkClonerSource {
     MONGO_DISALLOW_COPYING(MigrationChunkClonerSource);
@@ -61,9 +67,10 @@ public:
      * the recipient shard to start cloning. Before calling this method, this chunk cloner must be
      * registered for notifications from the replication subsystem (not checked here).
      *
-     * NOTE: Must be called without any locks and must succeed, before any other methods are called.
+     * NOTE: Must be called without any locks and must succeed, before any other methods are called
+     * (except for cancelClone and [insert/update/delete]Op).
      */
-    virtual Status startClone(OperationContext* txn) = 0;
+    virtual Status startClone(OperationContext* opCtx) = 0;
 
     /**
      * Blocking method, which uses some custom selected logic for deciding whether it is appropriate
@@ -75,7 +82,7 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-    virtual Status awaitUntilCriticalSectionIsAppropriate(OperationContext* txn,
+    virtual Status awaitUntilCriticalSectionIsAppropriate(OperationContext* opCtx,
                                                           Milliseconds maxTimeToWait) = 0;
 
     /**
@@ -86,9 +93,12 @@ public:
      * This must only be called once and no more methods on the cloner must be used afterwards
      * regardless of whether it succeeds or not.
      *
+     * Returns statistics about the move. These are informational only and should not be
+     * interpreted by the caller for any means other than reporting.
+     *
      * NOTE: Must be called without any locks.
      */
-    virtual Status commitClone(OperationContext* txn) = 0;
+    virtual StatusWith<BSONObj> commitClone(OperationContext* opCtx) = 0;
 
     /**
      * Tells the recipient to abort the clone and cleanup any unused data. This method's
@@ -96,7 +106,7 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-    virtual void cancelClone(OperationContext* txn) = 0;
+    virtual void cancelClone(OperationContext* opCtx) = 0;
 
     // These methods are only meaningful for the legacy cloner and they are used as a way to keep a
     // running list of changes, which need to be fetched.
@@ -107,7 +117,7 @@ public:
      *
      * NOTE: Must be called with at least IS lock held on the collection.
      */
-    virtual bool isDocumentInMigratingChunk(OperationContext* txn, const BSONObj& doc) = 0;
+    virtual bool isDocumentInMigratingChunk(const BSONObj& doc) = 0;
 
     /**
      * Notifies this cloner that an insert happened to the collection, which it owns. It is up to
@@ -116,7 +126,9 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onInsertOp(OperationContext* txn, const BSONObj& insertedDoc) = 0;
+    virtual void onInsertOp(OperationContext* opCtx,
+                            const BSONObj& insertedDoc,
+                            const repl::OpTime& opTime) = 0;
 
     /**
      * Notifies this cloner that an update happened to the collection, which it owns. It is up to
@@ -125,7 +137,10 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onUpdateOp(OperationContext* txn, const BSONObj& updatedDoc) = 0;
+    virtual void onUpdateOp(OperationContext* opCtx,
+                            const BSONObj& updatedDoc,
+                            const repl::OpTime& opTime,
+                            const repl::OpTime& prePostImageOpTime) = 0;
 
     /**
      * Notifies this cloner that a delede happened to the collection, which it owns. It is up to the
@@ -134,7 +149,10 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onDeleteOp(OperationContext* txn, const BSONObj& deletedDocId) = 0;
+    virtual void onDeleteOp(OperationContext* opCtx,
+                            const BSONObj& deletedDocId,
+                            const repl::OpTime& opTime,
+                            const repl::OpTime& preImageOpTime) = 0;
 
 protected:
     MigrationChunkClonerSource();

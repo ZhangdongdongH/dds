@@ -31,6 +31,9 @@
 
 #include "mongo/client/fetcher.h"
 
+#include <ostream>
+#include <utility>
+
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/rpc/get_status_from_command_result.h"
@@ -38,6 +41,7 @@
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -115,7 +119,7 @@ Status parseCursorResponse(const BSONObj& obj,
                                     << "' field must be a string: "
                                     << obj);
     }
-    NamespaceString tempNss(namespaceElement.valuestrsafe());
+    const NamespaceString tempNss(namespaceElement.valueStringData());
     if (!tempNss.isValid()) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
@@ -168,7 +172,8 @@ Fetcher::Fetcher(executor::TaskExecutor* executor,
                  const BSONObj& findCmdObj,
                  const CallbackFn& work,
                  const BSONObj& metadata,
-                 Milliseconds timeout,
+                 Milliseconds findNetworkTimeout,
+                 Milliseconds getMoreNetworkTimeout,
                  std::unique_ptr<RemoteCommandRetryScheduler::RetryPolicy> firstCommandRetryPolicy)
     : _executor(executor),
       _source(source),
@@ -176,11 +181,12 @@ Fetcher::Fetcher(executor::TaskExecutor* executor,
       _cmdObj(findCmdObj.getOwned()),
       _metadata(metadata.getOwned()),
       _work(work),
-      _timeout(timeout),
+      _findNetworkTimeout(findNetworkTimeout),
+      _getMoreNetworkTimeout(getMoreNetworkTimeout),
       _firstRemoteCommandScheduler(
           _executor,
-          RemoteCommandRequest(_source, _dbname, _cmdObj, _metadata, nullptr, _timeout),
-          stdx::bind(&Fetcher::_callback, this, stdx::placeholders::_1, kFirstBatchFieldName),
+          RemoteCommandRequest(_source, _dbname, _cmdObj, _metadata, nullptr, _findNetworkTimeout),
+          [this](const auto& x) { return this->_callback(x, kFirstBatchFieldName); },
           std::move(firstCommandRetryPolicy)) {
     uassert(ErrorCodes::BadValue, "callback function cannot be null", work);
 }
@@ -201,10 +207,6 @@ BSONObj Fetcher::getMetadataObject() const {
     return _metadata;
 }
 
-Milliseconds Fetcher::getTimeout() const {
-    return _timeout;
-}
-
 std::string Fetcher::toString() const {
     return getDiagnosticString();
 }
@@ -217,9 +219,10 @@ std::string Fetcher::getDiagnosticString() const {
     output << " database: " << _dbname;
     output << " query: " << _cmdObj;
     output << " query metadata: " << _metadata;
-    output << " active: " << _active;
-    output << " timeout: " << _timeout;
-    output << " inShutdown: " << _inShutdown;
+    output << " active: " << _isActive_inlock();
+    output << " findNetworkTimeout: " << _findNetworkTimeout;
+    output << " getMoreNetworkTimeout: " << _getMoreNetworkTimeout;
+    output << " shutting down?: " << _isShuttingDown_inlock();
     output << " first: " << _first;
     output << " firstCommandScheduler: " << _firstRemoteCommandScheduler.toString();
 
@@ -233,70 +236,89 @@ std::string Fetcher::getDiagnosticString() const {
 
 bool Fetcher::isActive() const {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return _active;
+    return _isActive_inlock();
+}
+
+bool Fetcher::_isActive_inlock() const {
+    return State::kRunning == _state || State::kShuttingDown == _state;
 }
 
 Status Fetcher::schedule() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    if (_active) {
-        return Status(ErrorCodes::IllegalOperation, "fetcher already scheduled");
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    switch (_state) {
+        case State::kPreStart:
+            _state = State::kRunning;
+            break;
+        case State::kRunning:
+            return Status(ErrorCodes::InternalError, "fetcher already started");
+        case State::kShuttingDown:
+            return Status(ErrorCodes::ShutdownInProgress, "fetcher shutting down");
+        case State::kComplete:
+            return Status(ErrorCodes::ShutdownInProgress, "fetcher completed");
     }
 
     auto status = _firstRemoteCommandScheduler.startup();
     if (!status.isOK()) {
+        _state = State::kComplete;
         return status;
     }
 
-    _active = true;
     return Status::OK();
 }
 
 void Fetcher::shutdown() {
-    executor::TaskExecutor::CallbackHandle handle;
-    {
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        _inShutdown = true;
-
-        if (!_active) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    switch (_state) {
+        case State::kPreStart:
+            // Transition directly from PreStart to Complete if not started yet.
+            _state = State::kComplete;
             return;
-        }
-
-        _firstRemoteCommandScheduler.shutdown();
-
-        if (!_getMoreCallbackHandle.isValid()) {
+        case State::kRunning:
+            _state = State::kShuttingDown;
+            break;
+        case State::kShuttingDown:
+        case State::kComplete:
+            // Nothing to do if we are already in ShuttingDown or Complete state.
             return;
-        }
-
-        handle = _getMoreCallbackHandle;
     }
 
-    _executor->cancel(handle);
+    _firstRemoteCommandScheduler.shutdown();
+
+    if (_getMoreCallbackHandle) {
+        _executor->cancel(_getMoreCallbackHandle);
+    }
 }
 
 void Fetcher::join() {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
-    _condition.wait(lk, [this]() { return !_active; });
+    _condition.wait(lk, [this]() { return !_isActive_inlock(); });
 }
 
-bool Fetcher::inShutdown_forTest() const {
-    return _isInShutdown();
-}
-
-bool Fetcher::_isInShutdown() const {
+Fetcher::State Fetcher::getState_forTest() const {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return _inShutdown;
+    return _state;
+}
+
+bool Fetcher::_isShuttingDown() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _isShuttingDown_inlock();
+}
+
+bool Fetcher::_isShuttingDown_inlock() const {
+    return State::kShuttingDown == _state;
 }
 
 Status Fetcher::_scheduleGetMore(const BSONObj& cmdObj) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    if (_inShutdown) {
+    if (_isShuttingDown_inlock()) {
         return Status(ErrorCodes::CallbackCanceled,
                       "fetcher was shut down after previous batch was processed");
     }
     StatusWith<executor::TaskExecutor::CallbackHandle> scheduleResult =
         _executor->scheduleRemoteCommand(
-            RemoteCommandRequest(_source, _dbname, cmdObj, _metadata, nullptr, _timeout),
-            stdx::bind(&Fetcher::_callback, this, stdx::placeholders::_1, kNextBatchFieldName));
+            RemoteCommandRequest(
+                _source, _dbname, cmdObj, _metadata, nullptr, _getMoreNetworkTimeout),
+            [this](const auto& x) { return this->_callback(x, kNextBatchFieldName); });
 
     if (!scheduleResult.isOK()) {
         return scheduleResult.getStatus();
@@ -308,15 +330,21 @@ Status Fetcher::_scheduleGetMore(const BSONObj& cmdObj) {
 }
 
 void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batchFieldName) {
+    QueryResponse batchData;
+    auto finishCallbackGuard = MakeGuard([this, &batchData] {
+        if (batchData.cursorId && !batchData.nss.isEmpty()) {
+            _sendKillCursors(batchData.cursorId, batchData.nss);
+        }
+        _finishCallback();
+    });
+
     if (!rcbd.response.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(rcbd.response.status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
-    if (_isInShutdown()) {
+    if (_isShuttingDown()) {
         _work(Status(ErrorCodes::CallbackCanceled, "fetcher shutting down"), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -324,15 +352,12 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     Status status = getStatusFromCommandResult(queryResponseObj);
     if (!status.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
-    QueryResponse batchData;
     status = parseCursorResponse(queryResponseObj, batchFieldName, &batchData);
     if (!status.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -348,7 +373,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
 
     if (!batchData.cursorId) {
         _work(StatusWith<QueryResponse>(batchData), &nextAction, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -360,8 +384,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     // Callback function _work may modify nextAction to request the fetcher
     // not to schedule a getMore command.
     if (nextAction != NextAction::kGetMore) {
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
 
@@ -369,8 +391,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     // BSONObjBuilder for the getMore command.
     auto cmdObj = bob.obj();
     if (cmdObj.isEmpty()) {
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
 
@@ -378,10 +398,10 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     if (!status.isOK()) {
         nextAction = NextAction::kNoAction;
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
+
+    finishCallbackGuard.Dismiss();
 }
 
 void Fetcher::_sendKillCursors(const CursorId id, const NamespaceString& nss) {
@@ -406,10 +426,35 @@ void Fetcher::_sendKillCursors(const CursorId id, const NamespaceString& nss) {
     }
 }
 void Fetcher::_finishCallback() {
+    // After running callback function, clear '_work' to release any resources that might be held by
+    // this function object.
+    // '_work' must be moved to a temporary copy and destroyed outside the lock in case there is any
+    // logic that's invoked at the function object's destruction that might call into this Fetcher.
+    // 'tempWork' must be declared before lock guard 'lk' so that it is destroyed outside the lock.
+    Fetcher::CallbackFn tempWork;
+
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    _active = false;
+    invariant(State::kComplete != _state);
+    _state = State::kComplete;
     _first = false;
     _condition.notify_all();
+
+    invariant(_work);
+    std::swap(_work, tempWork);
+}
+
+std::ostream& operator<<(std::ostream& os, const Fetcher::State& state) {
+    switch (state) {
+        case Fetcher::State::kPreStart:
+            return os << "PreStart";
+        case Fetcher::State::kRunning:
+            return os << "Running";
+        case Fetcher::State::kShuttingDown:
+            return os << "ShuttingDown";
+        case Fetcher::State::kComplete:
+            return os << "Complete";
+    }
+    MONGO_UNREACHABLE;
 }
 
 }  // namespace mongo

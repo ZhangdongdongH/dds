@@ -33,34 +33,30 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/aggregation_request.h"
 
 namespace mongo {
-
-class AggregationRequest;
 
 /**
  * Represents a resolved definition, composed of a base collection namespace and a pipeline
  * built from one or more views.
  */
-class ResolvedView {
+class ResolvedView final : public ErrorExtraInfo {
 public:
-    ResolvedView(const NamespaceString& collectionNs, const std::vector<BSONObj>& pipeline)
-        : _namespace(collectionNs), _pipeline(pipeline) {}
+    ResolvedView(const NamespaceString& collectionNs,
+                 std::vector<BSONObj> pipeline,
+                 BSONObj defaultCollation)
+        : _namespace(collectionNs),
+          _pipeline(std::move(pipeline)),
+          _defaultCollation(std::move(defaultCollation)) {}
+
+    static ResolvedView fromBSON(const BSONObj& commandResponseObj);
 
     /**
-     * Returns whether 'commandResponseObj' contains a CommandOnShardedViewNotSupportedOnMongod
-     * error and resolved view definition.
-     */
-    static bool isResolvedViewErrorResponse(BSONObj commandResponseObj);
-
-    static ResolvedView fromBSON(BSONObj commandResponseObj);
-
-    /**
-     * Convert an aggregation command on a view to the equivalent command against the views
+     * Convert an aggregation command on a view to the equivalent command against the view's
      * underlying collection.
      */
-    StatusWith<BSONObj> asExpandedViewAggregation(const BSONObj& aggCommand) const;
-    StatusWith<BSONObj> asExpandedViewAggregation(const AggregationRequest& aggRequest) const;
+    AggregationRequest asExpandedViewAggregation(const AggregationRequest& aggRequest) const;
 
     const NamespaceString& getNamespace() const {
         return _namespace;
@@ -70,9 +66,26 @@ public:
         return _pipeline;
     }
 
+    const BSONObj& getDefaultCollation() const {
+        return _defaultCollation;
+    }
+
+    // ErrorExtraInfo API
+    static constexpr auto code = ErrorCodes::CommandOnShardedViewNotSupportedOnMongod;
+    void serialize(BSONObjBuilder* bob) const final;
+    static std::shared_ptr<const ErrorExtraInfo> parse(const BSONObj&);
+
 private:
     NamespaceString _namespace;
     std::vector<BSONObj> _pipeline;
+
+    // The default collation associated with this view. An empty object means that the default is
+    // the simple collation.
+    //
+    // Currently all operations which run over a view must use the default collation. This means
+    // that operations on the view which do not specify a collation inherit the default. Operations
+    // on the view which specify any other collation fail with a user error.
+    BSONObj _defaultCollation;
 };
 
 }  // namespace mongo

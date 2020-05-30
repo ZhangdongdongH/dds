@@ -36,7 +36,8 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/split_chunk_request_type.h"
 #include "mongo/util/log.h"
@@ -61,17 +62,17 @@ using std::string;
  *   writeConcern: <BSONObj>
  * }
  */
-class ConfigSvrSplitChunkCommand : public Command {
+class ConfigSvrSplitChunkCommand : public BasicCommand {
 public:
-    ConfigSvrSplitChunkCommand() : Command("_configsvrCommitChunkSplit") {}
+    ConfigSvrSplitChunkCommand() : BasicCommand("_configsvrCommitChunkSplit") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is sent by a shard to the sharding config server. Do "
-                "not call directly. Receives, validates, and processes a SplitChunkRequest.";
+    std::string help() const override {
+        return "Internal command, which is sent by a shard to the sharding config server. Do "
+               "not call directly. Receives, validates, and processes a SplitChunkRequest.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -84,7 +85,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -93,32 +94,32 @@ public:
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return parseNsFullyQualified(dbname, cmdObj);
+        return CommandHelpers::parseNsFullyQualified(cmdObj);
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
             uasserted(ErrorCodes::IllegalOperation,
                       "_configsvrCommitChunkSplit can only be run on config servers");
         }
 
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+
         auto parsedRequest = uassertStatusOK(SplitChunkRequest::parseFromConfigCommand(cmdObj));
 
         Status splitChunkResult =
-            Grid::get(txn)->catalogManager()->commitChunkSplit(txn,
-                                                               parsedRequest.getNamespace(),
-                                                               parsedRequest.getEpoch(),
-                                                               parsedRequest.getChunkRange(),
-                                                               parsedRequest.getSplitPoints(),
-                                                               parsedRequest.getShardName());
-        if (!splitChunkResult.isOK()) {
-            return appendCommandStatus(result, splitChunkResult);
-        }
+            ShardingCatalogManager::get(opCtx)->commitChunkSplit(opCtx,
+                                                                 parsedRequest.getNamespace(),
+                                                                 parsedRequest.getEpoch(),
+                                                                 parsedRequest.getChunkRange(),
+                                                                 parsedRequest.getSplitPoints(),
+                                                                 parsedRequest.getShardName());
+        uassertStatusOK(splitChunkResult);
 
         return true;
     }

@@ -1,5 +1,6 @@
 /**
  * Tests some practical use cases of the $facet stage.
+ * @tags: [requires_sharding]
  */
 (function() {
     "use strict";
@@ -131,7 +132,8 @@
         pipeline: [{
             $lookup:
                 {from: shardedCollName, localField: "_id", foreignField: "_id", as: "results"}
-        }]
+        }],
+        cursor: {}
     }));
     assert.eq(
         28769, res.code, "Expected aggregation to fail due to $lookup on a sharded collection");
@@ -151,7 +153,8 @@
                     }
                 }]
             }
-        }]
+        }],
+        cursor: {}
     }));
     assert.eq(
         28769, res.code, "Expected aggregation to fail due to $lookup on a sharded collection");
@@ -163,9 +166,10 @@
     // Make sure there is a chunk on each shard, so that our aggregations are targeted to multiple
     // shards.
     assert.commandWorked(st.admin.runCommand({split: testNs, middle: {_id: nDocs / 2}}));
-    assert.commandWorked(st.admin.runCommand({moveChunk: testNs, find: {_id: 0}, to: "shard0000"}));
     assert.commandWorked(
-        st.admin.runCommand({moveChunk: testNs, find: {_id: nDocs - 1}, to: "shard0001"}));
+        st.admin.runCommand({moveChunk: testNs, find: {_id: 0}, to: st.shard0.shardName}));
+    assert.commandWorked(
+        st.admin.runCommand({moveChunk: testNs, find: {_id: nDocs - 1}, to: st.shard1.shardName}));
 
     doExecutionTest(st.s0);
 

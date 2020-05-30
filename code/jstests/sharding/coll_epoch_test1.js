@@ -3,26 +3,22 @@
 (function() {
     'use strict';
 
-    var st = new ShardingTest({shards: 3, mongos: 3});
+    var st = new ShardingTest({shards: 3, mongos: 3, causallyConsistent: true});
 
-    // Use separate mongoses for admin, inserting data, and validating results, so no
-    // single-mongos tricks will work
-    var insertMongos = st.s2;
+    var config = st.s0.getDB("config");
+    var admin = st.s0.getDB("admin");
+    var coll = st.s0.getCollection("foo.bar");
+
+    // Use separate mongoses for admin, inserting data, and validating results, so no single-mongos
+    // tricks will work
     var staleMongos = st.s1;
+    var insertMongos = st.s2;
 
-    var config = st.s.getDB("config");
-    var admin = st.s.getDB("admin");
-    var coll = st.s.getCollection("foo.bar");
-
-    var shards = {};
-    config.shards.find().forEach(function(doc) {
-        shards[doc._id] = new Mongo(doc.host);
-    });
+    var shards = [st.shard0, st.shard1, st.shard2];
 
     //
     // Test that inserts and queries go to the correct shard even when the collection has been
-    // sharded
-    // in the background
+    // sharded from another mongos
     //
 
     jsTest.log("Enabling sharding for the first time...");
@@ -30,7 +26,7 @@
     assert.commandWorked(admin.runCommand({enableSharding: coll.getDB() + ""}));
     // TODO(PM-85): Make sure we *always* move the primary after collection lifecyle project is
     // complete
-    st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+    st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {_id: 1}}));
     st.configRS.awaitLastOpCommitted();  // TODO: Remove after collection lifecyle project (PM-85)
 
@@ -45,12 +41,12 @@
 
     //
     // Test that inserts and queries go to the correct shard even when the collection has been
-    // re-sharded in the background
+    // resharded from another mongos, with a different key
     //
 
     jsTest.log("Re-enabling sharding with a different key...");
 
-    st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+    st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
     assert.commandWorked(coll.ensureIndex({notId: 1}));
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {notId: 1}}));
 
@@ -66,28 +62,15 @@
 
     //
     // Test that inserts and queries go to the correct shard even when the collection has been
-    // unsharded and moved to a different primary
+    // unsharded from another mongos
     //
 
-    jsTest.log(
-        "Re-creating unsharded collection from a sharded collection on different primary...");
-
-    var getOtherShard = function(shard) {
-        for (var id in shards) {
-            if (id != shard)
-                return id;
-        }
-    };
-
-    var otherShard = getOtherShard(config.databases.findOne({_id: coll.getDB() + ""}).primary);
-    assert.commandWorked(admin.runCommand({movePrimary: coll.getDB() + "", to: otherShard}));
-    st.configRS.awaitLastOpCommitted();  // TODO: Remove after collection lifecyle project (PM-85)
-
-    jsTest.log("moved primary...");
+    jsTest.log("Re-creating unsharded collection from a sharded collection...");
 
     bulk = insertMongos.getCollection(coll + "").initializeUnorderedBulkOp();
-    for (var i = 0; i < 100; i++)
+    for (var i = 0; i < 100; i++) {
         bulk.insert({test: "c"});
+    }
     assert.writeOK(bulk.execute());
 
     assert.eq(100, staleMongos.getCollection(coll + "").find({test: "c"}).itcount());
@@ -96,29 +79,38 @@
     assert(coll.drop());
 
     //
-    // Test that inserts and queries go to correct shard even when the collection has been
-    // unsharded,
-    // resharded, and moved to a different primary
+    // Test that inserts and queries go to correct shard even when the collection has been unsharded
+    // and resharded from another mongos on a different primary
     //
+    // TODO: SERVER-32607 uncomment after the proper database version checks are in place.
+    /*
+        jsTest.log("Re-creating sharded collection with different primary...");
 
-    jsTest.log("Re-creating sharded collection with different primary...");
+        var getOtherShard = function(shardId) {
+            for (var i = 0; i < shards.length; ++i) {
+                if (shards[i].shardName != shardId)
+                    return shards[i].shardName;
+            }
+        };
 
-    assert.commandWorked(admin.runCommand({
-        movePrimary: coll.getDB() + "",
-        to: getOtherShard(config.databases.findOne({_id: coll.getDB() + ""}).primary)
-    }));
-    assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {_id: 1}}));
+        assert.commandWorked(admin.runCommand({
+            movePrimary: coll.getDB() + "",
+            to: getOtherShard(config.databases.findOne({_id: coll.getDB() + ""}).primary)
+        }));
+        assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {_id: 1}}));
 
-    bulk = insertMongos.getCollection(coll + "").initializeUnorderedBulkOp();
-    for (var i = 0; i < 100; i++)
-        bulk.insert({test: "d"});
-    assert.writeOK(bulk.execute());
+        bulk = insertMongos.getCollection(coll + "").initializeUnorderedBulkOp();
+        for (var i = 0; i < 100; i++) {
+            bulk.insert({test: "d"});
+        }
+        assert.writeOK(bulk.execute());
 
-    assert.eq(100, staleMongos.getCollection(coll + "").find({test: "d"}).itcount());
-    assert.eq(0,
-              staleMongos.getCollection(coll + "").find({test: {$in: ["a", "b", "c"]}}).itcount());
+        assert.eq(100, staleMongos.getCollection(coll + "").find({test: "d"}).itcount());
+        assert.eq(0,
+                  staleMongos.getCollection(coll + "").find({test: {$in: ["a", "b",
+       "c"]}}).itcount());
 
-    assert(coll.drop());
-
+        assert(coll.drop());
+    */
     st.stop();
 })();

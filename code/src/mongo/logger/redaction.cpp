@@ -38,6 +38,12 @@
 
 namespace mongo {
 
+namespace {
+
+constexpr auto kRedactionDefaultMask = "###"_sd;
+
+}  // namespace
+
 std::string redact(const BSONObj& objectToRedact) {
     if (!logger::globalLogDomain()->shouldRedactLogs()) {
         return objectToRedact.toString(false);
@@ -46,7 +52,7 @@ std::string redact(const BSONObj& objectToRedact) {
     return objectToRedact.toString(true);
 }
 
-std::string redact(const std::string& stringToRedact) {
+StringData redact(StringData stringToRedact) {
     if (!logger::globalLogDomain()->shouldRedactLogs()) {
         return stringToRedact;
     }
@@ -65,8 +71,6 @@ std::string redact(const Status& statusToRedact) {
     sb << statusToRedact.codeString();
     if (!statusToRedact.isOK())
         sb << ": " << kRedactionDefaultMask;
-    if (statusToRedact.location() != 0)
-        sb << " @ " << statusToRedact.location();
     return sb.str();
 }
 
@@ -77,7 +81,7 @@ std::string redact(const DBException& exceptionToRedact) {
 
     // Construct an exception representation with the what()
     std::stringstream ss;
-    ss << exceptionToRedact.getCode() << " " << kRedactionDefaultMask;
+    ss << exceptionToRedact.code() << " " << kRedactionDefaultMask;
     return ss.str();
 }
 

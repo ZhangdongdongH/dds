@@ -28,13 +28,13 @@
 
 #pragma once
 
+#include "mongo/base/checked_cast.h"
 #include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer_mock.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
 namespace transport {
-
-class TransportLayer;
 
 class MockSession : public Session {
     MONGO_DISALLOW_COPYING(MockSession);
@@ -65,12 +65,62 @@ public:
         return _local;
     }
 
-protected:
-    explicit MockSession(TransportLayer* tl) : _tl(tl), _remote(), _local() {}
-    explicit MockSession(HostAndPort remote, HostAndPort local, TransportLayer* tl)
-        : _tl(tl), _remote(std::move(remote)), _local(std::move(local)) {}
+    void end() override {
+        if (!_tl || !_tl->owns(id()))
+            return;
+        _tl->_sessions[id()].ended = true;
+    }
 
-    TransportLayer* _tl;
+    StatusWith<Message> sourceMessage() override {
+        if (!_tl || _tl->inShutdown()) {
+            return TransportLayer::ShutdownStatus;
+        } else if (!_tl->owns(id())) {
+            return TransportLayer::SessionUnknownStatus;
+        } else if (_tl->_sessions[id()].ended) {
+            return TransportLayer::TicketSessionClosedStatus;
+        }
+
+        return Message();  // Subclasses can do something different.
+    }
+
+    Future<Message> asyncSourceMessage(const transport::BatonHandle& handle = nullptr) override {
+        return Future<Message>::makeReady(sourceMessage());
+    }
+
+    Status sinkMessage(Message message) override {
+        if (!_tl || _tl->inShutdown()) {
+            return TransportLayer::ShutdownStatus;
+        } else if (!_tl->owns(id())) {
+            return TransportLayer::SessionUnknownStatus;
+        } else if (_tl->_sessions[id()].ended) {
+            return TransportLayer::TicketSessionClosedStatus;
+        }
+
+        return Status::OK();
+    }
+
+    Future<void> asyncSinkMessage(Message message,
+                                  const transport::BatonHandle& handle = nullptr) override {
+        return Future<void>::makeReady(sinkMessage(message));
+    }
+
+    void cancelAsyncOperations(const transport::BatonHandle& handle = nullptr) override {}
+
+    void setTimeout(boost::optional<Milliseconds>) override {}
+
+    bool isConnected() override {
+        return true;
+    }
+
+    explicit MockSession(TransportLayer* tl)
+        : _tl(checked_cast<TransportLayerMock*>(tl)), _remote(), _local() {}
+    explicit MockSession(HostAndPort remote, HostAndPort local, TransportLayer* tl)
+        : _tl(checked_cast<TransportLayerMock*>(tl)),
+          _remote(std::move(remote)),
+          _local(std::move(local)) {}
+
+protected:
+    TransportLayerMock* _tl;
 
     HostAndPort _remote;
     HostAndPort _local;

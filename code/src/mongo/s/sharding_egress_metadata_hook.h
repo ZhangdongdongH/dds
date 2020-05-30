@@ -28,38 +28,26 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/base/string_data.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/rpc/metadata/metadata_hook.h"
 #include "mongo/s/client/shard.h"
 
 namespace mongo {
-
-class Shard;
-
 namespace rpc {
 
+/**
+ * Hooks for handling configsvr optime, client metadata and auth metadata for sharding.
+ */
 class ShardingEgressMetadataHook : public rpc::EgressMetadataHook {
 public:
+    ShardingEgressMetadataHook(ServiceContext* serviceContext);
     virtual ~ShardingEgressMetadataHook() = default;
 
-    Status readReplyMetadata(const HostAndPort& replySource, const BSONObj& metadataObj) override;
-    Status writeRequestMetadata(OperationContext* txn,
-                                const HostAndPort& target,
-                                BSONObjBuilder* metadataBob) override;
-
-    // These overloaded methods exist to allow ShardingConnectionHook, which is soon to be
-    // deprecated, to use the logic in ShardingEgressMetadataHook instead of duplicating the
-    // logic. ShardingConnectionHook must provide the replySource and target as strings rather than
-    // HostAndPorts, since DBClientReplicaSet uses the hook before it decides on the actual host to
-    // contact.
-    Status readReplyMetadata(const StringData replySource, const BSONObj& metadataObj);
-    Status writeRequestMetadata(bool shardedConnection,
-                                OperationContext* txn,
-                                const StringData target,
-                                BSONObjBuilder* metadataBob);
+    Status readReplyMetadata(OperationContext* opCtx,
+                             StringData replySource,
+                             const BSONObj& metadataObj) override;
+    Status writeRequestMetadata(OperationContext* opCtx, BSONObjBuilder* metadataBob) override;
 
 protected:
     /**
@@ -83,6 +71,8 @@ protected:
      * metadata in the response object from running a command.
      */
     virtual Status _advanceConfigOptimeFromShard(ShardId shardId, const BSONObj& metadataObj);
+
+    ServiceContext* const _serviceContext;
 };
 
 }  // namespace rpc

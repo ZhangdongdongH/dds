@@ -31,19 +31,23 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/init.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/db/concurrency/d_concurrency.h"
+#include "mongo/db/logical_clock.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/snapshot_manager.h"
 
 namespace mongo {
-class CmdMakeSnapshot final : public Command {
+class CmdMakeSnapshot final : public BasicCommand {
 public:
-    CmdMakeSnapshot() : Command("makeSnapshot") {}
+    CmdMakeSnapshot() : BasicCommand("makeSnapshot") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -55,45 +59,39 @@ public:
     // No auth needed because it only works when enabled via command line.
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return Status::OK();
     }
 
-    virtual void help(std::stringstream& h) const {
-        h << "Creates a new named snapshot";
+    std::string help() const override {
+        return "Creates a new named snapshot";
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) {
-        auto snapshotManager =
-            getGlobalServiceContext()->getGlobalStorageEngine()->getSnapshotManager();
+        auto snapshotManager = getGlobalServiceContext()->getStorageEngine()->getSnapshotManager();
         if (!snapshotManager) {
-            return appendCommandStatus(result, {ErrorCodes::CommandNotSupported, ""});
+            uasserted(ErrorCodes::CommandNotSupported, "");
         }
 
-        ScopedTransaction st(txn, MODE_IX);
-        Lock::GlobalLock lk(txn->lockState(), MODE_IX, UINT_MAX);
+        Lock::GlobalLock lk(opCtx, MODE_IX);
 
-        auto status = snapshotManager->prepareForCreateSnapshot(txn);
-        if (status.isOK()) {
-            const auto name = repl::ReplicationCoordinator::get(txn)->reserveSnapshotName(nullptr);
-            result.append("name", static_cast<long long>(name.asU64()));
-            status = snapshotManager->createSnapshot(txn, name);
-        }
-        return appendCommandStatus(result, status);
+        auto name = LogicalClock::getClusterTimeForReplicaSet(opCtx).asTimestamp();
+        result.append("name", static_cast<long long>(name.asULL()));
+
+        return true;
     }
 };
+MONGO_REGISTER_TEST_COMMAND(CmdMakeSnapshot);
 
-class CmdSetCommittedSnapshot final : public Command {
+class CmdSetCommittedSnapshot final : public BasicCommand {
 public:
-    CmdSetCommittedSnapshot() : Command("setCommittedSnapshot") {}
+    CmdSetCommittedSnapshot() : BasicCommand("setCommittedSnapshot") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -105,40 +103,28 @@ public:
     // No auth needed because it only works when enabled via command line.
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return Status::OK();
     }
 
-    virtual void help(std::stringstream& h) const {
-        h << "Sets the snapshot for {readConcern: {level: 'majority'}}";
+    std::string help() const override {
+        return "Sets the snapshot for {readConcern: {level: 'majority'}}";
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) {
-        auto snapshotManager =
-            getGlobalServiceContext()->getGlobalStorageEngine()->getSnapshotManager();
+        auto snapshotManager = getGlobalServiceContext()->getStorageEngine()->getSnapshotManager();
         if (!snapshotManager) {
-            return appendCommandStatus(result, {ErrorCodes::CommandNotSupported, ""});
+            uasserted(ErrorCodes::CommandNotSupported, "");
         }
 
-        ScopedTransaction st(txn, MODE_IX);
-        Lock::GlobalLock lk(txn->lockState(), MODE_IX, UINT_MAX);
-        auto name = SnapshotName(cmdObj.firstElement().Long());
-        snapshotManager->setCommittedSnapshot(name);
+        Lock::GlobalLock lk(opCtx, MODE_IX);
+        auto timestamp = Timestamp(cmdObj.firstElement().Long());
+        snapshotManager->setCommittedSnapshot(timestamp);
         return true;
     }
 };
-
-MONGO_INITIALIZER(RegisterSnapshotManagementCommands)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
-        // Leaked intentionally: a Command registers itself when constructed.
-        new CmdMakeSnapshot();
-        new CmdSetCommittedSnapshot();
-    }
-    return Status::OK();
-}
+MONGO_REGISTER_TEST_COMMAND(CmdSetCommittedSnapshot);
 }

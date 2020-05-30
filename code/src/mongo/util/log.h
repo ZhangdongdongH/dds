@@ -52,6 +52,7 @@
 #include "mongo/logger/redaction.h"
 #include "mongo/logger/tee.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/errno_util.h"
 
 // Provide log component in global scope so that MONGO_LOG will always have a valid component.
 // Global log component will be kDefault unless overridden by MONGO_LOG_DEFAULT_COMPONENT.
@@ -133,6 +134,22 @@ inline LogstreamBuilder log() {
                             ::MongoLogDefaultComponent_component);
 }
 
+/**
+ * Returns a LogstreamBuilder that does not cache its ostream in a threadlocal cache.
+ * Use this variant when logging from places that may not be able to access threadlocals,
+ * such as from within other threadlocal-managed objects, or thread_specific_ptr-managed
+ * objects.
+ *
+ * Once SERVER-29377 is completed, this overload can be removed.
+ */
+inline LogstreamBuilder logNoCache() {
+    return LogstreamBuilder(logger::globalLogDomain(),
+                            getThreadName(),
+                            logger::LogSeverity::Log(),
+                            ::MongoLogDefaultComponent_component,
+                            false);
+}
+
 inline LogstreamBuilder log(logger::LogComponent component) {
     return LogstreamBuilder(
         logger::globalLogDomain(), getThreadName(), logger::LogSeverity::Log(), component);
@@ -146,8 +163,12 @@ inline LogstreamBuilder log(logger::LogComponent::Value componentValue) {
 /**
  * Runs the same logic as log()/warning()/error(), without actually outputting a stream.
  */
+inline bool shouldLog(logger::LogComponent logComponent, logger::LogSeverity severity) {
+    return logger::globalLogDomain()->shouldLog(logComponent, severity);
+}
+
 inline bool shouldLog(logger::LogSeverity severity) {
-    return logger::globalLogDomain()->shouldLog(::MongoLogDefaultComponent_component, severity);
+    return shouldLog(::MongoLogDefaultComponent_component, severity);
 }
 
 }  // namespace
@@ -209,16 +230,8 @@ inline bool shouldLog(logger::LogSeverity severity) {
  */
 bool rotateLogs(bool renameFiles);
 
-/** output the error # and error message with prefix.
-    handy for use as parm in uassert/massert.
-    */
-std::string errnoWithPrefix(StringData prefix);
-
 extern Tee* const warnings;            // Things put here go in serverStatus
 extern Tee* const startupWarningsLog;  // Things put here get reported in MMS
-
-std::string errnoWithDescription(int errorcode = -1);
-std::pair<int, std::string> errnoAndDescription();
 
 /**
  * Write the current context (backtrace), along with the optional "msg".

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -63,6 +63,25 @@ class test_reconfig01(wttest.WiredTigerTestCase):
         # Async is off, turn it on.  Should end up with the
         # same ops_max of 512 and thread of 8.
         self.conn.reconfigure("async=(enabled=true)")
+
+    def test_reconfig_eviction(self):
+        # Increase the max number of running threads (default 8).
+        self.conn.reconfigure("eviction=(threads_max=10)")
+        # Increase the min number of running threads (default 1).
+        self.conn.reconfigure("eviction=(threads_min=5)")
+        # Decrease the max number of running threads.
+        self.conn.reconfigure("eviction=(threads_max=7)")
+        # Decrease the min number of running threads.
+        self.conn.reconfigure("eviction=(threads_min=2)")
+        # Set min and max the same.
+        self.conn.reconfigure("eviction=(threads_min=6,threads_max=6)")
+        # Set target and trigger with an absolute value.
+        self.conn.reconfigure("eviction_target=50M,eviction_trigger=100M")
+        # Set dirty target and trigger with an absolute value
+        self.conn.reconfigure("eviction_dirty_target=20M,"
+                              "eviction_dirty_trigger=40M")
+        # Set eviction checkpoint target with an absolute value
+        self.conn.reconfigure("eviction_checkpoint_target=50M")
 
     def test_reconfig_lsm_manager(self):
         # We create and populate a tiny LSM so that we can start off with

@@ -34,9 +34,10 @@
 
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/index_tag.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/text.h"
 #include <memory>
@@ -44,6 +45,8 @@
 using namespace mongo;
 
 namespace {
+
+constexpr CollatorInterface* kSimpleCollator = nullptr;
 
 using std::unique_ptr;
 using std::string;
@@ -53,9 +56,8 @@ using std::vector;
  * Utility function to create MatchExpression
  */
 unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj, std::move(expCtx));
     ASSERT_TRUE(status.isOK());
     return std::move(status.getValue());
 }
@@ -86,7 +88,7 @@ string toString(Iter begin, Iter end) {
 void testGetFields(const char* query, const char* prefix, const char* expectedFieldsStr) {
     BSONObj obj = fromjson(query);
     unique_ptr<MatchExpression> expr(parseMatchExpression(obj));
-    unordered_set<string> fields;
+    stdx::unordered_set<string> fields;
     QueryPlannerIXSelect::getFields(expr.get(), prefix, &fields);
 
     // Verify results
@@ -304,6 +306,83 @@ TEST(QueryPlannerIXSelectTest, RateIndicesTaggedNodePathArrayNegation) {
 }
 
 /**
+ * $not within $elemMatch should not attempt to use a sparse index for $exists:false.
+ */
+TEST(QueryPlannerIXSelectTest, ElemMatchNotExistsShouldNotUseSparseIndex) {
+    std::vector<IndexEntry> indices;
+    auto idxEntry = IndexEntry(BSON("a" << 1));
+    idxEntry.sparse = true;
+    indices.push_back(idxEntry);
+    std::set<size_t> expectedIndices;
+    testRateIndices("{a: {$elemMatch: {$not: {$exists: true}}}}",
+                    "",
+                    kSimpleCollator,
+                    indices,
+                    "",
+                    expectedIndices);
+}
+
+/**
+ * $in with a null value within $elemMatch can use a sparse index.
+ */
+TEST(QueryPlannerIXSelectTest, ElemMatchInNullValueShouldUseSparseIndex) {
+    std::vector<IndexEntry> indices;
+    auto idxEntry = IndexEntry(BSON("a" << 1));
+    idxEntry.sparse = true;
+    indices.push_back(idxEntry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$elemMatch: {$in: [null]}}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+/**
+ * $geo queries within $elemMatch should not use a normal B-tree index.
+ */
+TEST(QueryPlannerIXSelectTest, ElemMatchGeoShouldNotUseBtreeIndex) {
+    std::vector<IndexEntry> indices;
+    auto idxEntry = IndexEntry(BSON("a" << 1));
+    indices.push_back(idxEntry);
+    std::set<size_t> expectedIndices;
+    testRateIndices(R"({a: {$elemMatch: {$geoWithin: {$geometry: {type: 'Polygon', 
+                      coordinates: [[[0,0],[0,1],[1,0],[0,0]]]}}}}})",
+                    "",
+                    kSimpleCollator,
+                    indices,
+                    "a",
+                    expectedIndices);
+}
+
+/**
+ * $eq with a null value within $elemMatch can use a sparse index.
+ */
+TEST(QueryPlannerIXSelectTest, ElemMatchEqNullValueShouldUseSparseIndex) {
+    std::vector<IndexEntry> indices;
+    auto idxEntry = IndexEntry(BSON("a" << 1));
+    idxEntry.sparse = true;
+    indices.push_back(idxEntry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$elemMatch: {$eq: null}}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+/**
+ * $elemMatch with multiple children will not use an index if any child is incompatible.
+ */
+TEST(QueryPlannerIXSelectTest, ElemMatchMultipleChildrenShouldRequireAllToBeCompatible) {
+    std::vector<IndexEntry> indices;
+    auto idxEntry = IndexEntry(BSON("a" << 1));
+    idxEntry.sparse = true;
+    indices.push_back(idxEntry);
+    std::set<size_t> expectedIndices;
+    testRateIndices("{a: {$elemMatch: {$eq: null, $not: {$exists: true}}}}",
+                    "",
+                    kSimpleCollator,
+                    indices,
+                    "",
+                    expectedIndices);
+}
+
+/**
  * If the collator is null, we select the relevant index with a null collator.
  */
 TEST(QueryPlannerIXSelectTest, NullCollatorsMatch) {
@@ -377,6 +456,52 @@ TEST(QueryPlannerIXSelectTest, NoStringComparison) {
     indices.push_back(index);
     std::set<size_t> expectedIndices = {0};
     testRateIndices("{a: 1}", "", &collator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, StringInternalExprEqUnequalCollatorsCannotUseIndex) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    IndexEntry index(BSON("a" << 1));
+    CollatorInterfaceMock indexCollator(CollatorInterfaceMock::MockType::kReverseString);
+    index.collator = &indexCollator;
+    std::vector<IndexEntry> indices;
+    indices.push_back(index);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$_internalExprEq: 'string'}}", "", &collator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, StringInternalExprEqEqualCollatorsCanUseIndex) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    IndexEntry index(BSON("a" << 1));
+    index.collator = &collator;
+    std::vector<IndexEntry> indices;
+    indices.push_back(index);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: 'string'}}", "", &collator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, NestedObjectInternalExprEqUnequalCollatorsCannotUseIndex) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    IndexEntry index(BSON("a" << 1));
+    CollatorInterfaceMock indexCollator(CollatorInterfaceMock::MockType::kReverseString);
+    index.collator = &indexCollator;
+    std::vector<IndexEntry> indices;
+    indices.push_back(index);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$_internalExprEq: {b: 'string'}}}", "", &collator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, NestedObjectInternalExprEqEqualCollatorsCanUseIndex) {
+    CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
+    IndexEntry index(BSON("a" << 1));
+    index.collator = &collator;
+    std::vector<IndexEntry> indices;
+    indices.push_back(index);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: {b: 'string'}}}", "", &collator, indices, "a", expectedIndices);
 }
 
 /**
@@ -902,6 +1027,151 @@ TEST(QueryPlannerIXSelectTest, NoStringComparisonType) {
     for (const auto& pattern : testPatterns) {
         testRateIndices(pattern.c_str(), "", &collator, indices, "a", expectedIndices);
     }
+}
+
+IndexEntry makeIndexEntry(BSONObj keyPattern, MultikeyPaths multiKeyPaths) {
+    IndexEntry entry{std::move(keyPattern)};
+    entry.multikeyPaths = std::move(multiKeyPaths);
+    entry.multikey = std::any_of(entry.multikeyPaths.cbegin(),
+                                 entry.multikeyPaths.cend(),
+                                 [](const auto& entry) { return !entry.empty(); });
+    return entry;
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCannotUseMultiKeyIndex) {
+    IndexEntry entry = makeIndexEntry(BSON("a" << 1), {{0U}});
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseNonMultikeyFieldOfMultikeyIndex) {
+    IndexEntry entry = makeIndexEntry(BSON("a" << 1 << "b" << 1), {{0U}, {}});
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{b: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "b", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCannotUseMultikeyIndexWithoutPathLevelMultikeyData) {
+    IndexEntry entry{BSON("a" << 1)};
+    entry.multikey = true;
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseNonMultikeyIndexWithNoPathLevelMultikeyData) {
+    IndexEntry entry{BSON("a" << 1)};
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseHashedIndex) {
+    IndexEntry entry{BSON("a"
+                          << "hashed")};
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCannotUseTextIndexPrefix) {
+    IndexEntry entry{BSON("a" << 1 << "_fts"
+                              << "text"
+                              << "_ftsx"
+                              << 1)};
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices;
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseTextIndexSuffix) {
+    IndexEntry entry{BSON("_fts"
+                          << "text"
+                          << "_ftsx"
+                          << 1
+                          << "a"
+                          << 1)};
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseSparseIndexWithComparisonToNull) {
+    IndexEntry entry{BSON("a" << 1)};
+    entry.sparse = true;
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: null}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, InternalExprEqCanUseSparseIndexWithComparisonToNonNull) {
+    IndexEntry entry{BSON("a" << 1)};
+    entry.sparse = true;
+    std::vector<IndexEntry> indices;
+    indices.push_back(entry);
+    std::set<size_t> expectedIndices = {0};
+    testRateIndices(
+        "{a: {$_internalExprEq: 1}}", "", kSimpleCollator, indices, "a", expectedIndices);
+}
+
+TEST(QueryPlannerIXSelectTest, IndexedFieldHasMultikeyComponents) {
+    auto indexEntry = makeIndexEntry(BSON("a" << 1 << "b.c" << 1), {{}, {}});
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a"_sd, indexEntry));
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("b.c"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a" << 1 << "b" << 1), {{}, {0U}});
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a"_sd, indexEntry));
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("b"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a" << 1 << "b" << 1 << "c.d" << 1), {{}, {}, {1U}});
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a"_sd, indexEntry));
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("b"_sd, indexEntry));
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("c.d"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a.b" << 1 << "a.c" << 1), {{}, {1U}});
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.b"_sd, indexEntry));
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.c"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a.b" << 1 << "a.c" << 1), {{0U, 1U}, {0U}});
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.b"_sd, indexEntry));
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.c"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a" << 1 << "b" << 1), {{0U}, {}});
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a"_sd, indexEntry));
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("b"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a.b.c" << 1 << "d" << 1), {{1U, 2U}, {}});
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.b.c"_sd, indexEntry));
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("d"_sd, indexEntry));
+
+    indexEntry = makeIndexEntry(BSON("a.b" << 1 << "c" << 1 << "d" << 1), {{1U}, {}, {0U}});
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("a.b"_sd, indexEntry));
+    ASSERT_FALSE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("c"_sd, indexEntry));
+    ASSERT_TRUE(QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("d"_sd, indexEntry));
+}
+
+DEATH_TEST(QueryPlannerIXSelectTest,
+           IndexedFieldHasMultikeyComponentsPassingInvalidFieldIsFatal,
+           "Invariant failure Hit a MONGO_UNREACHABLE!") {
+    auto indexEntry = makeIndexEntry(BSON("a" << 1), {{}});
+    QueryPlannerIXSelect::indexedFieldHasMultikeyComponents("b"_sd, indexEntry);
 }
 
 }  // namespace

@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package util
 
 import (
@@ -56,14 +62,8 @@ func CreateConnectionAddrs(host, port string) []string {
 }
 
 // SplitNamespace splits a namespace path into a database and collection,
-// returned in that order. An error is returned if the namespace is invalid.
-func SplitAndValidateNamespace(namespace string) (string, string, error) {
-
-	// first, run validation checks
-	if err := ValidateFullNamespace(namespace); err != nil {
-		return "", "", fmt.Errorf("namespace '%v' is not valid: %v",
-			namespace, err)
-	}
+// returned in that order.
+func SplitNamespace(namespace string) (string, string) {
 
 	// find the first instance of "." in the namespace
 	firstDotIndex := strings.Index(namespace, ".")
@@ -78,6 +78,20 @@ func SplitAndValidateNamespace(namespace string) (string, string, error) {
 		database = namespace
 	}
 
+	return database, collection
+}
+
+// SplitAndValidateNamespace splits a namespace path into a database and collection,
+// returned in that order. An error is returned if the namespace is invalid.
+func SplitAndValidateNamespace(namespace string) (string, string, error) {
+
+	// first, run validation checks
+	if err := ValidateFullNamespace(namespace); err != nil {
+		return "", "", fmt.Errorf("namespace '%v' is not valid: %v",
+			namespace, err)
+	}
+
+	database, collection := SplitNamespace(namespace)
 	return database, collection, nil
 }
 

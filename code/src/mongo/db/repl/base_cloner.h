@@ -49,11 +49,6 @@ public:
     virtual ~BaseCloner() {}
 
     /**
-     * Returns diagnostic information.
-     */
-    virtual std::string getDiagnosticString() const = 0;
-
-    /**
      * Returns true if the cloner has been started (but has not completed).
      */
     virtual bool isActive() const = 0;
@@ -61,7 +56,7 @@ public:
     /**
      * Starts cloning by scheduling initial command to be run by the executor.
      */
-    virtual Status startup() = 0;
+    virtual Status startup() noexcept = 0;
 
     /**
      * Cancels current remote command request.

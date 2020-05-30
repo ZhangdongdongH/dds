@@ -28,7 +28,9 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
@@ -67,7 +69,7 @@ class OperationContext;
  */
 class SubplanStage final : public PlanStage {
 public:
-    SubplanStage(OperationContext* txn,
+    SubplanStage(OperationContext* opCtx,
                  Collection* collection,
                  WorkingSet* ws,
                  const QueryPlannerParams& params,
@@ -100,22 +102,10 @@ public:
      * take place.
      *
      * Returns a non-OK status if query planning fails. In particular, this function returns
-     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield.
+     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield, or
+     * ErrorCodes::MaxTimeMSExpired if the operation has exceeded its time limit.
      */
     Status pickBestPlan(PlanYieldPolicy* yieldPolicy);
-
-    /**
-     * Takes a match expression, 'root', which has a single "contained OR". This means that
-     * 'root' is an AND with exactly one OR child.
-     *
-     * Returns a logically equivalent query after rewriting so that the contained OR is at the
-     * root of the expression tree.
-     *
-     * Used internally so that the subplanner can be used for contained OR type queries, but
-     * exposed for testing.
-     */
-    static std::unique_ptr<MatchExpression> rewriteToRootedOr(
-        std::unique_ptr<MatchExpression> root);
 
     //
     // For testing.
@@ -156,7 +146,7 @@ private:
         std::unique_ptr<CachedSolution> cachedSolution;
 
         // Query solutions resulting from planning the $or branch.
-        OwnedPointerVector<QuerySolution> solutions;
+        std::vector<std::unique_ptr<QuerySolution>> solutions;
     };
 
     /**
@@ -203,7 +193,7 @@ private:
     std::unique_ptr<QuerySolution> _compositeSolution;
 
     // Holds a list of the results from planning each branch.
-    OwnedPointerVector<BranchPlanningResult> _branchResults;
+    std::vector<std::unique_ptr<BranchPlanningResult>> _branchResults;
 
     // We need this to extract cache-friendly index data from the index assignments.
     std::map<StringData, size_t> _indexMap;

@@ -26,6 +26,7 @@
  *    it in the license file.
  */
 
+#include <limits>
 #include <ostream>
 #include <sstream>
 #include <string>
@@ -40,6 +41,12 @@ namespace repl {
 
 const char OpTime::kTimestampFieldName[] = "ts";
 const char OpTime::kTermFieldName[] = "t";
+const long long OpTime::kInitialTerm = 0;
+
+// static
+OpTime OpTime::max() {
+    return OpTime(Timestamp::max(), std::numeric_limits<decltype(OpTime::_term)>::max());
+}
 
 void OpTime::append(BSONObjBuilder* builder, const std::string& subObjName) const {
     BSONObjBuilder opTimeBuilder(builder->subobjStart(subObjName));
@@ -71,6 +78,11 @@ BSONObj OpTime::toBSON() const {
     return bldr.obj();
 }
 
+// static
+OpTime OpTime::parse(const BSONObj& obj) {
+    return uassertStatusOK(parseFromOplogEntry(obj));
+}
+
 std::string OpTime::toString() const {
     return toBSON().toString();
 }
@@ -79,5 +91,26 @@ std::ostream& operator<<(std::ostream& out, const OpTime& opTime) {
     return out << opTime.toString();
 }
 
+void OpTime::appendAsQuery(BSONObjBuilder* builder) const {
+    builder->append(kTimestampFieldName, _timestamp);
+    if (_term == kUninitializedTerm) {
+        // pv0 oplogs don't actually have the term field so don't query for {t: -1}.
+        builder->append(kTermFieldName, BSON("$exists" << false));
+    } else {
+        builder->append(kTermFieldName, _term);
+    }
+}
+
+BSONObj OpTime::asQuery() const {
+    BSONObjBuilder builder;
+    appendAsQuery(&builder);
+    return builder.obj();
+}
+
 }  // namespace repl
+
+BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const repl::OpTime& value) {
+    return builder << value.toBSON();
+}
+
 }  // namespace mongo

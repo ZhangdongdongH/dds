@@ -37,6 +37,7 @@
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/config.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/server_options.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/log.h"
@@ -86,92 +87,8 @@ StatusWith<std::string> extractDBField(const BSONObj& params) {
 // MONGODB-CR
 //
 
-AuthRequest createMongoCRGetNonceCmd(const BSONObj& params) {
-    auto db = extractDBField(params);
-    if (!db.isOK())
-        return std::move(db.getStatus());
-
-    auto request = RemoteCommandRequest();
-    request.cmdObj = kGetNonceCmd;
-    request.dbname = db.getValue();
-
-    return std::move(request);
-}
-
-AuthRequest createMongoCRAuthenticateCmd(const BSONObj& params, StringData nonce) {
-    std::string username;
-    auto response = bsonExtractStringField(params, saslCommandUserFieldName, &username);
-    if (!response.isOK())
-        return response;
-
-    std::string password;
-    response = bsonExtractStringField(params, saslCommandPasswordFieldName, &password);
-    if (!response.isOK())
-        return response;
-
-    bool shouldDigest;
-    response = bsonExtractBooleanFieldWithDefault(
-        params, saslCommandDigestPasswordFieldName, true, &shouldDigest);
-    if (!response.isOK())
-        return response;
-
-    std::string digested = password;
-    if (shouldDigest)
-        digested = createPasswordDigest(username, password);
-
-    auto db = extractDBField(params);
-    if (!db.isOK())
-        return std::move(db.getStatus());
-
-    auto request = RemoteCommandRequest();
-    request.dbname = db.getValue();
-
-    BSONObjBuilder b;
-    {
-        b << "authenticate" << 1 << "nonce" << nonce << "user" << username;
-        md5digest d;
-        {
-            md5_state_t st;
-            md5_init(&st);
-            md5_append(&st, reinterpret_cast<const md5_byte_t*>(nonce.rawData()), nonce.size());
-            md5_append(&st, reinterpret_cast<const md5_byte_t*>(username.c_str()), username.size());
-            md5_append(&st, reinterpret_cast<const md5_byte_t*>(digested.c_str()), digested.size());
-            md5_finish(&st, d);
-        }
-        b << "key" << digestToString(d);
-        request.cmdObj = b.obj();
-    }
-    return std::move(request);
-}
-
-void authMongoCR(RunCommandHook runCommand, const BSONObj& params, AuthCompletionHandler handler) {
-    invariant(runCommand);
-    invariant(handler);
-
-    // Step 1: send getnonce command, receive nonce
-    auto nonceRequest = createMongoCRGetNonceCmd(params);
-    if (!nonceRequest.isOK())
-        return handler(std::move(nonceRequest.getStatus()));
-
-    runCommand(nonceRequest.getValue(), [runCommand, params, handler](AuthResponse response) {
-        if (!response.isOK())
-            return handler(std::move(response));
-
-        // Ensure response was valid
-        std::string nonce;
-        BSONObj nonceResponse = response.data;
-        auto valid = bsonExtractStringField(nonceResponse, "nonce", &nonce);
-        if (!valid.isOK())
-            return handler({ErrorCodes::AuthenticationFailed,
-                            "Invalid nonce response: " + nonceResponse.toString()});
-
-        // Step 2: send authenticate command, receive response
-        auto authRequest = createMongoCRAuthenticateCmd(params, nonce);
-        if (!authRequest.isOK())
-            return handler(std::move(authRequest.getStatus()));
-
-        runCommand(authRequest.getValue(), handler);
-    });
+void authMongoCRImpl(RunCommandHook cmd, const BSONObj& params, AuthCompletionHandler handler) {
+    handler({ErrorCodes::AuthenticationFailed, "MONGODB-CR support was removed in MongoDB 3.8"});
 }
 
 //
@@ -241,7 +158,7 @@ bool isFailedAuthOk(const AuthResponse& response) {
 
 void auth(RunCommandHook runCommand,
           const BSONObj& params,
-          StringData hostname,
+          const HostAndPort& hostname,
           StringData clientName,
           AuthCompletionHandler handler) {
     std::string mechanism;
@@ -285,7 +202,7 @@ void auth(RunCommandHook runCommand,
 
 void asyncAuth(RunCommandHook runCommand,
                const BSONObj& params,
-               StringData hostname,
+               const HostAndPort& hostname,
                StringData clientName,
                AuthCompletionHandler handler) {
     auth(runCommand, params, hostname, clientName, std::move(handler));
@@ -293,8 +210,10 @@ void asyncAuth(RunCommandHook runCommand,
 
 }  // namespace
 
+AuthMongoCRHandler authMongoCR = authMongoCRImpl;
+
 void authenticateClient(const BSONObj& params,
-                        StringData hostname,
+                        const HostAndPort& hostname,
                         StringData clientName,
                         RunCommandHook runCommand,
                         AuthCompletionHandler handler) {

@@ -7,6 +7,10 @@
 (function() {
     "use strict";
 
+    load('jstests/libs/write_concern_util.js');
+
+    // This ShardingTest is only started to set up a config server replica set and include its
+    // connection string in the shardIdentity doc.
     var st = new ShardingTest({shards: 1});
 
     var replTest = new ReplSetTest({nodes: 3});
@@ -17,20 +21,31 @@
     var secondaries = replTest.getSecondaries();
     var configConnStr = st.configRS.getURL();
 
+    // In general, shardsvrs default to the lower FCV on fresh start up (their FCV is set to the
+    // cluster's FCV on addShard). However, this test starts a shardsvr that it never adds to the
+    // cluster, but expects behavior that only a FCV>=4.0 shardsvr would execute:
+    //
+    // In FCV 3.6, clean shutdown writes uncommitted data to disk in the v3.6-compatible format.
+    // When the node is restarted and sees uncommitted data in the v3.6-compatible format, it fails
+    // to start up. A user can recover from this by restarting the node in v3.6 so that it uses the
+    // rollback via refetch algorithm (rather than recoverable rollback), or by re-initial syncing
+    // the node (by clearing its data directory).
+    //
+    // In FCV 4.0, clean shutdown does not write uncommitted data in the v3.6-compatible format, so
+    // the node is able to be restarted.
+    //
+    // To avoid re-writing this test to take one of these user actions, we simply set the FCV on the
+    // --shardsvr explicitly to 4.0.
+    priConn.adminCommand({setFeatureCompatibilityVersion: "4.0"});
+
     // Wait for the secondaries to have the latest oplog entries before stopping the fetcher to
     // avoid the situation where one of the secondaries will not have an overlapping oplog with
     // the other nodes once the primary is killed.
     replTest.awaitSecondaryNodes();
+
     replTest.awaitReplication();
 
-    nodes.forEach(function(node) {
-        // Pause bgsync so it doesn't keep trying to sync from other nodes.
-        assert.commandWorked(
-            node.adminCommand({configureFailPoint: 'pauseRsBgSyncProducer', mode: 'alwaysOn'}));
-        // Stop oplog fetcher so that the ongoing fetcher doesn't return anything new.
-        assert.commandWorked(
-            node.adminCommand({configureFailPoint: 'stopOplogFetcher', mode: 'alwaysOn'}));
-    });
+    stopServerReplication(secondaries);
 
     jsTest.log("inserting shardIdentity document to primary that shouldn't replicate");
 
@@ -70,18 +85,7 @@
 
     // Disable the fail point so that the elected node can exit drain mode and finish becoming
     // primary.
-    secondaries.forEach(function(secondary) {
-        assert.commandWorked(
-            secondary.adminCommand({configureFailPoint: 'stopOplogFetcher', mode: 'off'}));
-        try {
-            assert.commandWorked(
-                secondary.adminCommand({configureFailPoint: 'pauseRsBgSyncProducer', mode: 'off'}));
-        } catch (e) {
-            // Enabling bgsync producer may cause rollback, which will close all connections
-            // including the one sending "configureFailPoint".
-            print("got exception when disabling fail point 'pauseRsBgSyncProducer': " + e);
-        }
-    });
+    restartServerReplication(secondaries);
 
     // Wait for a new healthy primary
     var newPriConn = replTest.getPrimary();
@@ -105,8 +109,9 @@
             }
         },
         function() {
-            var oldPriOplog = priConn.getDB('local').oplog.rs.find().sort({ts: -1}).toArray();
-            var newPriOplog = newPriConn.getDB('local').oplog.rs.find().sort({ts: -1}).toArray();
+            var oldPriOplog = priConn.getDB('local').oplog.rs.find().sort({$natural: -1}).toArray();
+            var newPriOplog =
+                newPriConn.getDB('local').oplog.rs.find().sort({$natural: -1}).toArray();
             return "timed out waiting for original primary to shut down after rollback. " +
                 "Old primary oplog: " + tojson(oldPriOplog) + "; new primary oplog: " +
                 tojson(newPriOplog);

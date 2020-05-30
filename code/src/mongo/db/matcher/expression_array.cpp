@@ -35,39 +35,13 @@
 
 namespace mongo {
 
-Status ArrayMatchingMatchExpression::setPath(StringData path) {
-    _path = path;
-    Status s = _elementPath.init(_path);
-    _elementPath.setTraverseLeafArray(false);
-    return s;
-}
-
-bool ArrayMatchingMatchExpression::matches(const MatchableDocument* doc,
-                                           MatchDetails* details) const {
-    MatchableDocument::IteratorHolder cursor(doc, &_elementPath);
-
-    while (cursor->more()) {
-        ElementIterator::Context e = cursor->next();
-        if (e.element().type() != Array)
-            continue;
-
-        bool amIRoot = e.arrayOffset().eoo();
-
-        if (!matchesArray(e.element().Obj(), amIRoot ? details : NULL))
-            continue;
-
-        if (!amIRoot && details && details->needRecord() && !e.arrayOffset().eoo()) {
-            details->setElemMatchKey(e.arrayOffset().fieldName());
-        }
-        return true;
-    }
-    return false;
-}
-
-bool ArrayMatchingMatchExpression::matchesSingleElement(const BSONElement& e) const {
-    if (e.type() != Array)
+bool ArrayMatchingMatchExpression::matchesSingleElement(const BSONElement& elt,
+                                                        MatchDetails* details) const {
+    if (elt.type() != BSONType::Array) {
         return false;
-    return matchesArray(e.Obj(), NULL);
+    }
+
+    return matchesArray(elt.embeddedObject(), details);
 }
 
 
@@ -78,7 +52,7 @@ bool ArrayMatchingMatchExpression::equivalent(const MatchExpression* other) cons
     const ArrayMatchingMatchExpression* realOther =
         static_cast<const ArrayMatchingMatchExpression*>(other);
 
-    if (_path != realOther->_path)
+    if (path() != realOther->path())
         return false;
 
     if (numChildren() != realOther->numChildren())
@@ -93,10 +67,9 @@ bool ArrayMatchingMatchExpression::equivalent(const MatchExpression* other) cons
 
 // -------
 
-Status ElemMatchObjectMatchExpression::init(StringData path, MatchExpression* sub) {
-    _sub.reset(sub);
-    return setPath(path);
-}
+ElemMatchObjectMatchExpression::ElemMatchObjectMatchExpression(StringData path,
+                                                               MatchExpression* sub)
+    : ArrayMatchingMatchExpression(ELEM_MATCH_OBJECT, path), _sub(sub) {}
 
 bool ElemMatchObjectMatchExpression::matchesArray(const BSONObj& anArray,
                                                   MatchDetails* details) const {
@@ -134,25 +107,30 @@ void ElemMatchObjectMatchExpression::serialize(BSONObjBuilder* out) const {
     out->append(path(), BSON("$elemMatch" << subBob.obj()));
 }
 
+MatchExpression::ExpressionOptimizerFunc ElemMatchObjectMatchExpression::getOptimizer() const {
+    return [](std::unique_ptr<MatchExpression> expression) {
+        auto& elemExpression = static_cast<ElemMatchObjectMatchExpression&>(*expression);
+        elemExpression._sub = MatchExpression::optimize(std::move(elemExpression._sub));
+
+        return expression;
+    };
+}
 
 // -------
+
+ElemMatchValueMatchExpression::ElemMatchValueMatchExpression(StringData path, MatchExpression* sub)
+    : ArrayMatchingMatchExpression(ELEM_MATCH_VALUE, path) {
+    add(sub);
+}
+
+ElemMatchValueMatchExpression::ElemMatchValueMatchExpression(StringData path)
+    : ArrayMatchingMatchExpression(ELEM_MATCH_VALUE, path) {}
 
 ElemMatchValueMatchExpression::~ElemMatchValueMatchExpression() {
     for (unsigned i = 0; i < _subs.size(); i++)
         delete _subs[i];
     _subs.clear();
 }
-
-Status ElemMatchValueMatchExpression::init(StringData path, MatchExpression* sub) {
-    init(path);
-    add(sub);
-    return Status::OK();
-}
-
-Status ElemMatchValueMatchExpression::init(StringData path) {
-    return setPath(path);
-}
-
 
 void ElemMatchValueMatchExpression::add(MatchExpression* sub) {
     verify(sub);
@@ -210,13 +188,24 @@ void ElemMatchValueMatchExpression::serialize(BSONObjBuilder* out) const {
     out->append(path(), BSON("$elemMatch" << emBob.obj()));
 }
 
+MatchExpression::ExpressionOptimizerFunc ElemMatchValueMatchExpression::getOptimizer() const {
+    return [](std::unique_ptr<MatchExpression> expression) {
+        auto& subs = static_cast<ElemMatchValueMatchExpression&>(*expression)._subs;
+
+        for (MatchExpression*& subExpression : subs) {
+            auto optimizedSubExpression =
+                MatchExpression::optimize(std::unique_ptr<MatchExpression>(subExpression));
+            subExpression = optimizedSubExpression.release();
+        }
+
+        return expression;
+    };
+}
 
 // ---------
 
-Status SizeMatchExpression::init(StringData path, int size) {
-    _size = size;
-    return setPath(path);
-}
+SizeMatchExpression::SizeMatchExpression(StringData path, int size)
+    : ArrayMatchingMatchExpression(SIZE, path), _size(size) {}
 
 bool SizeMatchExpression::matchesArray(const BSONObj& anArray, MatchDetails* details) const {
     if (_size < 0)

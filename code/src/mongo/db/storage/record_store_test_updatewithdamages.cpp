@@ -38,14 +38,15 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/unittest/unittest.h"
 
+namespace mongo {
+namespace {
+
 using std::unique_ptr;
 using std::string;
 
-namespace mongo {
-
 // Insert a record and try to perform an in-place update on it.
 TEST(RecordStoreTestHarness, UpdateWithDamages) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
@@ -63,7 +64,8 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
+            StatusWith<RecordId> res =
+                rs->insertRecord(opCtx.get(), rec.data(), rec.size(), Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -110,7 +112,7 @@ TEST(RecordStoreTestHarness, UpdateWithDamages) {
 // Insert a record and try to perform an in-place update on it with a DamageVector
 // containing overlapping DamageEvents.
 TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
@@ -128,7 +130,8 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
+            StatusWith<RecordId> res =
+                rs->insertRecord(opCtx.get(), rec.data(), rec.size(), Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -173,7 +176,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEvents) {
 // containing overlapping DamageEvents. The changes should be applied in the order
 // specified by the DamageVector, and not -- for instance -- by the targetOffset.
 TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
@@ -191,7 +194,8 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
+            StatusWith<RecordId> res =
+                rs->insertRecord(opCtx.get(), rec.data(), rec.size(), Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -234,7 +238,7 @@ TEST(RecordStoreTestHarness, UpdateWithOverlappingDamageEventsReversed) {
 
 // Insert a record and try to call updateWithDamages() with an empty DamageVector.
 TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     if (!rs->updateWithDamagesSupported())
@@ -252,7 +256,8 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), rec.data(), rec.size(), false);
+            StatusWith<RecordId> res =
+                rs->insertRecord(opCtx.get(), rec.data(), rec.size(), Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -286,4 +291,5 @@ TEST(RecordStoreTestHarness, UpdateWithNoDamages) {
     }
 }
 
+}  // namespace
 }  // namespace mongo

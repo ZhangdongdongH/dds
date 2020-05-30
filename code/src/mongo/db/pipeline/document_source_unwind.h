@@ -38,7 +38,7 @@ public:
     // virtuals from DocumentSource
     GetNextResult getNext() final;
     const char* getSourceName() const final;
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
     BSONObjSet getOutputSorts() final;
 
     /**
@@ -46,8 +46,16 @@ public:
      */
     GetModPathsReturn getModifiedPaths() const final;
 
-    bool canSwapWithMatch() const final {
-        return true;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kNone,
+                                     HostTypeRequirement::kNone,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kAllowed,
+                                     TransactionRequirement::kAllowed);
+
+        constraints.canSwapWithMatch = true;
+        return constraints;
     }
 
     GetDepsReturn getDependencies(DepsTracker* deps) const final;

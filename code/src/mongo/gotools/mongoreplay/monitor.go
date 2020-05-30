@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoreplay
 
 import (
@@ -14,6 +20,7 @@ type MonitorCommand struct {
 	GlobalOpts *Options `no-flag:"true"`
 	StatOptions
 	OpStreamSettings
+	Collect      string `long:"collect" description:"Stat collection format; 'format' option uses the --format string" choice:"json" choice:"format" choice:"none" default:"format"`
 	PairedMode   bool   `long:"paired" description:"Output only one line for a request/reply pair"`
 	Gzip         bool   `long:"gzip" description:"decompress gzipped input"`
 	PlaybackFile string `short:"p" description:"path to playback file to read from" long:"playback-file"`
@@ -97,7 +104,7 @@ func (monitor *MonitorCommand) Execute(args []string) error {
 		if err != nil {
 			return err
 		}
-		opChan, errChan = NewOpChanFromFile(playbackFileReader, 1)
+		opChan, errChan = playbackFileReader.OpChan(1)
 
 	} else {
 		ctx, err := getOpstream(monitor.OpStreamSettings)
@@ -125,7 +132,7 @@ func (monitor *MonitorCommand) Execute(args []string) error {
 			ctx.packetHandler.Close()
 		}()
 	}
-	statColl, err := newStatCollector(monitor.StatOptions, monitor.PairedMode, false)
+	statColl, err := newStatCollector(monitor.StatOptions, monitor.Collect, monitor.PairedMode, false)
 	if err != nil {
 		return err
 	}

@@ -30,7 +30,7 @@
 
 #include "mongo/bson/json.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/util/net/message.h"
+#include "mongo/rpc/message.h"
 
 
 namespace mongo {
@@ -98,17 +98,6 @@ public:
      */
     Query& explain();
 
-    /** Use snapshot mode for the query.  Snapshot mode assures no duplicates are returned, or
-     * objects missed, which were present at both the start and end of the query's execution (if an
-     * object is new during the query, or deleted during the query, it may or may not be returned,
-     * even with snapshot mode).
-
-        Note that short query responses (less than 1MB) are always effectively snapshotted.
-
-        Currently, snapshot mode may not be used with sorting or explicit hints.
-    */
-    Query& snapshot();
-
     /** Queries to the Mongo database support a $where parameter option which contains
         a javascript function that is evaluated to see whether objects being queried match
         its criteria.  Use this helper to append such a function to a query object.
@@ -164,8 +153,7 @@ private:
     template <class T>
     void appendComplex(const char* fieldName, const T& val) {
         makeComplex();
-        BSONObjBuilder b;
-        b.appendElements(obj);
+        BSONObjBuilder b(std::move(obj));
         b.append(fieldName, val);
         obj = b.obj();
     }

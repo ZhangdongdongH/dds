@@ -32,6 +32,7 @@
 
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/document_value_test_util.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -461,7 +462,8 @@ void testSeriesWrappingAroundDecimal(intrusive_ptr<GranularityRounder> rounder) 
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldRoundUpNumberInSeriesToNextNumberInSeries) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         testRoundingUpInSeries(rounder);
         testRoundingUpInSeriesDecimal(rounder);
@@ -471,7 +473,8 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldRoundUpNumberInSeriesToNextNu
 TEST(GranularityRounderPreferredNumbersTest,
      ShouldRoundDownNumberInSeriesToPreviousNumberInSeries) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         testRoundingDownInSeries(rounder);
         testRoundingDownInSeriesDecimal(rounder);
@@ -480,7 +483,8 @@ TEST(GranularityRounderPreferredNumbersTest,
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldRoundUpValueInBetweenSeriesNumbers) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         testRoundingUpBetweenSeries(rounder);
         testRoundingUpBetweenSeriesDecimal(rounder);
@@ -489,7 +493,8 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldRoundUpValueInBetweenSeriesNu
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldRoundDownValueInBetweenSeriesNumbers) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         testRoundingDownBetweenSeries(rounder);
         testRoundingDownBetweenSeriesDecimal(rounder);
@@ -498,7 +503,8 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldRoundDownValueInBetweenSeries
 
 TEST(GranularityRounderPreferredNumbersTest, SeriesShouldWrapAroundWhenRounding) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         testSeriesWrappingAround(rounder);
         testSeriesWrappingAroundDecimal(rounder);
@@ -507,7 +513,8 @@ TEST(GranularityRounderPreferredNumbersTest, SeriesShouldWrapAroundWhenRounding)
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldRoundZeroToZero) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         // Make sure that each GranularityRounder rounds zero to zero.
         testEquals(rounder->roundUp(Value(0)), Value(0));
@@ -520,45 +527,48 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldRoundZeroToZero) {
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNonNumericValues) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         // Make sure that each GranularityRounder fails when rounding a non-numeric value.
-        Value stringValue = Value("test");
-        ASSERT_THROWS_CODE(rounder->roundUp(stringValue), UserException, 40262);
-        ASSERT_THROWS_CODE(rounder->roundDown(stringValue), UserException, 40262);
+        Value stringValue = Value("test"_sd);
+        ASSERT_THROWS_CODE(rounder->roundUp(stringValue), AssertionException, 40262);
+        ASSERT_THROWS_CODE(rounder->roundDown(stringValue), AssertionException, 40262);
     }
 }
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNaN) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         // Make sure that each GranularityRounder fails when rounding NaN.
         Value nan = Value(std::nan("NaN"));
-        ASSERT_THROWS_CODE(rounder->roundUp(nan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(nan), UserException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(nan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(nan), AssertionException, 40263);
 
         Value positiveNan = Value(Decimal128::kPositiveNaN);
         Value negativeNan = Value(Decimal128::kNegativeNaN);
-        ASSERT_THROWS_CODE(rounder->roundUp(positiveNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(positiveNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNan), UserException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(positiveNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(positiveNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNan), AssertionException, 40263);
     }
 }
 
 TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNegativeNumber) {
     for (auto&& series : preferredNumberSeries) {
-        auto rounder = GranularityRounder::getGranularityRounder(series);
+        auto rounder =
+            GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         // Make sure that each GranularityRounder fails when rounding a negative number.
         Value negativeNumber = Value(-1);
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), UserException, 40268);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), UserException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), AssertionException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), AssertionException, 40268);
 
         negativeNumber = Value(Decimal128(-1));
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), UserException, 40268);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), UserException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), AssertionException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), AssertionException, 40268);
     }
 }
 }  // namespace

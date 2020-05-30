@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -29,8 +29,8 @@ int
 __wt_block_manager_create(
     WT_SESSION_IMPL *session, const char *filename, uint32_t allocsize)
 {
-	WT_DECL_RET;
 	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
 	WT_FH *fh;
 	int suffix;
 	bool exists;
@@ -150,10 +150,11 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	uint64_t bucket, hash;
 	uint32_t flags;
 
+	*blockp = block = NULL;
+
 	__wt_verbose(session, WT_VERB_BLOCK, "open: %s", filename);
 
 	conn = S2C(session);
-	*blockp = block = NULL;
 	hash = __wt_hash_city64(filename, strlen(filename));
 	bucket = hash % WT_HASH_ARRAY_SIZE;
 	__wt_spin_lock(session, &conn->block_lock);
@@ -201,6 +202,12 @@ __wt_block_open(WT_SESSION_IMPL *session,
 	 * "direct_io=checkpoint" configures direct I/O for readonly data files.
 	 */
 	flags = 0;
+	WT_ERR(__wt_config_gets(session, cfg, "access_pattern_hint", &cval));
+	if (WT_STRING_MATCH("random", cval.str, cval.len))
+		LF_SET(WT_FS_OPEN_ACCESS_RAND);
+	else if (WT_STRING_MATCH("sequential", cval.str, cval.len))
+		LF_SET(WT_FS_OPEN_ACCESS_SEQ);
+
 	if (readonly && FLD_ISSET(conn->direct_io, WT_DIRECT_IO_CHECKPOINT))
 		LF_SET(WT_FS_OPEN_DIRECTIO);
 	if (!readonly && FLD_ISSET(conn->direct_io, WT_DIRECT_IO_DATA))
@@ -249,7 +256,7 @@ __wt_block_close(WT_SESSION_IMPL *session, WT_BLOCK *block)
 	conn = S2C(session);
 
 	__wt_verbose(session, WT_VERB_BLOCK,
-	    "close: %s", block->name == NULL ? "" : block->name );
+	    "close: %s", block->name == NULL ? "" : block->name);
 
 	__wt_spin_lock(session, &conn->block_lock);
 

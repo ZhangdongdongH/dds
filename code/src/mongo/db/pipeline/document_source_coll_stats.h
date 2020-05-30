@@ -36,34 +36,57 @@ namespace mongo {
  * Provides a document source interface to retrieve collection-level statistics for a given
  * collection.
  */
-class DocumentSourceCollStats : public DocumentSourceNeedsMongod {
+class DocumentSourceCollStats : public DocumentSource {
 public:
     class LiteParsed final : public LiteParsedDocumentSource {
     public:
         static std::unique_ptr<LiteParsed> parse(const AggregationRequest& request,
                                                  const BSONElement& spec) {
-            return stdx::make_unique<LiteParsed>();
+            return stdx::make_unique<LiteParsed>(request.getNamespaceString());
         }
+
+        explicit LiteParsed(NamespaceString nss) : _nss(std::move(nss)) {}
 
         bool isCollStats() const final {
             return true;
         }
 
+        PrivilegeVector requiredPrivileges(bool isMongos) const final {
+            return {Privilege(ResourcePattern::forExactNamespace(_nss), ActionType::collStats)};
+        }
+
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
             return stdx::unordered_set<NamespaceString>();
         }
+
+        bool isInitialSource() const final {
+            return true;
+        }
+
+    private:
+        const NamespaceString _nss;
     };
 
     DocumentSourceCollStats(const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
-        : DocumentSourceNeedsMongod(pExpCtx) {}
+        : DocumentSource(pExpCtx) {}
 
     GetNextResult getNext() final;
 
     const char* getSourceName() const final;
 
-    bool isValidInitialSource() const final;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kAnyShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kNotAllowed);
 
-    Value serialize(bool explain = false) const;
+        constraints.requiresInputDocSource = false;
+        return constraints;
+    }
+
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);

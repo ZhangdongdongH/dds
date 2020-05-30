@@ -9,11 +9,10 @@
 
     var mongos = st.s0;
     var admin = mongos.getDB("admin");
-    var shards = mongos.getCollection("config.shards").find().toArray();
     var coll = mongos.getCollection("foo.bar");
 
     assert(admin.runCommand({enableSharding: coll.getDB() + ""}).ok);
-    st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+    st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
 
     var upsertedResult = function(query, expr) {
         coll.remove({});
@@ -33,11 +32,11 @@
         return upsertedField(query, expr, "x");
     };
 
-    st.ensurePrimaryShard(coll.getDB() + "", shards[0]._id);
+    st.ensurePrimaryShard(coll.getDB() + "", st.shard0.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {x: 1}}));
     assert.commandWorked(admin.runCommand({split: coll + "", middle: {x: 0}}));
     assert.commandWorked(admin.runCommand(
-        {moveChunk: coll + "", find: {x: 0}, to: shards[1]._id, _waitForDelete: true}));
+        {moveChunk: coll + "", find: {x: 0}, to: st.shard1.shardName, _waitForDelete: true}));
 
     st.printShardingStatus();
 
@@ -70,11 +69,11 @@
 
     coll.drop();
 
-    st.ensurePrimaryShard(coll.getDB() + "", shards[0]._id);
+    st.ensurePrimaryShard(coll.getDB() + "", st.shard0.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {'x.x': 1}}));
     assert.commandWorked(admin.runCommand({split: coll + "", middle: {'x.x': 0}}));
     assert.commandWorked(admin.runCommand(
-        {moveChunk: coll + "", find: {'x.x': 0}, to: shards[1]._id, _waitForDelete: true}));
+        {moveChunk: coll + "", find: {'x.x': 0}, to: st.shard1.shardName, _waitForDelete: true}));
 
     st.printShardingStatus();
 

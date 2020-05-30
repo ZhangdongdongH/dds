@@ -1,6 +1,15 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongodump
 
 import (
+	"github.com/mongodb/mongo-tools/common/connstring"
+	"github.com/mongodb/mongo-tools/common/options"
+
 	"fmt"
 	"io/ioutil"
 )
@@ -24,6 +33,14 @@ type InputOptions struct {
 // Name returns a human-readable group name for input options.
 func (*InputOptions) Name() string {
 	return "query"
+}
+
+func (inputOpts *InputOptions) SetOptionsFromURI(cs connstring.ConnString) error {
+	if inputOpts.ReadPreference != "" {
+		return fmt.Errorf(options.IncompatibleArgsErrorFormat, "--readPreference")
+	}
+	inputOpts.ReadPreference = cs.ReadPreference
+	return nil
 }
 
 func (inputOptions *InputOptions) HasQuery() bool {

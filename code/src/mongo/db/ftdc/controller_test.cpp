@@ -50,13 +50,15 @@
 
 namespace mongo {
 
+class FTDCControllerTest : public FTDCTest {};
+
 class FTDCMetricsCollectorMockTee : public FTDCCollectorInterface {
 public:
     ~FTDCMetricsCollectorMockTee() {
         ASSERT_TRUE(_state == State::kStarted);
     }
 
-    void collect(OperationContext* txn, BSONObjBuilder& builder) final {
+    void collect(OperationContext* opCtx, BSONObjBuilder& builder) final {
         _state = State::kStarted;
         ++_counter;
 
@@ -154,7 +156,7 @@ public:
 };
 
 // Test a run of the controller and the data it logs to log file
-TEST(FTDCControllerTest, TestFull) {
+TEST_F(FTDCControllerTest, TestFull) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path dir(tempdir.path());
 
@@ -202,12 +204,12 @@ TEST(FTDCControllerTest, TestFull) {
 
     auto alog = files[0];
 
-    ValidateDocumentList(alog, allDocs);
+    ValidateDocumentList(alog, allDocs, FTDCValidationMode::kStrict);
 }
 
 // Test we can start and stop the controller in quick succession, make sure it succeeds without
 // assert or fault
-TEST(FTDCControllerTest, TestStartStop) {
+TEST_F(FTDCControllerTest, TestStartStop) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path dir(tempdir.path());
 
@@ -228,7 +230,7 @@ TEST(FTDCControllerTest, TestStartStop) {
 
 // Test we can start the controller as disabled, the directory is empty, and then we can succesfully
 // enable it
-TEST(FTDCControllerTest, TestStartAsDisabled) {
+TEST_F(FTDCControllerTest, TestStartAsDisabled) {
     unittest::TempDir tempdir("metrics_testpath");
     boost::filesystem::path dir(tempdir.path());
 
@@ -254,7 +256,7 @@ TEST(FTDCControllerTest, TestStartAsDisabled) {
 
     ASSERT_EQUALS(files0.size(), 0UL);
 
-    c.setEnabled(true);
+    ASSERT_OK(c.setEnabled(true));
 
     c1Ptr->setSignalOnCount(50);
 
@@ -274,7 +276,7 @@ TEST(FTDCControllerTest, TestStartAsDisabled) {
 
     auto alog = files[0];
 
-    ValidateDocumentList(alog, allDocs);
+    ValidateDocumentList(alog, allDocs, FTDCValidationMode::kStrict);
 }
 
 }  // namespace mongo

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -27,8 +27,19 @@ __wt_ref_out(WT_SESSION_IMPL *session, WT_REF *ref)
 	/*
 	 * A version of the page-out function that allows us to make additional
 	 * diagnostic checks.
+	 *
+	 * The WT_REF cannot be the eviction thread's location.
 	 */
 	WT_ASSERT(session, S2BT(session)->evict_ref != ref);
+
+	/*
+	 * Make sure no other thread has a hazard pointer on the page we are
+	 * about to discard.  This is complicated by the fact that readers
+	 * publish their hazard pointer before re-checking the page state, so
+	 * our check can race with readers without indicating a real problem.
+	 * If we find a hazard pointer, wait for it to be cleared.
+	 */
+	WT_ASSERT(session, __wt_hazard_check_assert(session, ref, true));
 
 	__wt_page_out(session, &ref->page);
 }
@@ -50,42 +61,19 @@ __wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
 	page = *pagep;
 	*pagep = NULL;
 
-	if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD))
+	/*
+	 * Unless we have a dead handle or we're closing the database, we
+	 * should never discard a dirty page.  We do ordinary eviction from
+	 * dead trees until sweep gets to them, so we may not in the
+	 * WT_SYNC_DISCARD loop.
+	 */
+	if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD) ||
+	    F_ISSET(S2C(session), WT_CONN_CLOSING))
 		__wt_page_modify_clear(session, page);
 
-	/*
-	 * We should never discard:
-	 * - a dirty page,
-	 * - a page queued for eviction, or
-	 * - a locked page.
-	 */
+	/* Assert we never discard a dirty page or a page queue for eviction. */
 	WT_ASSERT(session, !__wt_page_is_modified(page));
 	WT_ASSERT(session, !F_ISSET_ATOMIC(page, WT_PAGE_EVICT_LRU));
-	WT_ASSERT(session, !__wt_rwlock_islocked(session, &page->page_lock));
-
-#ifdef HAVE_DIAGNOSTIC
-	{
-	WT_HAZARD *hp;
-	int i;
-	/*
-	 * Make sure no other thread has a hazard pointer on the page we are
-	 * about to discard.  This is complicated by the fact that readers
-	 * publish their hazard pointer before re-checking the page state, so
-	 * our check can race with readers without indicating a real problem.
-	 * Wait for up to a second for hazard pointers to be cleared.
-	 */
-	for (hp = NULL, i = 0; i < 100; i++) {
-		if ((hp = __wt_page_hazard_check(session, page)) == NULL)
-			break;
-		__wt_sleep(0, 10000);
-	}
-	if (hp != NULL)
-		__wt_errx(session,
-		    "discarded page has hazard pointer: (%p: %s, line %d)",
-		    (void *)hp->page, hp->file, hp->line);
-	WT_ASSERT(session, hp == NULL);
-	}
-#endif
 
 	/*
 	 * If a root page split, there may be one or more pages linked from the
@@ -204,8 +192,7 @@ __free_page_modify(WT_SESSION_IMPL *session, WT_PAGE *page)
 		if (mod->mod_col_update != NULL)
 			__free_skip_array(session, mod->mod_col_update,
 			    page->type ==
-			    WT_PAGE_COL_FIX ? 1 : page->pg_var_entries,
-			    update_ignore);
+			    WT_PAGE_COL_FIX ? 1 : page->entries, update_ignore);
 		break;
 	case WT_PAGE_ROW_LEAF:
 		/*
@@ -217,21 +204,22 @@ __free_page_modify(WT_SESSION_IMPL *session, WT_PAGE *page)
 		 */
 		if (mod->mod_row_insert != NULL)
 			__free_skip_array(session, mod->mod_row_insert,
-			    page->pg_row_entries + 1, update_ignore);
+			    page->entries + 1, update_ignore);
 
 		/* Free the update array. */
 		if (mod->mod_row_update != NULL)
 			__free_update(session, mod->mod_row_update,
-			    page->pg_row_entries, update_ignore);
+			    page->entries, update_ignore);
 		break;
 	}
 
 	/* Free the overflow on-page, reuse and transaction-cache skiplists. */
 	__wt_ovfl_reuse_free(session, page);
-	__wt_ovfl_txnc_free(session, page);
 	__wt_ovfl_discard_free(session, page);
+	__wt_ovfl_discard_remove(session, page);
 
 	__wt_free(session, page->modify->ovfl_track);
+	__wt_spin_destroy(session, &page->modify->page_lock);
 
 	__wt_free(session, page->modify);
 }
@@ -259,6 +247,9 @@ __wt_free_ref(
 
 	if (ref == NULL)
 		return;
+
+	/* Assert there are no hazard pointers. */
+	WT_ASSERT(session, __wt_hazard_check_assert(session, ref, false));
 
 	/*
 	 * Optionally free the referenced pages.  (The path to free referenced
@@ -288,13 +279,11 @@ __wt_free_ref(
 		break;
 	}
 
-	/*
-	 * Free any address allocation; if there's no linked WT_REF page, it
-	 * must be allocated.
-	 */
+	/* Free any address allocation. */
 	__wt_ref_addr_free(session, ref);
 
-	/* Free any page-deleted information. */
+	/* Free any lookaside or page-deleted information. */
+	__wt_free(session, ref->page_las);
 	if (ref->page_del != NULL) {
 		__wt_free(session, ref->page_del->update_list);
 		__wt_free(session, ref->page_del);
@@ -330,7 +319,7 @@ static void
 __free_page_col_var(WT_SESSION_IMPL *session, WT_PAGE *page)
 {
 	/* Free the RLE lookup array. */
-	__wt_free(session, page->pg_var_repeats);
+	__wt_free(session, page->u.col_var.repeats);
 }
 
 /*

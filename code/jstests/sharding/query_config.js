@@ -3,14 +3,13 @@
     'use strict';
 
     var getListCollectionsCursor = function(database, options, subsequentBatchSize) {
-        return new DBCommandCursor(database.getMongo(),
-                                   database.runCommand("listCollections", options),
-                                   subsequentBatchSize);
+        return new DBCommandCursor(
+            database, database.runCommand("listCollections", options), subsequentBatchSize);
     };
 
     var getListIndexesCursor = function(coll, options, subsequentBatchSize) {
         return new DBCommandCursor(
-            coll.getDB().getMongo(), coll.runCommand("listIndexes", options), subsequentBatchSize);
+            coll.getDB(), coll.runCommand("listIndexes", options), subsequentBatchSize);
     };
 
     var arrayGetNames = function(array) {
@@ -179,9 +178,6 @@
         assert.eq(cursor.next(), {_id: testNamespaces[4], keyb: 1});
         assert.eq(cursor.next(), {_id: testNamespaces[5], keyb: 1, keyc: 1});
         assert(!cursor.hasNext());
-
-        // Count query without filter.
-        assert.eq(configDB.collections.count(), testNamespaces.length);
     };
 
     /**
@@ -390,4 +386,5 @@
     queryConfigChunks(st);
     queryUserCreated(configDB);
     queryUserCreated(adminDB);
+    st.stop();
 })();

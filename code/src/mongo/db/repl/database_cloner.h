@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <iosfwd>
 #include <list>
 #include <string>
 #include <vector>
@@ -42,18 +43,11 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
-class OldThreadPool;
-
 namespace repl {
-namespace {
-
-using UniqueLock = stdx::unique_lock<stdx::mutex>;
-
-}  // namespace
 
 class StorageInterface;
 
@@ -113,7 +107,7 @@ public:
      * 'listCollectionsFilter' will be extended to include collections only, filtering out views.
      */
     DatabaseCloner(executor::TaskExecutor* executor,
-                   OldThreadPool* dbWorkThreadPool,
+                   ThreadPool* dbWorkThreadPool,
                    const HostAndPort& source,
                    const std::string& dbname,
                    const BSONObj& listCollectionsFilter,
@@ -129,11 +123,9 @@ public:
      */
     const std::vector<BSONObj>& getCollectionInfos_forTest() const;
 
-    std::string getDiagnosticString() const override;
-
     bool isActive() const override;
 
-    Status startup() override;
+    Status startup() noexcept override;
 
     void shutdown() override;
 
@@ -161,7 +153,28 @@ public:
      */
     void setStartCollectionClonerFn(const StartCollectionClonerFn& startCollectionCloner);
 
+    // State transitions:
+    // PreStart --> Running --> ShuttingDown --> Complete
+    // It is possible to skip intermediate states. For example,
+    // Calling shutdown() when the cloner has not started will transition from PreStart directly
+    // to Complete.
+    // This enum class is made public for testing.
+    enum class State { kPreStart, kRunning, kShuttingDown, kComplete };
+
+    /**
+     * Returns current database cloner state.
+     * For testing only.
+     */
+    State getState_forTest() const;
+
 private:
+    bool _isActive_inlock() const;
+
+    /**
+     * Returns whether the DatabaseCloner is in shutdown.
+     */
+    bool _isShuttingDown() const;
+
     /**
      * Read collection names and options from listCollections result.
      */
@@ -184,9 +197,7 @@ private:
     /**
      * Calls the above method after unlocking.
      */
-    void _finishCallback_inlock(UniqueLock& lk, const Status& status);
-
-    std::string _getDiagnosticString_inlock() const;
+    void _finishCallback_inlock(stdx::unique_lock<stdx::mutex>& lk, const Status& status);
 
     //
     // All member variables are labeled with one of the following codes indicating the
@@ -200,7 +211,7 @@ private:
     mutable stdx::mutex _mutex;
     mutable stdx::condition_variable _condition;                 // (M)
     executor::TaskExecutor* _executor;                           // (R)
-    OldThreadPool* _dbWorkThreadPool;                            // (R)
+    ThreadPool* _dbWorkThreadPool;                               // (R)
     const HostAndPort _source;                                   // (R)
     const std::string _dbname;                                   // (R)
     const BSONObj _listCollectionsFilter;                        // (R)
@@ -209,7 +220,6 @@ private:
     CollectionCallbackFn
         _collectionWork;       // (R) Invoked once for every successfully started collection cloner.
     CallbackFn _onCompletion;  // (R) Invoked once when cloning completes or fails.
-    bool _active = false;      // _active is true when database cloner is started.
     Fetcher _listCollectionsFetcher;  // (R) Fetcher instance for running listCollections command.
     // Collection info objects returned from listCollections.
     // Format of each document:
@@ -227,7 +237,16 @@ private:
         _scheduleDbWorkFn;  // (RT) Function for scheduling database work using the executor.
     StartCollectionClonerFn _startCollectionCloner;  // (RT)
     Stats _stats;                                    // (M) Stats about what this instance did.
+
+    // Current database cloner state. See comments for State enum class for details.
+    State _state = State::kPreStart;  // (M)
 };
+
+/**
+ * Insertion operator for DatabaseCloner::State. Formats database cloner state for output stream.
+ * For testing only.
+ */
+std::ostream& operator<<(std::ostream& os, const DatabaseCloner::State& state);
 
 }  // namespace repl
 }  // namespace mongo

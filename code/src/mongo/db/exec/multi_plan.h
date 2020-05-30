@@ -75,7 +75,7 @@ public:
      * If 'shouldCache' is true, writes a cache entry for the winning plan to the plan cache
      * when possible. If 'shouldCache' is false, the plan cache will never be written.
      */
-    MultiPlanStage(OperationContext* txn,
+    MultiPlanStage(OperationContext* opCtx,
                    const Collection* collection,
                    CanonicalQuery* cq,
                    CachingMode cachingMode = CachingMode::AlwaysCache);
@@ -84,7 +84,7 @@ public:
 
     StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_MULTI_PLAN;
@@ -96,9 +96,9 @@ public:
     const SpecificStats* getSpecificStats() const final;
 
     /**
-     * Takes ownership of QuerySolution and PlanStage. not of WorkingSet
+     * Takes ownership of PlanStage. Does not take ownership of WorkingSet.
      */
-    void addPlan(QuerySolution* solution, PlanStage* root, WorkingSet* sharedWs);
+    void addPlan(std::unique_ptr<QuerySolution> solution, PlanStage* root, WorkingSet* sharedWs);
 
     /**
      * Runs all plans added by addPlan, ranks them, and picks a best.
@@ -118,7 +118,7 @@ public:
      *
      * Calculated based on a fixed query knob and the size of the collection.
      */
-    static size_t getTrialPeriodWorks(OperationContext* txn, const Collection* collection);
+    static size_t getTrialPeriodWorks(OperationContext* opCtx, const Collection* collection);
 
     /**
      * Returns the max number of documents which we should allow any plan to return during the
@@ -172,7 +172,7 @@ private:
      * Checks whether we need to perform either a timing-based yield or a yield for a document
      * fetch. If so, then uses 'yieldPolicy' to actually perform the yield.
      *
-     * Returns a non-OK status if killed during a yield.
+     * Returns a non-OK status if killed during a yield or if the query has exceeded its time limit.
      */
     Status tryYield(PlanYieldPolicy* yieldPolicy);
 

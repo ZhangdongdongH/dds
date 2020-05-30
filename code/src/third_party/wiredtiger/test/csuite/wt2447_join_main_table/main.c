@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -58,8 +58,8 @@ get_stat_total(WT_SESSION *session, WT_CURSOR *jcursor, const char *descmatch,
 	WT_CURSOR *statcursor;
 	uint64_t val;
 	int ret;
-	bool match;
 	char *desc, *valstr;
+	bool match;
 
 	match = false;
 	*pval = 0;
@@ -91,8 +91,8 @@ main(int argc, char *argv[])
 	WT_SESSION *session;
 	uint64_t maincount;
 	int half, i, j;
-	const char *tablename;
 	char bloom_cfg[128], index1uri[256], index2uri[256], joinuri[256];
+	const char *tablename;
 
 	opts = &_opts;
 	memset(opts, 0, sizeof(*opts));
@@ -102,9 +102,12 @@ main(int argc, char *argv[])
 	tablename = strchr(opts->uri, ':');
 	testutil_assert(tablename != NULL);
 	tablename++;
-	snprintf(index1uri, sizeof(index1uri), "index:%s:index1", tablename);
-	snprintf(index2uri, sizeof(index2uri), "index:%s:index2", tablename);
-	snprintf(joinuri, sizeof(joinuri), "join:%s", opts->uri);
+	testutil_check(__wt_snprintf(
+	    index1uri, sizeof(index1uri), "index:%s:index1", tablename));
+	testutil_check(__wt_snprintf(
+	    index2uri, sizeof(index2uri), "index:%s:index2", tablename));
+	testutil_check(__wt_snprintf(
+	    joinuri, sizeof(joinuri), "join:%s", opts->uri));
 
 	testutil_check(wiredtiger_open(opts->home, NULL,
 	    "statistics=(all),create", &opts->conn));
@@ -150,7 +153,8 @@ main(int argc, char *argv[])
 	cursor2->set_key(cursor2, half + 1);
 	testutil_check(cursor2->search(cursor2));
 
-	sprintf(bloom_cfg, "compare=lt,strategy=bloom,count=%d", half);
+	testutil_check(__wt_snprintf(bloom_cfg, sizeof(bloom_cfg),
+	    "compare=lt,strategy=bloom,count=%d", half));
 
 	testutil_check(session->open_cursor(session, joinuri, NULL, NULL,
 	    &jcursor));

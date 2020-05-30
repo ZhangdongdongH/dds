@@ -31,6 +31,7 @@
 #include <tuple>
 
 #include "mongo/base/status_with.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/stdx/functional.h"
 
 namespace mongo {
@@ -53,17 +54,7 @@ BSONObj makeEmptyMetadata();
 /**
  * Reads metadata from a metadata object and sets it on this OperationContext.
  */
-Status readRequestMetadata(OperationContext* txn, const BSONObj& metadataObj);
-
-/**
- * Writes metadata from an OperationContext to a metadata object.
- */
-Status writeRequestMetadata(OperationContext* txn, BSONObjBuilder* metadataBob);
-
-/**
- * A command object and a corresponding metadata object.
- */
-using CommandAndMetadata = std::tuple<BSONObj, BSONObj>;
+void readRequestMetadata(OperationContext* opCtx, const BSONObj& metadataObj, bool requiresAuth);
 
 /**
  * A legacy command object and a corresponding query flags bitfield. The legacy command object
@@ -72,43 +63,18 @@ using CommandAndMetadata = std::tuple<BSONObj, BSONObj>;
 using LegacyCommandAndFlags = std::tuple<BSONObj, int>;
 
 /**
- * Given a legacy command object and a query flags bitfield, attempts to parse and remove
- * the metadata from the command object and construct a corresponding metadata object.
+ * Upconverts a legacy command request into an OpMessageRequest.
  */
-StatusWith<CommandAndMetadata> upconvertRequestMetadata(BSONObj legacyCmdObj, int queryFlags);
-
-/**
- * Given a command object and a metadata object, attempts to construct a legacy command
- * object and query flags bitfield augmented with the given metadata.
- */
-StatusWith<LegacyCommandAndFlags> downconvertRequestMetadata(BSONObj cmdObj, BSONObj metadata);
-
-/**
- * A command reply and associated metadata object.
- */
-using CommandReplyWithMetadata = std::tuple<BSONObj, BSONObj>;
-
-/**
- * Given a legacy command reply, attempts to strip the metadata from the reply and construct
- * a metadata object.
- */
-StatusWith<CommandReplyWithMetadata> upconvertReplyMetadata(const BSONObj& legacyReply);
-
-/**
- * Given a command reply object and an associated metadata object,
- * attempts to construct a legacy command object.
- */
-StatusWith<BSONObj> downconvertReplyMetadata(const BSONObj& commandReply,
-                                             const BSONObj& replyMetadata);
+OpMsgRequest upconvertRequest(StringData db, BSONObj legacyCmdObj, int queryFlags);
 
 /**
  * A function type for writing request metadata. The function takes a pointer to an optional
  * OperationContext so metadata associated with a Client can be appended, a pointer to a
- * BSONObjBuilder used to construct the metadata object and the server address of the target of the
- * request and returns a Status indicating if the metadata was written successfully.
+ * BSONObjBuilder used to construct the metadata object and returns a Status indicating if the
+ * metadata was written successfully.
  */
 using RequestMetadataWriter =
-    stdx::function<Status(OperationContext*, BSONObjBuilder*, StringData)>;
+    stdx::function<Status(OperationContext* opCtx, BSONObjBuilder* metadataBuilder)>;
 
 /**
  * A function type for reading reply metadata. The function takes a a reference to a
@@ -118,7 +84,8 @@ using RequestMetadataWriter =
  *
  * TODO: would it be a layering violation if this hook took an OperationContext* ?
  */
-using ReplyMetadataReader = stdx::function<Status(const BSONObj&, StringData)>;
+using ReplyMetadataReader = stdx::function<Status(
+    OperationContext* opCtx, const BSONObj& replyMetadata, StringData sourceHost)>;
 
 }  // namespace rpc
 }  // namespace mongo

@@ -31,6 +31,7 @@
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 
 #include <algorithm>
+#include <numeric>
 
 #include "mongo/db/field_ref.h"
 
@@ -102,19 +103,19 @@ void parseMultikeyPathsFromBytes(BSONObj multikeyPathsObj, MultikeyPaths* multik
 BSONCollectionCatalogEntry::BSONCollectionCatalogEntry(StringData ns)
     : CollectionCatalogEntry(ns) {}
 
-CollectionOptions BSONCollectionCatalogEntry::getCollectionOptions(OperationContext* txn) const {
-    MetaData md = _getMetaData(txn);
+CollectionOptions BSONCollectionCatalogEntry::getCollectionOptions(OperationContext* opCtx) const {
+    MetaData md = _getMetaData(opCtx);
     return md.options;
 }
 
-int BSONCollectionCatalogEntry::getTotalIndexCount(OperationContext* txn) const {
-    MetaData md = _getMetaData(txn);
+int BSONCollectionCatalogEntry::getTotalIndexCount(OperationContext* opCtx) const {
+    MetaData md = _getMetaData(opCtx);
 
     return static_cast<int>(md.indexes.size());
 }
 
-int BSONCollectionCatalogEntry::getCompletedIndexCount(OperationContext* txn) const {
-    MetaData md = _getMetaData(txn);
+int BSONCollectionCatalogEntry::getCompletedIndexCount(OperationContext* opCtx) const {
+    MetaData md = _getMetaData(opCtx);
 
     int num = 0;
     for (unsigned i = 0; i < md.indexes.size(); i++) {
@@ -124,9 +125,9 @@ int BSONCollectionCatalogEntry::getCompletedIndexCount(OperationContext* txn) co
     return num;
 }
 
-BSONObj BSONCollectionCatalogEntry::getIndexSpec(OperationContext* txn,
+BSONObj BSONCollectionCatalogEntry::getIndexSpec(OperationContext* opCtx,
                                                  StringData indexName) const {
-    MetaData md = _getMetaData(txn);
+    MetaData md = _getMetaData(opCtx);
 
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
@@ -134,19 +135,41 @@ BSONObj BSONCollectionCatalogEntry::getIndexSpec(OperationContext* txn,
 }
 
 
-void BSONCollectionCatalogEntry::getAllIndexes(OperationContext* txn,
+void BSONCollectionCatalogEntry::getAllIndexes(OperationContext* opCtx,
                                                std::vector<std::string>* names) const {
-    MetaData md = _getMetaData(txn);
+    MetaData md = _getMetaData(opCtx);
 
     for (unsigned i = 0; i < md.indexes.size(); i++) {
         names->push_back(md.indexes[i].spec["name"].String());
     }
 }
 
-bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
+void BSONCollectionCatalogEntry::getReadyIndexes(OperationContext* opCtx,
+                                                 std::vector<std::string>* names) const {
+    MetaData md = _getMetaData(opCtx);
+
+    for (unsigned i = 0; i < md.indexes.size(); i++) {
+        if (md.indexes[i].ready)
+            names->push_back(md.indexes[i].spec["name"].String());
+    }
+}
+
+void BSONCollectionCatalogEntry::getAllUniqueIndexes(OperationContext* opCtx,
+                                                     std::vector<std::string>* names) const {
+    MetaData md = _getMetaData(opCtx);
+
+    for (unsigned i = 0; i < md.indexes.size(); i++) {
+        if (md.indexes[i].spec["unique"]) {
+            std::string indexName = md.indexes[i].spec["name"].String();
+            names->push_back(indexName);
+        }
+    }
+}
+
+bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* opCtx,
                                                  StringData indexName,
                                                  MultikeyPaths* multikeyPaths) const {
-    MetaData md = _getMetaData(txn);
+    MetaData md = _getMetaData(opCtx);
 
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
@@ -158,21 +181,36 @@ bool BSONCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
     return md.indexes[offset].multikey;
 }
 
-RecordId BSONCollectionCatalogEntry::getIndexHead(OperationContext* txn,
+RecordId BSONCollectionCatalogEntry::getIndexHead(OperationContext* opCtx,
                                                   StringData indexName) const {
-    MetaData md = _getMetaData(txn);
+    MetaData md = _getMetaData(opCtx);
 
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
     return md.indexes[offset].head;
 }
 
-bool BSONCollectionCatalogEntry::isIndexReady(OperationContext* txn, StringData indexName) const {
-    MetaData md = _getMetaData(txn);
+bool BSONCollectionCatalogEntry::isIndexPresent(OperationContext* opCtx,
+                                                StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    return offset >= 0;
+}
+
+bool BSONCollectionCatalogEntry::isIndexReady(OperationContext* opCtx, StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
 
     int offset = md.findIndexOffset(indexName);
     invariant(offset >= 0);
     return md.indexes[offset].ready;
+}
+
+KVPrefix BSONCollectionCatalogEntry::getIndexPrefix(OperationContext* opCtx,
+                                                    StringData indexName) const {
+    MetaData md = _getMetaData(opCtx);
+    int offset = md.findIndexOffset(indexName);
+    invariant(offset >= 0);
+    return md.indexes[offset].prefix;
 }
 
 // --------------------------
@@ -228,6 +266,15 @@ void BSONCollectionCatalogEntry::MetaData::rename(StringData toNS) {
     }
 }
 
+KVPrefix BSONCollectionCatalogEntry::MetaData::getMaxPrefix() const {
+    // Use the collection prefix as the initial max value seen. Then compare it with each index
+    // prefix. Note the oplog has no indexes so the vector of 'IndexMetaData' may be empty.
+    return std::accumulate(
+        indexes.begin(), indexes.end(), prefix, [](KVPrefix max, IndexMetaData index) {
+            return max < index.prefix ? index.prefix : max;
+        });
+}
+
 BSONObj BSONCollectionCatalogEntry::MetaData::toBSON() const {
     BSONObjBuilder b;
     b.append("ns", ns);
@@ -249,10 +296,13 @@ BSONObj BSONCollectionCatalogEntry::MetaData::toBSON() const {
             }
 
             sub.append("head", static_cast<long long>(indexes[i].head.repr()));
+            sub.append("prefix", indexes[i].prefix.toBSONValue());
+            sub.append("backgroundSecondary", indexes[i].isBackgroundSecondaryBuild);
             sub.doneFast();
         }
         arr.doneFast();
     }
+    b.append("prefix", prefix.toBSONValue());
     return b.obj();
 }
 
@@ -260,7 +310,8 @@ void BSONCollectionCatalogEntry::MetaData::parse(const BSONObj& obj) {
     ns = obj["ns"].valuestrsafe();
 
     if (obj["options"].isABSONObj()) {
-        options.parse(obj["options"].Obj());
+        options.parse(obj["options"].Obj(), CollectionOptions::parseForStorage)
+            .transitional_ignore();
     }
 
     BSONElement indexList = obj["indexes"];
@@ -282,8 +333,14 @@ void BSONCollectionCatalogEntry::MetaData::parse(const BSONObj& obj) {
                 parseMultikeyPathsFromBytes(multikeyPathsElem.Obj(), &imd.multikeyPaths);
             }
 
+            imd.prefix = KVPrefix::fromBSONElement(idx["prefix"]);
+            auto bgSecondary = BSONElement(idx["backgroundSecondary"]);
+            // Opt-in to rebuilding behavior for old-format index catalog objects.
+            imd.isBackgroundSecondaryBuild = bgSecondary.eoo() || bgSecondary.trueValue();
             indexes.push_back(imd);
         }
     }
+
+    prefix = KVPrefix::fromBSONElement(obj["prefix"]);
 }
 }

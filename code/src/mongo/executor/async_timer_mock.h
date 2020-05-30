@@ -62,22 +62,29 @@ public:
     /**
      * Advance current time. If the given interval is greater than or equal to the
      * time left on the timer, expire and call callbacks now.
-     *
-     * Returns true if the timer is still active, false if it has now expired.
      */
-    bool fastForward(Milliseconds time);
+    void fastForward(Milliseconds time);
 
     /**
      * Return the amount of time left on this timer.
      */
     Milliseconds timeLeft();
 
+    /**
+     * Reset the timer.
+     */
+    void expireAfter(Milliseconds expiration);
+
+    /**
+     * Returns the number of handlers on this timer.
+     */
+    int jobs();
+
 private:
     void _callAllHandlers(std::error_code ec);
-    void _expire();
 
+    stdx::mutex _mutex;
     Milliseconds _timeLeft;
-    stdx::mutex _handlersMutex;
     std::vector<AsyncTimerInterface::Handler> _handlers;
 };
 
@@ -97,6 +104,8 @@ public:
 
     void asyncWait(AsyncTimerInterface::Handler handler) override;
 
+    void expireAfter(Milliseconds expiration) override;
+
 private:
     // Unfortunate, but it makes the ownership model sane.
     std::shared_ptr<AsyncTimerMockImpl> _timer;
@@ -115,13 +124,7 @@ public:
     /**
      * Create and return a new AsyncTimerMock object.
      */
-    std::unique_ptr<AsyncTimerInterface> make(Milliseconds expiration);
-
-    /**
-     * Create and return a new AsyncTimerMock object.
-     */
-    std::unique_ptr<AsyncTimerInterface> make(asio::io_service::strand* strand,
-                                              Milliseconds expiration) override;
+    std::unique_ptr<AsyncTimerInterface> make(Milliseconds expiration) override;
 
     /**
      * Advance the current "time" and make stale timers expire.
@@ -133,8 +136,13 @@ public:
      */
     Date_t now() override;
 
+    /**
+     * Returns the number of pending jobs across all timers.
+     */
+    int jobs();
+
 private:
-    stdx::mutex _timersMutex;
+    stdx::recursive_mutex _timersMutex;
     stdx::unordered_set<std::shared_ptr<AsyncTimerMockImpl>> _timers;
     Milliseconds _curTime;
 };

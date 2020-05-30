@@ -29,6 +29,7 @@
 
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
+#include "mongo/db/auth/privilege_parser.h"
 
 namespace mongo {
 
@@ -42,6 +43,13 @@ void Privilege::addPrivilegeToPrivilegeVector(PrivilegeVector* privileges,
     }
     // No privilege exists yet for this resource
     privileges->push_back(privilegeToAdd);
+}
+
+void Privilege::addPrivilegesToPrivilegeVector(PrivilegeVector* privileges,
+                                               const PrivilegeVector& privilegesToAdd) {
+    for (auto&& priv : privilegesToAdd) {
+        addPrivilegeToPrivilegeVector(privileges, priv);
+    }
 }
 
 Privilege::Privilege(const ResourcePattern& resource, const ActionType& action)
@@ -72,6 +80,21 @@ BSONObj Privilege::toBSON() const {
     std::string errmsg;
     invariant(ParsedPrivilege::privilegeToParsedPrivilege(*this, &pp, &errmsg));
     return pp.toBSON();
+}
+
+Status Privilege::getBSONForPrivileges(const PrivilegeVector& privileges,
+                                       mutablebson::Element resultArray) try {
+    for (auto& currPriv : privileges) {
+        std::string errmsg;
+        ParsedPrivilege privilege;
+        if (!ParsedPrivilege::privilegeToParsedPrivilege(currPriv, &privilege, &errmsg)) {
+            return Status(ErrorCodes::BadValue, errmsg);
+        }
+        uassertStatusOK(resultArray.appendObject("privileges", privilege.toBSON()));
+    }
+    return Status::OK();
+} catch (...) {
+    return exceptionToStatus();
 }
 
 }  // namespace mongo

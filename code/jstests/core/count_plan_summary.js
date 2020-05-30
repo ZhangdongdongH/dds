@@ -1,5 +1,15 @@
-// Test that the plan summary string appears in db.currentOp() for
-// count operations. SERVER-14064.
+// Test that the plan summary string appears in db.currentOp() for count operations. SERVER-14064.
+//
+// @tags: [
+//   # This test attempts to perform a find command and find it using the currentOp command. The
+//   # former operation may be routed to a secondary in the replica set, whereas the latter must be
+//   # routed to the primary.
+//   assumes_read_preference_unchanged,
+//   does_not_support_stepdowns,
+//
+//   # Uses $where operator
+//   requires_scripting,
+// ]
 
 var t = db.jstests_count_plan_summary;
 t.drop();
@@ -15,7 +25,7 @@ var awaitShell =
 
 // Find the count op in db.currentOp() and check for the plan summary.
 assert.soon(function() {
-    var current = db.currentOp({ns: t.getFullName(), "query.count": t.getName()});
+    var current = db.currentOp({ns: t.getFullName(), "command.count": t.getName()});
 
     assert("inprog" in current);
     if (current.inprog.length === 0) {

@@ -36,9 +36,7 @@
 #include "mongo/base/init.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/config.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_noop.h"
-#include "mongo/stdx/memory.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
@@ -47,22 +45,12 @@
 // Need access to internal classes
 #include "mongo/db/sorter/sorter.cpp"
 
+#include <memory>
+
 namespace mongo {
 using namespace mongo::sorter;
 using std::make_shared;
 using std::pair;
-
-// Stub to avoid including the server_options library
-// TODO: This should go away once we can do these checks at compile time
-bool isMongos() {
-    return false;
-}
-
-// Stub to avoid including the server environment library.
-MONGO_INITIALIZER(SetGlobalEnvironment)(InitializerContext* context) {
-    setGlobalServiceContext(stdx::make_unique<ServiceContextNoop>());
-    return Status::OK();
-}
 
 //
 // Sorter framework testing utilities
@@ -251,7 +239,7 @@ public:
     }
 };
 
-class SortedFileWriterAndFileIteratorTests {
+class SortedFileWriterAndFileIteratorTests : public ScopedGlobalServiceContextForTest {
 public:
     void run() {
         unittest::TempDir tempDir("sortedFileWriterTests");
@@ -337,7 +325,7 @@ public:
 };
 
 namespace SorterTests {
-class Basic {
+class Basic : public ScopedGlobalServiceContextForTest {
 public:
     virtual ~Basic() {}
 

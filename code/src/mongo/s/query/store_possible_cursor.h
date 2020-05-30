@@ -29,11 +29,15 @@
 #pragma once
 
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/tailable_mode.h"
+#include "mongo/s/client/shard.h"
 
 namespace mongo {
 
 class BSONObj;
 class ClusterCursorManager;
+class RemoteCursor;
 template <typename T>
 class StatusWith;
 struct HostAndPort;
@@ -55,11 +59,40 @@ class TaskExecutor;
  * returns 'cmdResult'. If a parsing error occurs, returns an error Status. Otherwise, returns a
  * BSONObj response document describing the newly-created cursor, which is suitable for returning to
  * the client.
- */
-StatusWith<BSONObj> storePossibleCursor(const HostAndPort& server,
+ *
+ * @ shardId the name of the shard on which the cursor-establishing command was run
+ * @ server the exact host in the shard on which the cursor-establishing command was run
+ * @ cmdResult the result of running the cursor-establishing command
+ * @ requestedNss the namespace on which the client issued the cursor-establishing command (can
+ * differ from the execution namespace if the command was issued on a view)
+ * @ executor the TaskExecutor to store in the resulting ClusterClientCursor
+ * @ cursorManager the ClusterCursorManager on which to register the resulting ClusterClientCursor
+*/
+StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
+                                        const ShardId& shardId,
+                                        const HostAndPort& server,
                                         const BSONObj& cmdResult,
                                         const NamespaceString& requestedNss,
                                         executor::TaskExecutor* executor,
-                                        ClusterCursorManager* cursorManager);
+                                        ClusterCursorManager* cursorManager,
+                                        TailableModeEnum tailableMode = TailableModeEnum::kNormal);
 
+/**
+ * Convenience function which extracts all necessary information from the passed RemoteCursor, and
+ * stores a ClusterClientCursor based on it.
+ */
+StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
+                                        const NamespaceString& requestedNss,
+                                        const RemoteCursor& remoteCursor,
+                                        TailableModeEnum tailableMode);
+
+/**
+ * Convenience function which extracts all necessary information from the passed CommandResponse,
+ * and stores a ClusterClientCursor based on it.
+ */
+StatusWith<BSONObj> storePossibleCursor(OperationContext* opCtx,
+                                        const NamespaceString& requestedNss,
+                                        const ShardId& shardId,
+                                        const Shard::CommandResponse& commandResponse,
+                                        TailableModeEnum tailableMode);
 }  // namespace mongo

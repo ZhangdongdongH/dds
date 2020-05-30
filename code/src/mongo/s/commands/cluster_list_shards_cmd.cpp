@@ -28,69 +28,59 @@
 
 #include "mongo/platform/basic.h"
 
-#include <vector>
-
-#include "mongo/client/connpool.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/grid.h"
 
 namespace mongo {
 namespace {
 
-class ListShardsCmd : public Command {
+class ListShardsCmd : public BasicCommand {
 public:
-    ListShardsCmd() : Command("listShards", false, "listshards") {}
+    ListShardsCmd() : BasicCommand("listShards", "listshards") {}
 
-    virtual bool slaveOk() const {
+    std::string help() const override {
+        return "list all shards of the system";
+    }
+
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool adminOnly() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "list all shards of the system";
-    }
-
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::listShards);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        auto shardsStatus = grid.catalogClient(txn)->getAllShards(
-            txn, repl::ReadConcernLevel::kMajorityReadConcern);
-        if (!shardsStatus.isOK()) {
-            return appendCommandStatus(result, shardsStatus.getStatus());
-        }
-        std::vector<ShardType> shards = std::move(shardsStatus.getValue().value);
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        const auto opTimeWithShards =
+            uassertStatusOK(Grid::get(opCtx)->catalogClient()->getAllShards(
+                opCtx, repl::ReadConcernLevel::kMajorityReadConcern));
 
-        std::vector<BSONObj> shardsObj;
-        for (std::vector<ShardType>::const_iterator it = shards.begin(); it != shards.end(); it++) {
-            shardsObj.push_back(it->toBSON());
+        BSONArrayBuilder shardsArr(result.subarrayStart("shards"));
+        for (const auto& shard : opTimeWithShards.value) {
+            shardsArr.append(shard.toBSON());
         }
-        result.append("shards", shardsObj);
+        shardsArr.doneFast();
 
         return true;
     }
 
-} listShards;
+} listShardsCmd;
 
 }  // namespace
 }  // namespace mongo

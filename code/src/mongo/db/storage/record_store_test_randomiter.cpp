@@ -30,24 +30,23 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/storage/record_store_test_harness.h"
-
-
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/db/storage/record_store.h"
+#include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/unittest/unittest.h"
+
+namespace mongo {
+namespace {
 
 using std::unique_ptr;
 using std::set;
 using std::string;
 using std::stringstream;
 
-namespace mongo {
-
 // Create a random iterator for empty record store.
 TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -68,7 +67,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorEmpty) {
 
 // Insert multiple records and create a random iterator for the record store
 TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -88,7 +87,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
 
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             uow.commit();
@@ -129,7 +128,7 @@ TEST(RecordStoreTestHarness, GetRandomIteratorNonEmpty) {
 // Insert a single record. Create a random iterator pointing to that single record.
 // Then check we'll retrieve the record.
 TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -142,7 +141,8 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
     {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         WriteUnitOfWork uow(opCtx.get());
-        StatusWith<RecordId> res = rs->insertRecord(opCtx.get(), "some data", 10, false);
+        StatusWith<RecordId> res =
+            rs->insertRecord(opCtx.get(), "some data", 10, Timestamp(), false);
         ASSERT_OK(res.getStatus());
         idToRetrieve = res.getValue();
         uow.commit();
@@ -182,4 +182,5 @@ TEST(RecordStoreTestHarness, GetRandomIteratorSingleton) {
         }
     }
 }
+}  // namespace
 }  // namespace mongo

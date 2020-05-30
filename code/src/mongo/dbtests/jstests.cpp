@@ -39,12 +39,16 @@
 #include "mongo/base/parse_number.h"
 #include "mongo/db/client.h"
 #include "mongo/db/dbdirectclient.h"
+#include "mongo/db/hasher.h"
 #include "mongo/db/json.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/scripting/engine.h"
+#include "mongo/shell/shell_utils.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/future.h"
 #include "mongo/util/log.h"
+#include "mongo/util/time_support.h"
 #include "mongo/util/timer.h"
 
 using std::cout;
@@ -160,9 +164,8 @@ class LogRecordingScope {
 public:
     LogRecordingScope()
         : _logged(false),
-          _threadName(mongo::getThreadName()),
-          _handle(mongo::logger::globalLogDomain()->attachAppender(
-              mongo::logger::MessageLogDomain::AppenderAutoPtr(new Tee(this)))) {}
+          _threadName(mongo::getThreadName().toString()),
+          _handle(mongo::logger::globalLogDomain()->attachAppender(std::make_unique<Tee>(this))) {}
     ~LogRecordingScope() {
         mongo::logger::globalLogDomain()->detachAppender(_handle);
     }
@@ -402,11 +405,11 @@ public:
 
         BSONObj out;
 
-        ASSERT_THROWS(s->invoke("blah.y = 'e'", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.a = 19;", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.zz.a = 19;", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("blah.zz = { a : 19 };", 0, 0), mongo::UserException);
-        ASSERT_THROWS(s->invoke("delete blah['x']", 0, 0), mongo::UserException);
+        ASSERT_THROWS(s->invoke("blah.y = 'e'", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.a = 19;", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.zz.a = 19;", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("blah.zz = { a : 19 };", 0, 0), mongo::AssertionException);
+        ASSERT_THROWS(s->invoke("delete blah['x']", 0, 0), mongo::AssertionException);
 
         // read-only object itself can be overwritten
         s->invoke("blah = {}", 0, 0);
@@ -789,11 +792,6 @@ public:
 class NumberDecimal {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
         unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
         BSONObjBuilder b;
         Decimal128 val = Decimal128("2.010");
@@ -823,11 +821,6 @@ public:
 class NumberDecimalGetFromScope {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
         unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
         ASSERT(s->exec("a = 5;", "a", false, true, false));
         ASSERT_TRUE(Decimal128(5).isEqual(s->getNumberDecimal("a")));
@@ -837,11 +830,6 @@ public:
 class NumberDecimalBigObject {
 public:
     void run() {
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
-
         unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
 
         BSONObj in;
@@ -966,6 +954,54 @@ public:
     }
 };
 
+class SleepInterruption {
+public:
+    void run() {
+        std::shared_ptr<Scope> scope(getGlobalScriptEngine()->newScope());
+
+        auto sleep = makePromiseFuture<void>();
+        auto awakened = makePromiseFuture<void>();
+
+        // Spawn a thread which attempts to sleep indefinitely.
+        stdx::thread([
+            preSleep = std::move(sleep.promise),
+            onAwake = std::move(awakened.promise),
+            scope
+        ]() mutable {
+            preSleep.emplaceValue();
+            onAwake.setWith([&] {
+                scope->exec(
+                    ""
+                    "  try {"
+                    "    sleep(99999999999);"
+                    "  } finally {"
+                    "    throw \"FAILURE\";"
+                    "  }"
+                    "",
+                    "test",
+                    false,
+                    false,
+                    true);
+            });
+        }).detach();
+
+        // Wait until just before the sleep begins.
+        sleep.future.get();
+
+        // Attempt to wait until Javascript enters the sleep.
+        // It's OK if we kill the function prematurely, before it begins sleeping. Either cause of
+        // death will emit an error with the Interrupted code.
+        sleepsecs(1);
+
+        // Send the operation a kill signal.
+        scope->kill();
+
+        // Wait for the error.
+        auto result = awakened.future.getNoThrow();
+        ASSERT_EQ(ErrorCodes::Interrupted, result);
+    }
+};
+
 /**
  * Test invoke() timeout value does not terminate execution (SERVER-8053)
  */
@@ -1002,9 +1038,9 @@ public:
         string utf8ObjSpec = "{'_id':'\\u0001\\u007f\\u07ff\\uffff'}";
         BSONObj utf8Obj = fromjson(utf8ObjSpec);
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.insert(ns(), utf8Obj);
         client.eval("unittest",
@@ -1023,9 +1059,9 @@ private:
     }
 
     void reset() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.dropCollection(ns());
     }
@@ -1047,9 +1083,9 @@ public:
         if (!getGlobalScriptEngine()->utf8Ok())
             return;
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.eval("unittest",
                     "db.jstests.longutf8string.save( {_id:'\\uffff\\uffff\\uffff\\uffff'} )");
@@ -1057,9 +1093,9 @@ public:
 
 private:
     void reset() {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        DBDirectClient client(&opCtx);
 
         client.dropCollection(ns());
     }
@@ -1134,44 +1170,46 @@ class TestRoundTrip {
 public:
     virtual ~TestRoundTrip() {}
     void run() {
-        // Insert in Javascript -> Find using DBDirectClient
+        {
+            // Insert in Javascript -> Find using DBDirectClient
 
-        // Set the featureCompatibilityVersion to 3.4 so that BSON validation always uses
-        // BSONVersion::kLatest.
-        serverGlobalParams.featureCompatibility.version.store(
-            ServerGlobalParams::FeatureCompatibility::Version::k34);
+            // Drop the collection
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
 
-        // Drop the collection
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
+            client.dropCollection("unittest.testroundtrip");
 
-        client.dropCollection("unittest.testroundtrip");
+            // Insert in Javascript
+            stringstream jsInsert;
+            jsInsert << "db.testroundtrip.insert(" << jsonIn() << ")";
+            ASSERT_TRUE(client.eval("unittest", jsInsert.str()));
 
-        // Insert in Javascript
-        stringstream jsInsert;
-        jsInsert << "db.testroundtrip.insert(" << jsonIn() << ")";
-        ASSERT_TRUE(client.eval("unittest", jsInsert.str()));
+            // Find using DBDirectClient
+            BSONObj excludeIdProjection = BSON("_id" << 0);
+            BSONObj directFind = client.findOne("unittest.testroundtrip", "", &excludeIdProjection);
+            bsonEquals(bson(), directFind);
+        }
 
-        // Find using DBDirectClient
-        BSONObj excludeIdProjection = BSON("_id" << 0);
-        BSONObj directFind = client.findOne("unittest.testroundtrip", "", &excludeIdProjection);
-        bsonEquals(bson(), directFind);
+        {
+            // Insert using DBDirectClient -> Find in Javascript
 
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
 
-        // Insert using DBDirectClient -> Find in Javascript
+            // Drop the collection
+            client.dropCollection("unittest.testroundtrip");
 
-        // Drop the collection
-        client.dropCollection("unittest.testroundtrip");
+            // Insert using DBDirectClient
+            client.insert("unittest.testroundtrip", bson());
 
-        // Insert using DBDirectClient
-        client.insert("unittest.testroundtrip", bson());
-
-        // Find in Javascript
-        stringstream jsFind;
-        jsFind << "dbref = db.testroundtrip.findOne( { } , { _id : 0 } )\n"
-               << "assert.eq(dbref, " << jsonOut() << ")";
-        ASSERT_TRUE(client.eval("unittest", jsFind.str()));
+            // Find in Javascript
+            stringstream jsFind;
+            jsFind << "dbref = db.testroundtrip.findOne( { } , { _id : 0 } )\n"
+                   << "assert.eq(dbref, " << jsonOut() << ")";
+            ASSERT_TRUE(client.eval("unittest", jsFind.str()));
+        }
     }
 
 protected:
@@ -2250,18 +2288,29 @@ public:
         update.append("_id", "invalidstoredjs1");
         update.appendCode("value",
                           "function () { db.test.find().forEach(function(obj) { continue; }); }");
-
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        DBDirectClient client(&txn);
-        client.update("test.system.js", query.obj(), update.obj(), true /* upsert */);
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            client.update("test.system.js", query.obj(), update.obj(), true /* upsert */);
+        }
 
         unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
-        client.eval("test", "invalidstoredjs1()");
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            client.eval("test", "invalidstoredjs1()");
+        }
 
         BSONObj info;
         BSONElement ret;
-        ASSERT(client.eval("test", "return 5 + 12", info, ret));
+        {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
+            DBDirectClient client(&opCtx);
+            ASSERT(client.eval("test", "return 5 + 12", info, ret));
+        }
         ASSERT_EQUALS(17, ret.number());
     }
 };
@@ -2388,6 +2437,151 @@ public:
     }
 };
 
+class ErrorWithSidecarFromInvoke {
+public:
+    void run() {
+        auto sidecarThrowingFunc = [](const BSONObj& args, void* data) -> BSONObj {
+            uassertStatusOK(Status(ErrorExtraInfoExample(123), "foo"));
+            return {};
+        };
+
+        unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+
+        s->injectNative("foo", sidecarThrowingFunc);
+
+        ASSERT_THROWS_WITH_CHECK(
+            s->invoke("try { foo(); } catch (e) { throw e; } throw new Error(\"bar\");", 0, 0),
+            ExceptionFor<ErrorCodes::ForTestingErrorExtraInfo>,
+            [](const auto& ex) { ASSERT_EQ(ex->data, 123); });
+    }
+};
+
+class RequiresOwnedObjects {
+public:
+    void run() {
+        char buf[] = {5, 0, 0, 0, 0};
+        BSONObj unowned(buf);
+        BSONObj owned = unowned.getOwned();
+
+        ASSERT(!unowned.isOwned());
+        ASSERT(owned.isOwned());
+
+        // Ensure that by default we can bind owned and unowned
+        {
+            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+            s->setObject("unowned", unowned, true);
+            s->setObject("owned", owned, true);
+        }
+
+        // After we set the flag, we should only be able to set owned
+        {
+            unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+            s->requireOwnedObjects();
+            s->setObject("owned", owned, true);
+
+            bool threwException = false;
+            try {
+                s->setObject("unowned", unowned, true);
+            } catch (...) {
+                threwException = true;
+
+                auto status = exceptionToStatus();
+
+                ASSERT_EQUALS(status.code(), ErrorCodes::BadValue);
+            }
+
+            ASSERT(threwException);
+
+            // after resetting, we can set unowned's again
+            s->reset();
+            s->setObject("unowned", unowned, true);
+        }
+    }
+};
+
+class ConvertShardKeyToHashed {
+public:
+    void check(shared_ptr<Scope> s, const mongo::BSONObj& o) {
+        s->setObject("o", o, true);
+        s->invoke("return convertShardKeyToHashed(o);", 0, 0);
+        const auto scopeShardKey = s->getNumber("__returnValue");
+
+        // Wrapping to form a proper element
+        const auto wrapO = BSON("" << o);
+        const auto e = wrapO[""];
+        const auto trueShardKey =
+            mongo::BSONElementHasher::hash64(e, mongo::BSONElementHasher::DEFAULT_HASH_SEED);
+
+        ASSERT_EQUALS(scopeShardKey, trueShardKey);
+    }
+
+    void checkWithSeed(shared_ptr<Scope> s, const mongo::BSONObj& o, int seed) {
+        s->setObject("o", o, true);
+        s->setNumber("seed", seed);
+        s->invoke("return convertShardKeyToHashed(o, seed);", 0, 0);
+        const auto scopeShardKey = s->getNumber("__returnValue");
+
+        // Wrapping to form a proper element
+        const auto wrapO = BSON("" << o);
+        const auto e = wrapO[""];
+        const auto trueShardKey = mongo::BSONElementHasher::hash64(e, seed);
+
+        ASSERT_EQUALS(scopeShardKey, trueShardKey);
+    }
+
+    void checkNoArgs(shared_ptr<Scope> s) {
+        s->invoke("return convertShardKeyToHashed();", 0, 0);
+    }
+
+    void checkWithExtraArg(shared_ptr<Scope> s, const mongo::BSONObj& o, int seed) {
+        s->setObject("o", o, true);
+        s->setNumber("seed", seed);
+        s->invoke("return convertShardKeyToHashed(o, seed, 1);", 0, 0);
+    }
+
+    void checkWithBadSeed(shared_ptr<Scope> s, const mongo::BSONObj& o) {
+        s->setObject("o", o, true);
+        s->setString("seed", "sunflower");
+        s->invoke("return convertShardKeyToHashed(o, seed);", 0, 0);
+    }
+
+    void run() {
+        shared_ptr<Scope> s(getGlobalScriptEngine()->newScope());
+        shell_utils::installShellUtils(*s);
+
+        // Check a few elementary objects
+        check(s, BSON("" << 1));
+        check(s, BSON("" << 10.0));
+        check(s,
+              BSON(""
+                   << "Shardy"));
+        check(s, BSON("" << BSON_ARRAY(1 << 2 << 3)));
+        check(s, BSON("" << mongo::jstNULL));
+        check(s, BSON("" << mongo::BSONObj()));
+        check(s,
+              BSON("A" << 1 << "B"
+                       << "Shardy"));
+
+        // Check a few different seeds
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      mongo::BSONElementHasher::DEFAULT_HASH_SEED);
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      0);
+        checkWithSeed(s,
+                      BSON(""
+                           << "Shardy"),
+                      -1);
+
+        ASSERT_THROWS(checkNoArgs(s), mongo::DBException);
+        ASSERT_THROWS(checkWithExtraArg(s, BSON("" << 10.0), 0), mongo::DBException);
+        ASSERT_THROWS(checkWithBadSeed(s, BSON("" << 1)), mongo::DBException);
+    }
+};
+
 class All : public Suite {
 public:
     All() : Suite("js") {}
@@ -2403,6 +2597,7 @@ public:
         add<ExecTimeout>();
         add<ExecNoTimeout>();
         add<InvokeTimeout>();
+        add<SleepInterruption>();
         add<InvokeNoTimeout>();
 
         add<ObjectMapping>();
@@ -2444,6 +2639,9 @@ public:
 
         add<RecursiveInvoke>();
         add<ErrorCodeFromInvoke>();
+        add<ErrorWithSidecarFromInvoke>();
+        add<RequiresOwnedObjects>();
+        add<ConvertShardKeyToHashed>();
 
         add<RoundTripTests::DBRefTest>();
         add<RoundTripTests::DBPointerTest>();
@@ -2513,4 +2711,4 @@ public:
 
 SuiteInstance<All> myall;
 
-}  // namespace JavaJSTests
+}  // namespace JSTests

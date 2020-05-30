@@ -34,6 +34,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/s/catalog/type_chunk.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -41,7 +42,7 @@ namespace mongo {
 
 using std::string;
 
-const std::string TagsType::ConfigNS = "config.tags";
+const NamespaceString TagsType::ConfigNS("config.tags");
 
 const BSONField<std::string> TagsType::ns("ns");
 const BSONField<std::string> TagsType::tag("tag");
@@ -55,44 +56,38 @@ StatusWith<TagsType> TagsType::fromBSON(const BSONObj& source) {
     {
         std::string tagsNs;
         Status status = bsonExtractStringField(source, ns.name(), &tagsNs);
-        if (!status.isOK())
+        if (!status.isOK()) {
             return status;
+        }
 
-        tags._ns = tagsNs;
+        tags._ns = NamespaceString(tagsNs);
     }
 
     {
         std::string tagsTag;
         Status status = bsonExtractStringField(source, tag.name(), &tagsTag);
-        if (!status.isOK())
+        if (!status.isOK()) {
             return status;
+        }
 
         tags._tag = tagsTag;
     }
 
     {
-        BSONElement tagsMinKey;
-        Status status = bsonExtractTypedField(source, min.name(), Object, &tagsMinKey);
-        if (!status.isOK())
-            return status;
+        auto tagRangeStatus = ChunkRange::fromBSON(source);
+        if (!tagRangeStatus.isOK())
+            return tagRangeStatus.getStatus();
 
-        tags._minKey = tagsMinKey.Obj().getOwned();
-    }
-
-    {
-        BSONElement tagsMaxKey;
-        Status status = bsonExtractTypedField(source, max.name(), Object, &tagsMaxKey);
-        if (!status.isOK())
-            return status;
-
-        tags._maxKey = tagsMaxKey.Obj().getOwned();
+        const auto tagRange = std::move(tagRangeStatus.getValue());
+        tags._minKey = tagRange.getMin().getOwned();
+        tags._maxKey = tagRange.getMax().getOwned();
     }
 
     return tags;
 }
 
 Status TagsType::validate() const {
-    if (!_ns.is_initialized() || _ns->empty()) {
+    if (!_ns.is_initialized() || !_ns->isValid()) {
         return Status(ErrorCodes::NoSuchKey, str::stream() << "missing " << ns.name() << " field");
     }
 
@@ -135,7 +130,7 @@ BSONObj TagsType::toBSON() const {
     BSONObjBuilder builder;
 
     if (_ns)
-        builder.append(ns.name(), getNS());
+        builder.append(ns.name(), getNS().ns());
     if (_tag)
         builder.append(tag.name(), getTag());
     if (_minKey)
@@ -150,8 +145,8 @@ std::string TagsType::toString() const {
     return toBSON().toString();
 }
 
-void TagsType::setNS(const std::string& ns) {
-    invariant(!ns.empty());
+void TagsType::setNS(const NamespaceString& ns) {
+    invariant(ns.isValid());
     _ns = ns;
 }
 

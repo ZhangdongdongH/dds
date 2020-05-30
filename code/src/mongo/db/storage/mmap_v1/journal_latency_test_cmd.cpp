@@ -39,6 +39,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/index/index_access_method.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -46,7 +47,7 @@
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/storage/mmap_v1/aligned_builder.h"
 #include "mongo/db/storage/mmap_v1/logfile.h"
-#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/background.h"
@@ -64,12 +65,12 @@ boost::filesystem::path getJournalDir();
 }
 
 // Testing-only, enabled via command line
-class JournalLatencyTestCmd : public Command {
+class JournalLatencyTestCmd : public BasicCommand {
 public:
-    JournalLatencyTestCmd() : Command("journalLatencyTest") {}
+    JournalLatencyTestCmd() : BasicCommand("journalLatencyTest") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -77,18 +78,16 @@ public:
     virtual bool adminOnly() const {
         return true;
     }
-    virtual void help(stringstream& h) const {
-        h << "test how long to write and fsync to a test file in the journal/ directory";
+    std::string help() const override {
+        return "test how long to write and fsync to a test file in the journal/ directory";
     }
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
-    bool run(OperationContext* txn,
+                                       std::vector<Privilege>* out) const {}
+    bool run(OperationContext* opCtx,
              const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) {
         boost::filesystem::path p = dur::getJournalDir();
         p /= "journalLatencyTest";
@@ -152,11 +151,5 @@ public:
         return 1;
     }
 };
-MONGO_INITIALIZER(RegisterJournalLatencyTestCmd)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
-        // Leaked intentionally: a Command registers itself when constructed.
-        new JournalLatencyTestCmd();
-    }
-    return Status::OK();
-}
+MONGO_REGISTER_TEST_COMMAND(JournalLatencyTestCmd);
 }

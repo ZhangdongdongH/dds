@@ -28,17 +28,24 @@
 
 #pragma once
 
+#include <memory>
+
 #include "mongo/base/status.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/transport/session.h"
-#include "mongo/transport/ticket.h"
-#include "mongo/util/net/message.h"
+#include "mongo/util/future.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
+
+class OperationContext;
+
 namespace transport {
 
-class TicketImpl;
+enum ConnectSSLMode { kGlobalSSLMode, kEnableSSL, kDisableSSL };
+
+class Reactor;
+using ReactorHandle = std::shared_ptr<Reactor>;
 
 /**
  * The TransportLayer moves Messages between transport::Endpoints and the database.
@@ -64,122 +71,16 @@ public:
 
     friend class Session;
 
-    /**
-     * Stats for sessions open in the Transport Layer.
-     */
-    struct Stats {
-        /**
-         * Returns the number of sessions currently open in the transport layer.
-         */
-        size_t numOpenSessions = 0;
-
-        /**
-         * Returns the total number of sessions that have ever been created by this TransportLayer.
-         */
-        size_t numCreatedSessions = 0;
-
-        /**
-         * Returns the number of available sessions we could still open. Only relevant
-         * when we are operating under a transport::Session limit (for example, in the
-         * legacy implementation, we respect a maximum number of connections). If there
-         * is no session limit, returns std::numeric_limits<int>::max().
-         */
-        size_t numAvailableSessions = 0;
-    };
-
     virtual ~TransportLayer() = default;
 
-    /**
-     * Source (receive) a new Message for this Session.
-     *
-     * This method returns a work Ticket. The caller must complete the Ticket by
-     * passing it to either TransportLayer::wait() or TransportLayer::asyncWait().
-     *
-     * If an expiration date is given, the returned Ticket will expire at that time.
-     *
-     * When run, the returned Ticket will be exchanged for a Status. If the
-     * TransportLayer is unable to source a Message, this will be a failed status,
-     * and the passed-in Message buffer may be left in an invalid state.
-     */
-    virtual Ticket sourceMessage(const SessionHandle& session,
-                                 Message* message,
-                                 Date_t expiration = Ticket::kNoExpirationDate) = 0;
+    virtual StatusWith<SessionHandle> connect(HostAndPort peer,
+                                              ConnectSSLMode sslMode,
+                                              Milliseconds timeout) = 0;
 
-    /**
-     * Sink (send) a new Message for this Session. This method should be used
-     * to send replies to a given host.
-     *
-     * This method returns a work Ticket. The caller must complete the Ticket by
-     * passing it to either TransportLayer::wait() or TransportLayer::asyncWait().
-     *
-     * If an expiration date is given, the returned Ticket will expire at that time.
-     *
-     * When run, the returned Ticket will be exchanged for a Status. If the
-     * TransportLayer is unable to sink the Message, this will be a failed status.
-     *
-     * This method does NOT take ownership of the sunk Message, which must be cleaned
-     * up by the caller.
-     */
-    virtual Ticket sinkMessage(const SessionHandle& session,
-                               const Message& message,
-                               Date_t expiration = Ticket::kNoExpirationDate) = 0;
-
-    /**
-     * Perform a synchronous wait on the given work Ticket. When this call returns,
-     * the Ticket will have been completed. A call to wait() consumes the Ticket.
-     *
-     * This thread may be used by the TransportLayer to run other Tickets that were
-     * enqueued prior to this call.
-     */
-    virtual Status wait(Ticket&& ticket) = 0;
-
-    /**
-     * Callback for Tickets that are run via asyncWait().
-     */
-    using TicketCallback = stdx::function<void(Status)>;
-
-    /**
-     * Perform an asynchronous wait on the given work Ticket. Once the Ticket has been
-     * completed, the passed-in callback will be invoked.
-     *
-     * This thread will not be used by the TransportLayer to perform work. The callback
-     * passed to asyncWait() may be run on any thread.
-     */
-    virtual void asyncWait(Ticket&& ticket, TicketCallback callback) = 0;
-
-    /**
-     * Return the stored X509 peer information for this session. If the session does not
-     * exist in this TransportLayer, returns a default constructed object.
-     */
-    virtual SSLPeerInfo getX509PeerInfo(const ConstSessionHandle& session) const = 0;
-
-    /**
-     * Returns the number of sessions currently open in the transport layer.
-     */
-    virtual Stats sessionStats() = 0;
-
-    /**
-     * End the given Session. Tickets for this Session that have already been
-     * started via wait() or asyncWait() will complete, but may return a failed Status.
-     * Future calls to wait() or asyncWait() for this Session will fail. If this
-     * TransportLayer implementation is networked, any connections for this Session will
-     * be closed.
-     *
-     * ~Session() will automatically call end() with itself.
-     *
-     * This method is idempotent and synchronous.
-     */
-    virtual void end(const SessionHandle& session) = 0;
-
-    /**
-     * End all active sessions in the TransportLayer. Tickets that have already been started via
-     * wait() or asyncWait() will complete, but may return a failed Status.  This method is
-     * asynchronous and will return after all sessions have been notified to end.
-     *
-     * If a non-empty TagMask is provided, endAllSessions() will skip over sessions with matching
-     * tags and leave them open.
-     */
-    virtual void endAllSessions(Session::TagMask tags) = 0;
+    virtual Future<SessionHandle> asyncConnect(HostAndPort peer,
+                                               ConnectSSLMode sslMode,
+                                               const ReactorHandle& reactor,
+                                               Milliseconds timeout) = 0;
 
     /**
      * Start the TransportLayer. After this point, the TransportLayer will begin accepting active
@@ -196,23 +97,94 @@ public:
      */
     virtual void shutdown() = 0;
 
+    /**
+     * Optional method for subclasses to setup their state before being ready to accept
+     * connections.
+     */
+    virtual Status setup() = 0;
+
+    enum WhichReactor { kIngress, kEgress, kNewReactor };
+    virtual ReactorHandle getReactor(WhichReactor which) = 0;
+
+    virtual BatonHandle makeBaton(OperationContext* opCtx) {
+        return nullptr;
+    }
+
 protected:
     TransportLayer() = default;
-
-    /**
-     * Return the implementation of this Ticket.
-     */
-    TicketImpl* getTicketImpl(const Ticket& ticket) {
-        return ticket.impl();
-    }
-
-    /**
-     * Return the transport layer of this Ticket.
-     */
-    TransportLayer* getTicketTransportLayer(const Ticket& ticket) {
-        return ticket._tl;
-    }
 };
+
+class ReactorTimer {
+public:
+    ReactorTimer() = default;
+    ReactorTimer(const ReactorTimer&) = delete;
+    ReactorTimer& operator=(const ReactorTimer&) = delete;
+
+    /*
+     * The destructor calls cancel() to ensure outstanding Futures are filled.
+     */
+    virtual ~ReactorTimer() = default;
+
+    /*
+     * Cancel any outstanding future from waitFor/waitUntil. The future will be filled with an
+     * ErrorCodes::CallbackCancelled status.
+     *
+     * If no future is outstanding, then this is a noop.
+     */
+    virtual void cancel(const BatonHandle& baton = nullptr) = 0;
+
+    /*
+     * Returns a future that will be filled with Status::OK after the timeout has ellapsed.
+     *
+     * Calling this implicitly calls cancel().
+     */
+    virtual Future<void> waitFor(Milliseconds timeout, const BatonHandle& baton = nullptr) = 0;
+    virtual Future<void> waitUntil(Date_t timeout, const BatonHandle& baton = nullptr) = 0;
+};
+
+class Reactor {
+public:
+    Reactor(const Reactor&) = delete;
+    Reactor& operator=(const Reactor&) = delete;
+
+    virtual ~Reactor() = default;
+
+    /*
+     * Run the event loop of the reactor until stop() is called.
+     */
+    virtual void run() noexcept = 0;
+    virtual void runFor(Milliseconds time) noexcept = 0;
+    virtual void stop() = 0;
+    virtual void drain() = 0;
+
+    using Task = stdx::function<void()>;
+
+    enum ScheduleMode { kDispatch, kPost };
+    virtual void schedule(ScheduleMode mode, Task task) = 0;
+
+    template <typename Callback>
+    Future<FutureContinuationResult<Callback>> execute(Callback&& cb) {
+        auto pf = makePromiseFuture<FutureContinuationResult<Callback>>();
+        schedule(kPost, [ cb = std::forward<Callback>(cb), sp = pf.promise.share() ]() mutable {
+            sp.setWith(cb);
+        });
+
+        return std::move(pf.future);
+    }
+
+    virtual bool onReactorThread() const = 0;
+
+    /*
+     * Makes a timer tied to this reactor's event loop. Timeout callbacks will be
+     * executed in a thread calling run() or runFor().
+     */
+    virtual std::unique_ptr<ReactorTimer> makeTimer() = 0;
+    virtual Date_t now() = 0;
+
+protected:
+    Reactor() = default;
+};
+
 
 }  // namespace transport
 }  // namespace mongo

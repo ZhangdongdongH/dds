@@ -28,6 +28,8 @@
 
 #pragma once
 
+#include <functional>
+
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/server_options.h"
 
@@ -53,6 +55,7 @@ Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion inde
  * status is returned.
  */
 StatusWith<BSONObj> validateIndexSpec(
+    OperationContext* opCtx,
     const BSONObj& indexSpec,
     const NamespaceString& expectedNamespace,
     const ServerGlobalParams::FeatureCompatibility& featureCompatibility);
@@ -74,9 +77,16 @@ Status validateIndexSpecFieldNames(const BSONObj& indexSpec);
  * collation spec. If 'collation' is missing, fills it in with the spec for 'defaultCollator'.
  * Returns the index specification with 'collation' filled in.
  */
-StatusWith<BSONObj> validateIndexSpecCollation(OperationContext* txn,
+StatusWith<BSONObj> validateIndexSpecCollation(OperationContext* opCtx,
                                                const BSONObj& indexSpec,
                                                const CollatorInterface* defaultCollator);
+
+/**
+ * Optional filtering function to adjust allowed index field names at startup.
+ * Set it in a MONGO_INITIALIZER with 'FilterAllowedIndexFieldNames' as a dependant.
+ */
+extern std::function<void(std::set<StringData>& allowedIndexFieldNames)>
+    filterAllowedIndexFieldNames;
 
 }  // namespace index_key_validate
 }  // namespace mongo

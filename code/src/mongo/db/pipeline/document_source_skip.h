@@ -32,43 +32,9 @@
 
 namespace mongo {
 
-class DocumentSourceSkip final : public DocumentSource, public SplittableDocumentSource {
+class DocumentSourceSkip final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
-    // virtuals from DocumentSource
-    GetNextResult getNext() final;
-    const char* getSourceName() const final;
-    /**
-     * Attempts to move a subsequent $limit before the skip, potentially allowing for forther
-     * optimizations earlier in the pipeline.
-     */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
-    Value serialize(bool explain = false) const final;
-    boost::intrusive_ptr<DocumentSource> optimize() final;
-    BSONObjSet getOutputSorts() final {
-        return pSource ? pSource->getOutputSorts()
-                       : SimpleBSONObjComparator::kInstance.makeBSONObjSet();
-    }
-
-    GetDepsReturn getDependencies(DepsTracker* deps) const final {
-        return SEE_NEXT;  // This doesn't affect needed fields
-    }
-
-    // Virtuals for SplittableDocumentSource
-    // Need to run on rounter. Can't run on shards.
-    boost::intrusive_ptr<DocumentSource> getShardSource() final {
-        return NULL;
-    }
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final {
-        return this;
-    }
-
-    long long getSkip() const {
-        return _nToSkip;
-    }
-    void setSkip(long long newSkip) {
-        _nToSkip = newSkip;
-    }
+    static constexpr StringData kStageName = "$skip"_sd;
 
     /**
      * Convenience method for creating a $skip stage.
@@ -79,10 +45,58 @@ public:
     /**
      * Parses the user-supplied BSON into a $skip stage.
      *
-     * Throws a UserException if 'elem' is an invalid $skip specification.
+     * Throws a AssertionException if 'elem' is an invalid $skip specification.
      */
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
+    }
+
+    GetNextResult getNext() final;
+
+    const char* getSourceName() const final {
+        return kStageName.rawData();
+    }
+
+    /**
+     * Attempts to move a subsequent $limit before the skip, potentially allowing for forther
+     * optimizations earlier in the pipeline.
+     */
+    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
+                                                     Pipeline::SourceContainer* container) final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+    boost::intrusive_ptr<DocumentSource> optimize() final;
+    BSONObjSet getOutputSorts() final {
+        return pSource ? pSource->getOutputSorts()
+                       : SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    }
+
+    GetDepsReturn getDependencies(DepsTracker* deps) const final {
+        return SEE_NEXT;  // This doesn't affect needed fields
+    }
+
+    // Virtuals for NeedsMergerDocumentSource
+    // Need to run on rounter. Can't run on shards.
+    boost::intrusive_ptr<DocumentSource> getShardSource() final {
+        return NULL;
+    }
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final {
+        return {this};
+    }
+
+    long long getSkip() const {
+        return _nToSkip;
+    }
+    void setSkip(long long newSkip) {
+        _nToSkip = newSkip;
+    }
 
 private:
     explicit DocumentSourceSkip(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,

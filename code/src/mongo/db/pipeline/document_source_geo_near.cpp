@@ -36,6 +36,7 @@
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -47,6 +48,8 @@ REGISTER_DOCUMENT_SOURCE(geoNear,
                          DocumentSourceGeoNear::createFromBson);
 
 const long long DocumentSourceGeoNear::kDefaultLimit = 100;
+
+constexpr StringData DocumentSourceGeoNear::kKeyFieldName;
 
 const char* DocumentSourceGeoNear::getSourceName() const {
     return "$geoNear";
@@ -61,7 +64,7 @@ DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
     if (!resultsIterator->more())
         return GetNextResult::makeEOF();
 
-    // each result from the geoNear command is wrapped in a wrapper object with "obj",
+    // Each result from the geoNear command is wrapped in a wrapper object with "obj",
     // "dis" and maybe "loc" fields. We want to take the object from "obj" and inject the
     // other fields into it.
     Document result(resultsIterator->next().embeddedObject());
@@ -69,6 +72,11 @@ DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
     output.setNestedField(*distanceField, result["dis"]);
     if (includeLocs)
         output.setNestedField(*includeLocs, result["loc"]);
+
+    // In a cluster, $geoNear output will be merged via $sort, so add the sort key.
+    if (pExpCtx->needsMerge) {
+        output.setSortKeyMetaField(BSON("" << result["dis"]));
+    }
 
     return output.freeze();
 }
@@ -89,16 +97,21 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
 }
 
 // This command is sent as-is to the shards.
-// On router this becomes a sort by distance (nearest-first) with limit.
 intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getShardSource() {
     return this;
 }
-intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getMergeSource() {
-    return DocumentSourceSort::create(pExpCtx, BSON(distanceField->fullPath() << 1), limit);
+// On mongoS this becomes a merge sort by distance (nearest-first) with limit.
+std::list<intrusive_ptr<DocumentSource>> DocumentSourceGeoNear::getMergeSources() {
+    return {DocumentSourceSort::create(
+        pExpCtx, BSON(distanceField->fullPath() << 1 << "$mergePresorted" << true), limit)};
 }
 
-Value DocumentSourceGeoNear::serialize(bool explain) const {
+Value DocumentSourceGeoNear::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     MutableDocument result;
+
+    if (!keyFieldPath.empty()) {
+        result.setField(kKeyFieldName, Value(keyFieldPath));
+    }
 
     if (coordsIsArray) {
         result.setField("near", Value(BSONArray(coords)));
@@ -162,15 +175,21 @@ BSONObj DocumentSourceGeoNear::buildGeoNearCmd() const {
     if (includeLocs)
         geoNear.append("includeLocs", true);  // String in toBson
 
+    if (!keyFieldPath.empty()) {
+        geoNear.append(kKeyFieldName, keyFieldPath);
+    }
+
     return geoNear.obj();
 }
 
 void DocumentSourceGeoNear::runCommand() {
     massert(16603, "Already ran geoNearCommand", !resultsIterator);
 
-    bool ok = _mongod->directClient()->runCommand(
+    bool ok = pExpCtx->mongoProcessInterface->directClient()->runCommand(
         pExpCtx->ns.db().toString(), buildGeoNearCmd(), cmdOutput);
-    uassert(16604, "geoNear command failed: " + cmdOutput.toString(), ok);
+    if (!ok) {
+        uassertStatusOK(getStatusFromCommandResult(cmdOutput));
+    }
 
     resultsIterator.reset(new BSONObjIterator(cmdOutput["results"].embeddedObject()));
 }
@@ -178,7 +197,6 @@ void DocumentSourceGeoNear::runCommand() {
 intrusive_ptr<DocumentSourceGeoNear> DocumentSourceGeoNear::create(
     const intrusive_ptr<ExpressionContext>& pCtx) {
     intrusive_ptr<DocumentSourceGeoNear> source(new DocumentSourceGeoNear(pCtx));
-    source->injectExpressionContext(pCtx);
     return source;
 }
 
@@ -235,6 +253,19 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
     if (options.hasField("uniqueDocs"))
         warning() << "ignoring deprecated uniqueDocs option in $geoNear aggregation stage";
 
+    if (auto keyElt = options[kKeyFieldName]) {
+        uassert(ErrorCodes::TypeMismatch,
+                str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
+                              << "' must be of type string but found type: "
+                              << typeName(keyElt.type()),
+                keyElt.type() == BSONType::String);
+        keyFieldPath = keyElt.str();
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
+                              << "' cannot be the empty string",
+                !keyFieldPath.empty());
+    }
+
     // The collation field is disallowed, even though it is accepted by the geoNear command, since
     // the $geoNear operation should respect the collation associated with the entire pipeline.
     uassert(40227,
@@ -244,7 +275,7 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
 }
 
 DocumentSourceGeoNear::DocumentSourceGeoNear(const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
+    : DocumentSource(pExpCtx),
       coordsIsArray(false),
       limit(DocumentSourceGeoNear::kDefaultLimit),
       maxDistance(-1.0),

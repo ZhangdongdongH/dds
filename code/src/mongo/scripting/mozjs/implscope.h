@@ -59,8 +59,11 @@
 #include "mongo/scripting/mozjs/object.h"
 #include "mongo/scripting/mozjs/oid.h"
 #include "mongo/scripting/mozjs/regexp.h"
+#include "mongo/scripting/mozjs/session.h"
+#include "mongo/scripting/mozjs/status.h"
 #include "mongo/scripting/mozjs/timestamp.h"
 #include "mongo/scripting/mozjs/uri.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 namespace mozjs {
@@ -88,7 +91,7 @@ public:
 
     void reset() override;
 
-    void kill();
+    void kill() override;
 
     void interrupt();
 
@@ -96,11 +99,11 @@ public:
 
     OperationContext* getOpContext() const;
 
-    void registerOperation(OperationContext* txn) override;
+    void registerOperation(OperationContext* opCtx) override;
 
     void unregisterOperation() override;
 
-    void localConnectForDbEval(OperationContext* txn, const char* dbName) override;
+    void localConnectForDbEval(OperationContext* opCtx, const char* dbName) override;
 
     void externalSetup() override;
 
@@ -109,6 +112,8 @@ public:
     bool hasOutOfMemoryException() override;
 
     void gc() override;
+
+    void sleep(Milliseconds ms);
 
     bool isJavaScriptProtectionEnabled() const;
 
@@ -148,8 +153,7 @@ public:
 
     void injectNative(const char* field, NativeFunction func, void* data = 0) override;
 
-    ScriptingFunction _createFunction(const char* code,
-                                      ScriptingFunction functionNumber = 0) override;
+    ScriptingFunction _createFunction(const char* code) override;
 
     void newFunction(StringData code, JS::MutableHandleValue out);
 
@@ -288,6 +292,17 @@ public:
     }
 
     template <typename T>
+    typename std::enable_if<std::is_same<T, SessionInfo>::value, WrapType<T>&>::type getProto() {
+        return _sessionProto;
+    }
+
+    template <typename T>
+    typename std::enable_if<std::is_same<T, MongoStatusInfo>::value, WrapType<T>&>::type
+    getProto() {
+        return _statusProto;
+    }
+
+    template <typename T>
     typename std::enable_if<std::is_same<T, TimestampInfo>::value, WrapType<T>&>::type getProto() {
         return _timestampProto;
     }
@@ -297,8 +312,10 @@ public:
         return _uriProto;
     }
 
-    void setQuickExit(int exitCode);
-    bool getQuickExit(int* exitCode);
+    template <typename T>
+    typename std::enable_if<std::is_same<T, GlobalInfo>::value, WrapType<T>&>::type getProto() {
+        return _globalProto;
+    }
 
     static const char* const kExecResult;
     static const char* const kInvokeResult;
@@ -312,14 +329,48 @@ public:
 
     void advanceGeneration() override;
 
+    void requireOwnedObjects() override;
+
+    bool requiresOwnedObjects() const;
+
     JS::HandleId getInternedStringId(InternedString name) {
         return _internedStrings.getInternedString(name);
     }
 
+    std::string buildStackString();
+
+    template <typename T, typename... Args>
+    T* trackedNew(Args&&... args) {
+        T* t = new T(std::forward<Args>(args)...);
+        _asanHandles.addPointer(t);
+        return t;
+    }
+
+    template <typename T>
+    void trackedDelete(T* t) {
+        _asanHandles.removePointer(t);
+        delete (t);
+    }
+
+    struct ASANHandles {
+        ASANHandles();
+        ~ASANHandles();
+
+        void addPointer(void* ptr);
+        void removePointer(void* ptr);
+
+        stdx::unordered_set<void*> _handles;
+
+        static ASANHandles* getThreadASANHandles();
+    };
+
+    void setStatus(Status status);
+
 private:
-    void _MozJSCreateFunction(const char* raw,
-                              ScriptingFunction functionNumber,
-                              JS::MutableHandleValue fun);
+    template <typename ImplScopeFunction>
+    auto _runSafely(ImplScopeFunction&& functionToRun) -> decltype(functionToRun());
+
+    void _MozJSCreateFunction(StringData raw, JS::MutableHandleValue fun);
 
     /**
      * This structure exists exclusively to construct the runtime and context
@@ -361,6 +412,7 @@ private:
 
     void setCompileOptions(JS::CompileOptions* co);
 
+    ASANHandles _asanHandles;
     MozJSScriptEngine* _engine;
     MozRuntime _mr;
     JSRuntime* _runtime;
@@ -370,6 +422,8 @@ private:
     std::vector<JS::PersistentRootedValue> _funcs;
     InternedStringTable _internedStrings;
     std::atomic<bool> _pendingKill;
+    std::mutex _sleepMutex;
+    std::condition_variable _sleepCondition;
     std::string _error;
     unsigned int _opId;        // op id for this scope
     OperationContext* _opCtx;  // Op context for DbEval
@@ -377,10 +431,9 @@ private:
     std::atomic<bool> _pendingGC;
     ConnectState _connectState;
     Status _status;
-    int _exitCode;
-    bool _quickExit;
     std::string _parentStack;
     std::size_t _generation;
+    bool _requireOwnedObjects;
     bool _hasOutOfMemoryException;
 
     WrapType<BinDataInfo> _binDataProto;
@@ -408,12 +461,18 @@ private:
     WrapType<ObjectInfo> _objectProto;
     WrapType<OIDInfo> _oidProto;
     WrapType<RegExpInfo> _regExpProto;
+    WrapType<SessionInfo> _sessionProto;
+    WrapType<MongoStatusInfo> _statusProto;
     WrapType<TimestampInfo> _timestampProto;
     WrapType<URIInfo> _uriProto;
 };
 
 inline MozJSImplScope* getScope(JSContext* cx) {
     return static_cast<MozJSImplScope*>(JS_GetContextPrivate(cx));
+}
+
+inline MozJSImplScope* getScope(JSFreeOp* fop) {
+    return static_cast<MozJSImplScope*>(JS_GetRuntimePrivate(fop->runtime()));
 }
 
 }  // namespace mozjs

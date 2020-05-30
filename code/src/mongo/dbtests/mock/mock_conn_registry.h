@@ -28,12 +28,11 @@
 
 #pragma once
 
-
 #include "mongo/base/status.h"
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/dbtests/mock/mock_remote_db_server.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -79,7 +78,7 @@ public:
     /**
      * @return a new mocked connection to a server with the given hostName.
      */
-    MockDBClientConnection* connect(const std::string& hostName);
+    std::unique_ptr<MockDBClientConnection> connect(const std::string& hostName);
 
     /**
      * @return the hook that can be used with ConnectionString.
@@ -100,9 +99,9 @@ private:
         MockConnHook(MockConnRegistry* registry);
         ~MockConnHook();
 
-        mongo::DBClientBase* connect(const mongo::ConnectionString& connString,
-                                     std::string& errmsg,
-                                     double socketTimeout);
+        std::unique_ptr<mongo::DBClientBase> connect(const mongo::ConnectionString& connString,
+                                                     std::string& errmsg,
+                                                     double socketTimeout);
 
     private:
         MockConnRegistry* _registry;
@@ -116,6 +115,6 @@ private:
 
     // protects _registry
     stdx::mutex _registryMutex;
-    unordered_map<std::string, MockRemoteDBServer*> _registry;
+    stdx::unordered_map<std::string, MockRemoteDBServer*> _registry;
 };
-}
+}  // namespace mongo

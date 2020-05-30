@@ -40,11 +40,8 @@ class Status;
  * following format:
  *
  * { _id: "minOpTimeRecovery",
- *   configsvrConnectionString: "config/server1:10000,server2:10001,server3:10002",
- *   shardName: "shard0000",
  *   minOpTime: { ts: Timestamp 1443820968000|1, t: 11 },
  *   minOptimeUpdaters: 1 }
- *   TODO(SERVER-25276): Remove 'shardName' and 'configsvrConnectionString' fields after 3.4 ships.
  */
 class ShardingStateRecovery {
 public:
@@ -53,13 +50,13 @@ public:
      * server's minOpTime after node failure. It is only safe to commence the operation after this
      * method returns an OK status.
      */
-    static Status startMetadataOp(OperationContext* txn);
+    static Status startMetadataOp(OperationContext* opCtx);
 
     /**
      * Marks the end of a sharding metadata operation, persisting the latest config server opTime at
      * the time of the call.
      */
-    static void endMetadataOp(OperationContext* txn);
+    static void endMetadataOp(OperationContext* opCtx);
 
     /**
      * Recovers the minimal config server opTime that the instance should be using for reading
@@ -71,7 +68,7 @@ public:
      * Returns OK if the minOpTime was successfully recovered or failure status otherwise. It is
      * unsafe to read and rely on any sharding metadata before this method has returned success.
      */
-    static Status recover(OperationContext* txn);
+    static Status recover(OperationContext* opCtx);
 };
 
 }  // namespace mongo

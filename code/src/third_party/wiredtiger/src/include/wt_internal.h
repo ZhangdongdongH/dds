@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -35,6 +35,7 @@ extern "C" {
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <inttypes.h>
 #ifdef _WIN32
 #include <io.h>
@@ -106,10 +107,12 @@ struct __wt_col;
     typedef struct __wt_col WT_COL;
 struct __wt_col_rle;
     typedef struct __wt_col_rle WT_COL_RLE;
+struct __wt_col_var_repeat;
+    typedef struct __wt_col_var_repeat WT_COL_VAR_REPEAT;
 struct __wt_colgroup;
     typedef struct __wt_colgroup WT_COLGROUP;
-struct __wt_compact;
-    typedef struct __wt_compact WT_COMPACT;
+struct __wt_compact_state;
+    typedef struct __wt_compact_state WT_COMPACT_STATE;
 struct __wt_condvar;
     typedef struct __wt_condvar WT_CONDVAR;
 struct __wt_config;
@@ -244,12 +247,14 @@ struct __wt_named_extractor;
     typedef struct __wt_named_extractor WT_NAMED_EXTRACTOR;
 struct __wt_named_snapshot;
     typedef struct __wt_named_snapshot WT_NAMED_SNAPSHOT;
+struct __wt_optrack_header;
+    typedef struct __wt_optrack_header WT_OPTRACK_HEADER;
+struct __wt_optrack_record;
+    typedef struct __wt_optrack_record WT_OPTRACK_RECORD;
 struct __wt_ovfl_reuse;
     typedef struct __wt_ovfl_reuse WT_OVFL_REUSE;
 struct __wt_ovfl_track;
     typedef struct __wt_ovfl_track WT_OVFL_TRACK;
-struct __wt_ovfl_txnc;
-    typedef struct __wt_ovfl_txnc WT_OVFL_TXNC;
 struct __wt_page;
     typedef struct __wt_page WT_PAGE;
 struct __wt_page_deleted;
@@ -258,6 +263,8 @@ struct __wt_page_header;
     typedef struct __wt_page_header WT_PAGE_HEADER;
 struct __wt_page_index;
     typedef struct __wt_page_index WT_PAGE_INDEX;
+struct __wt_page_lookaside;
+    typedef struct __wt_page_lookaside WT_PAGE_LOOKASIDE;
 struct __wt_page_modify;
     typedef struct __wt_page_modify WT_PAGE_MODIFY;
 struct __wt_process;
@@ -276,18 +283,22 @@ struct __wt_scratch_track;
     typedef struct __wt_scratch_track WT_SCRATCH_TRACK;
 struct __wt_session_impl;
     typedef struct __wt_session_impl WT_SESSION_IMPL;
+struct __wt_session_stash;
+    typedef struct __wt_session_stash WT_SESSION_STASH;
 struct __wt_size;
     typedef struct __wt_size WT_SIZE;
 struct __wt_spinlock;
     typedef struct __wt_spinlock WT_SPINLOCK;
-struct __wt_split_stash;
-    typedef struct __wt_split_stash WT_SPLIT_STASH;
+struct __wt_stash;
+    typedef struct __wt_stash WT_STASH;
 struct __wt_table;
     typedef struct __wt_table WT_TABLE;
 struct __wt_thread;
     typedef struct __wt_thread WT_THREAD;
 struct __wt_thread_group;
     typedef struct __wt_thread_group WT_THREAD_GROUP;
+struct __wt_timestamp_t;
+    typedef struct __wt_timestamp_t WT_TIMESTAMP_T;
 struct __wt_txn;
     typedef struct __wt_txn WT_TXN;
 struct __wt_txn_global;
@@ -346,10 +357,10 @@ union __wt_rand_state;
 #include "cursor.h"
 #include "dlh.h"
 #include "error.h"
-#include "flags.h"
 #include "log.h"
 #include "lsm.h"
 #include "meta.h"
+#include "optrack.h"
 #include "os.h"
 #include "schema.h"
 #include "thread_group.h"
@@ -368,6 +379,7 @@ union __wt_rand_state;
 
 #include "ctype.i"			/* required by packing.i */
 #include "intpack.i"			/* required by cell.i, packing.i */
+#include "misc.i"			/* required by mutex.i */
 
 #include "buf.i"                        /* required by cell.i */
 #include "cache.i"			/* required by txn.i */
@@ -381,7 +393,6 @@ union __wt_rand_state;
 #include "column.i"
 #include "cursor.i"
 #include "log.i"
-#include "misc.i"
 #include "os_fhandle.i"
 #include "os_fs.i"
 #include "os_fstream.i"

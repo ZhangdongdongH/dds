@@ -32,11 +32,12 @@
 
 #include "mongo/db/exec/collection_scan_common.h"
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/record_id.h"
 
 namespace mongo {
 
+struct Record;
 class SeekableRecordCursor;
 class WorkingSet;
 class OperationContext;
@@ -49,7 +50,7 @@ class OperationContext;
  */
 class CollectionScan final : public PlanStage {
 public:
-    CollectionScan(OperationContext* txn,
+    CollectionScan(OperationContext* opCtx,
                    const CollectionScanParams& params,
                    WorkingSet* workingSet,
                    const MatchExpression* filter);
@@ -57,7 +58,7 @@ public:
     StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
     void doSaveState() final;
     void doRestoreState() final;
     void doDetachFromOperationContext() final;
@@ -65,6 +66,10 @@ public:
 
     StageType stageType() const final {
         return STAGE_COLLSCAN;
+    }
+
+    Timestamp getLatestOplogTimestamp() const {
+        return _latestOplogEntryTimestamp;
     }
 
     std::unique_ptr<PlanStageStats> getStats() final;
@@ -80,11 +85,23 @@ private:
      */
     StageState returnIfMatches(WorkingSetMember* member, WorkingSetID memberID, WorkingSetID* out);
 
+    /**
+     * Extracts the timestamp from the 'ts' field of 'record', and sets '_latestOplogEntryTimestamp'
+     * to that time if it isn't already greater.  Returns an error if the 'ts' field cannot be
+     * extracted.
+     */
+    Status setLatestOplogEntryTimestamp(const Record& record);
+
     // WorkingSet is not owned by us.
     WorkingSet* _workingSet;
 
     // The filter is not owned by us.
     const MatchExpression* _filter;
+
+    // If a document does not pass '_filter' but passes '_endCondition', stop scanning and return
+    // IS_EOF.
+    BSONObj _endConditionBSON;
+    std::unique_ptr<GTEMatchExpression> _endCondition;
 
     std::unique_ptr<SeekableRecordCursor> _cursor;
 
@@ -98,6 +115,10 @@ private:
     // all fetch requests. This should only be used for passing up the Fetcher for a NEED_YIELD, and
     // should remain in the INVALID state.
     const WorkingSetID _wsidForFetch;
+
+    // If _params.shouldTrackLatestOplogTimestamp is set and the collection is the oplog, the latest
+    // timestamp seen in the collection.  Otherwise, this is a null timestamp.
+    Timestamp _latestOplogEntryTimestamp;
 
     // Stats
     CollectionScanStats _specificStats;

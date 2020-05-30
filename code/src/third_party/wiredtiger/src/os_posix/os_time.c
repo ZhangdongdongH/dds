@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -9,11 +9,11 @@
 #include "wt_internal.h"
 
 /*
- * __wt_epoch --
- *	Return the time since the Epoch.
+ * __wt_epoch_raw --
+ *	Return the time since the Epoch as reported by a system call.
  */
 void
-__wt_epoch(WT_SESSION_IMPL *session, struct timespec *tsp)
+__wt_epoch_raw(WT_SESSION_IMPL *session, struct timespec *tsp)
 {
 	WT_DECL_RET;
 
@@ -32,6 +32,7 @@ __wt_epoch(WT_SESSION_IMPL *session, struct timespec *tsp)
 		return;
 	WT_PANIC_MSG(session, ret, "clock_gettime");
 #elif defined(HAVE_GETTIMEOFDAY)
+	{
 	struct timeval v;
 
 	WT_SYSCALL_RETRY(gettimeofday(&v, NULL), ret);
@@ -41,7 +42,22 @@ __wt_epoch(WT_SESSION_IMPL *session, struct timespec *tsp)
 		return;
 	}
 	WT_PANIC_MSG(session, ret, "gettimeofday");
+	}
 #else
 	NO TIME-OF-DAY IMPLEMENTATION: see src/os_posix/os_time.c
 #endif
+}
+
+/*
+ * __wt_localtime --
+ *	Return the current local broken-down time.
+ */
+int
+__wt_localtime(WT_SESSION_IMPL *session, const time_t *timep, struct tm *result)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
+{
+	if (localtime_r(timep, result) != NULL)
+		return (0);
+
+	WT_RET_MSG(session, __wt_errno(), "localtime_r");
 }

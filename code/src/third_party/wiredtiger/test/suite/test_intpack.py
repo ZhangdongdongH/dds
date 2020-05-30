@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -126,8 +126,11 @@ class PackTester:
 class test_intpack(wttest.WiredTigerTestCase):
     name = 'test_intpack'
 
-    # We have to be a bit verbose here with naming, as there can be problems with
-    # case insensitive test names:w
+    # It's useful to test a larger range but avoid the CPU overhead normally
+    base_range = 66000 if wttest.islongtest() else 5000
+
+    # We have to be a bit verbose here with naming, scenario names are
+    # case insensitive and must be unique.
 
     scenarios = make_scenarios([
         ('int8_t_b', dict(formatcode='b', low=-128, high=127, nbits=8)),
@@ -152,7 +155,7 @@ class test_intpack(wttest.WiredTigerTestCase):
         pt = PackTester(self.formatcode, self.low, self.high, self.assertEquals)
         self.assertEquals(2 ** self.nbits, self.high - self.low + 1)
         pt.initialize(self.session)
-        pt.check_range(-66000, 66000)
+        pt.check_range(-self.base_range, self.base_range)
         if self.nbits >= 32:
             e32 = 2 ** 32
             pt.check_range(e32 - 1000, e32 + 1000)

@@ -24,10 +24,16 @@ function reconnect(db) {
 function _getErrorWithCode(codeOrObj, message) {
     var e = new Error(message);
     if (codeOrObj != undefined) {
-        if (codeOrObj.writeError) {
-            e.code = codeOrObj.writeError.code;
-        } else if (codeOrObj.code) {
-            e.code = codeOrObj.code;
+        if (codeOrObj.writeError || codeOrObj.code) {
+            if (codeOrObj.writeError) {
+                e.code = codeOrObj.writeError.code;
+            } else if (codeOrObj.code) {
+                e.code = codeOrObj.code;
+            }
+
+            if (codeOrObj.hasOwnProperty("errorLabels")) {
+                e.errorLabels = codeOrObj.errorLabels;
+            }
         } else {
             // At this point assume codeOrObj is a number type
             e.code = codeOrObj;
@@ -35,6 +41,45 @@ function _getErrorWithCode(codeOrObj, message) {
     }
 
     return e;
+}
+
+/**
+ * Executes the specified function and retries it if it fails due to exception related to network
+ * error. If it exhausts the number of allowed retries, it simply throws the last exception.
+ *
+ * Returns the return value of the input call.
+ */
+function retryOnNetworkError(func, numRetries, sleepMs) {
+    numRetries = numRetries || 1;
+    sleepMs = sleepMs || 1000;
+
+    while (true) {
+        try {
+            return func();
+        } catch (e) {
+            if (isNetworkError(e) && numRetries > 0) {
+                print("Network error occurred and the call will be retried: " +
+                      tojson({error: e.toString(), stack: e.stack}));
+                numRetries--;
+                sleep(sleepMs);
+            } else {
+                throw e;
+            }
+        }
+    }
+}
+
+// Checks if a Javascript exception is a network error.
+function isNetworkError(error) {
+    let networkErrs = [
+        "network error",
+        "error doing query",
+        "socket exception",
+        "SocketException",
+        "HostNotFound"
+    ];
+    // See if any of the known network error strings appear in the given message.
+    return networkErrs.some(err => error.message.includes(err));
 }
 
 // Please consider using bsonWoCompare instead of this as much as possible.
@@ -152,6 +197,18 @@ print.captureAllOutput = function(fn, args) {
     return res;
 };
 
+var indentStr = function(indent, s) {
+    if (typeof(s) === "undefined") {
+        s = indent;
+        indent = 0;
+    }
+    if (indent > 0) {
+        indent = (new Array(indent + 1)).join(" ");
+        s = indent + s.replace(/\n/g, "\n" + indent);
+    }
+    return s;
+};
+
 if (typeof TestData == "undefined") {
     TestData = undefined;
 }
@@ -192,25 +249,30 @@ var _jsTestOptions = {enableTestCommands: true};  // Test commands should be ena
 jsTestOptions = function() {
     if (TestData) {
         return Object.merge(_jsTestOptions, {
+            serviceExecutor: TestData.serviceExecutor,
             setParameters: TestData.setParameters,
             setParametersMongos: TestData.setParametersMongos,
             storageEngine: TestData.storageEngine,
             storageEngineCacheSizeGB: TestData.storageEngineCacheSizeGB,
+            transportLayer: TestData.transportLayer,
             wiredTigerEngineConfigString: TestData.wiredTigerEngineConfigString,
             wiredTigerCollectionConfigString: TestData.wiredTigerCollectionConfigString,
             wiredTigerIndexConfigString: TestData.wiredTigerIndexConfigString,
             noJournal: TestData.noJournal,
             noJournalPrealloc: TestData.noJournalPrealloc,
             auth: TestData.auth,
+            // Note: keyFile is also used as a flag to indicate cluster auth is turned on, set it
+            // to a truthy value if you'd like to do cluster auth, even if it's not keyFile auth.
+            // Use clusterAuthMode to specify the actual auth mode you want to use.
             keyFile: TestData.keyFile,
             authUser: TestData.authUser || "__system",
             authPassword: TestData.keyFileData,
             authenticationDatabase: TestData.authenticationDatabase || "admin",
             authMechanism: TestData.authMechanism,
+            clusterAuthMode: TestData.clusterAuthMode || "keyFile",
             adminUser: TestData.adminUser || "admin",
             adminPassword: TestData.adminPassword || "password",
             useLegacyConfigServers: TestData.useLegacyConfigServers || false,
-            useLegacyReplicationProtocol: TestData.useLegacyReplicationProtocol || false,
             enableMajorityReadConcern: TestData.enableMajorityReadConcern,
             writeConcernMajorityShouldJournal: TestData.writeConcernMajorityShouldJournal,
             enableEncryption: TestData.enableEncryption,
@@ -222,9 +284,37 @@ jsTestOptions = function() {
             mongosBinVersion: TestData.mongosBinVersion || "",
             shardMixedBinVersions: TestData.shardMixedBinVersions || false,
             networkMessageCompressors: TestData.networkMessageCompressors,
+            replSetFeatureCompatibilityVersion: TestData.replSetFeatureCompatibilityVersion,
+            skipRetryOnNetworkError: TestData.skipRetryOnNetworkError,
             skipValidationOnInvalidViewDefinitions: TestData.skipValidationOnInvalidViewDefinitions,
-            forceValidationWithFeatureCompatibilityVersion:
-                TestData.forceValidationWithFeatureCompatibilityVersion
+            skipCollectionAndIndexValidation: TestData.skipCollectionAndIndexValidation,
+            // We default skipValidationOnNamespaceNotFound to true because mongod can end up
+            // dropping a collection after calling listCollections (e.g. if a secondary applies an
+            // oplog entry).
+            skipValidationOnNamespaceNotFound:
+                TestData.hasOwnProperty("skipValidationOnNamespaceNotFound")
+                ? TestData.skipValidationOnNamespaceNotFound
+                : true,
+            skipValidationNamespaces: TestData.skipValidationNamespaces || [],
+            skipCheckingUUIDsConsistentAcrossCluster:
+                TestData.skipCheckingUUIDsConsistentAcrossCluster || false,
+            skipCheckingCatalogCacheConsistencyWithShardingCatalog:
+                TestData.skipCheckingCatalogCacheConsistencyWithShardingCatalog || false,
+            skipAwaitingReplicationOnShardsBeforeCheckingUUIDs:
+                TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs || false,
+            jsonSchemaTestFile: TestData.jsonSchemaTestFile,
+            excludedDBsFromDBHash: TestData.excludedDBsFromDBHash,
+            alwaysInjectTransactionNumber: TestData.alwaysInjectTransactionNumber,
+            skipGossipingClusterTime: TestData.skipGossipingClusterTime || false,
+            disableEnableSessions: TestData.disableEnableSessions,
+            overrideRetryAttempts: TestData.overrideRetryAttempts || 0,
+            logRetryAttempts: TestData.logRetryAttempts || false,
+            connectionString: TestData.connectionString || "",
+            skipCheckDBHashes: TestData.skipCheckDBHashes || false,
+            traceExceptions: TestData.hasOwnProperty("traceExceptions") ? TestData.traceExceptions
+                                                                        : true,
+            transactionLifetimeLimitSeconds: TestData.transactionLifetimeLimitSeconds,
+            disableImplicitSessions: TestData.disableImplicitSessions || false,
         });
     }
     return _jsTestOptions;
@@ -235,7 +325,9 @@ setJsTestOption = function(name, value) {
 };
 
 jsTestLog = function(msg) {
-    print("\n\n----\n" + msg + "\n----\n\n");
+    assert.eq(typeof(msg), "string", "Received: " + msg);
+    const msgs = ["----", ...msg.split("\n"), "----"].map(s => `[jsTest] ${s}`);
+    print(`\n\n${msgs.join("\n")}\n\n`);
 };
 
 jsTest = {};
@@ -260,7 +352,7 @@ jsTest.authenticate = function(conn) {
             // back into authenticate.
             conn.authenticated = true;
             print("Authenticating as user " + jsTestOptions().authUser + " with mechanism " +
-                  DB.prototype._defaultAuthenticationMechanism + " on connection: " + conn);
+                  DB.prototype._getDefaultAuthenticationMechanism() + " on connection: " + conn);
             conn.authenticated = conn.getDB(jsTestOptions().authenticationDatabase).auth({
                 user: jsTestOptions().authUser,
                 pwd: jsTestOptions().authPassword,
@@ -278,7 +370,15 @@ jsTest.authenticateNodes = function(nodes) {
     assert.soonNoExcept(function() {
         for (var i = 0; i < nodes.length; i++) {
             // Don't try to authenticate to arbiters
-            res = nodes[i].getDB("admin").runCommand({replSetGetStatus: 1});
+            try {
+                res = nodes[i].getDB("admin").runCommand({replSetGetStatus: 1});
+            } catch (e) {
+                // ReplicaSet tests which don't use auth are allowed to have nodes crash during
+                // startup. To allow tests which use to behavior to work with auth,
+                // attempting authentication against a dead node should be non-fatal.
+                print("Caught exception getting replSetStatus while authenticating: " + e);
+                continue;
+            }
             if (res.myState == 7) {
                 continue;
             }
@@ -428,24 +528,45 @@ isMasterStatePrompt = function(isMasterResponse) {
     return state + '> ';
 };
 
-if (typeof(_useWriteCommandsDefault) == 'undefined') {
-    // This is for cases when the v8 engine is used other than the mongo shell, like map reduce.
-    _useWriteCommandsDefault = function() {
+if (typeof _useWriteCommandsDefault === "undefined") {
+    // We ensure the _useWriteCommandsDefault() function is always defined, in case the JavaScript
+    // engine is being used from someplace other than the mongo shell (e.g. map-reduce).
+    _useWriteCommandsDefault = function _useWriteCommandsDefault() {
         return false;
     };
 }
 
-if (typeof(_writeMode) == 'undefined') {
-    // This is for cases when the v8 engine is used other than the mongo shell, like map reduce.
-    _writeMode = function() {
+if (typeof _writeMode === "undefined") {
+    // We ensure the _writeMode() function is always defined, in case the JavaScript engine is being
+    // used from someplace other than the mongo shell (e.g. map-reduce).
+    _writeMode = function _writeMode() {
         return "commands";
     };
 }
 
-if (typeof(_readMode) == 'undefined') {
-    // This is for cases when the v8 engine is used other than the mongo shell, like map reduce.
-    _readMode = function() {
+if (typeof _readMode === "undefined") {
+    // We ensure the _readMode() function is always defined, in case the JavaScript engine is being
+    // used from someplace other than the mongo shell (e.g. map-reduce).
+    _readMode = function _readMode() {
         return "legacy";
+    };
+}
+
+if (typeof _shouldRetryWrites === 'undefined') {
+    // We ensure the _shouldRetryWrites() function is always defined, in case the JavaScript engine
+    // is being used from someplace other than the mongo shell (e.g. map-reduce).
+    _shouldRetryWrites = function _shouldRetryWrites() {
+        return false;
+    };
+}
+
+if (typeof _shouldUseImplicitSessions === 'undefined') {
+    // We ensure the _shouldUseImplicitSessions() function is always defined, in case the JavaScript
+    // engine is being used from someplace other than the mongo shell (e.g. map-reduce). If the
+    // function was not defined, implicit sessions are disabled to prevent unnecessary sessions from
+    // being created.
+    _shouldUseImplicitSessions = function _shouldUseImplicitSessions() {
+        return false;
     };
 }
 
@@ -655,7 +776,7 @@ shellHelper.use = function(dbname) {
         print("bad use parameter");
         return;
     }
-    db = db.getMongo().getDB(dbname);
+    db = db.getSiblingDB(dbname);
     print("switched to db " + db.getName());
 };
 
@@ -752,7 +873,7 @@ shellHelper.show = function(what) {
     }
 
     if (what == "dbs" || what == "databases") {
-        var dbs = db.getMongo().getDBs();
+        var dbs = db.getMongo().getDBs(db.getSession());
         var dbinfo = [];
         var maxNameLength = 0;
         var maxGbDigits = 0;
@@ -889,8 +1010,73 @@ shellHelper.show = function(what) {
         }
     }
 
+    if (what == "freeMonitoring") {
+        var dbDeclared, ex;
+        try {
+            // !!db essentially casts db to a boolean
+            // Will throw a reference exception if db hasn't been declared.
+            dbDeclared = !!db;
+        } catch (ex) {
+            dbDeclared = false;
+        }
+
+        if (dbDeclared) {
+            const freemonStatus = db.adminCommand({getFreeMonitoringStatus: 1});
+
+            if (freemonStatus.ok) {
+                if (freemonStatus.state == 'enabled' &&
+                    freemonStatus.hasOwnProperty('userReminder')) {
+                    print("---");
+                    print(freemonStatus.userReminder);
+                    print("---");
+                } else if (freemonStatus.state === 'undecided') {
+                    print(
+                        "---\n" +
+                        "Enable MongoDB's free cloud-based monitoring service, which will then receive and display\n" +
+                        "metrics about your deployment (disk utilization, CPU, operation statistics, etc).\n" +
+                        "\n" +
+                        "The monitoring data will be available on a MongoDB website with a unique URL accessible to you\n" +
+                        "and anyone you share the URL with. MongoDB may use this information to make product\n" +
+                        "improvements and to suggest MongoDB products and deployment options to you.\n" +
+                        "\n" +
+                        "To enable free monitoring, run the following command: db.enableFreeMonitoring()\n" +
+                        "To permanently disable this reminder, run the following command: db.disableFreeMonitoring()\n" +
+                        "---\n");
+                }
+            }
+
+            return "";
+        } else {
+            print("Cannot show freeMonitoring, \"db\" is not set");
+            return "";
+        }
+    }
+
     throw Error("don't know how to show [" + what + "]");
 
+};
+
+__promptWrapper__ = function(promptFunction) {
+    // Call promptFunction directly if the global "db" is not defined, e.g. --nodb.
+    if (typeof db === 'undefined' || !(db instanceof DB)) {
+        __prompt__ = promptFunction();
+        return;
+    }
+
+    // Stash the global "db" for the prompt function to make sure the session
+    // of the global "db" isn't accessed by the prompt function.
+    let originalDB = db;
+    try {
+        db = originalDB.getMongo().getDB(originalDB.getName());
+        // Setting db._session to be a _DummyDriverSession instance makes it so that
+        // a logical session id isn't included in the isMaster and replSetGetStatus
+        // commands and therefore won't interfere with the session associated with the
+        // global "db" object.
+        db._session = new _DummyDriverSession(db.getMongo());
+        __prompt__ = promptFunction();
+    } finally {
+        db = originalDB;
+    }
 };
 
 Math.sigFig = function(x, N) {
@@ -1180,7 +1366,7 @@ rs._runCmd = function(c) {
     try {
         res = db.adminCommand(c);
     } catch (e) {
-        if (("" + e).indexOf("error doing query") >= 0) {
+        if (isNetworkError(e)) {
             // closed connection.  reconnect.
             db.getLastErrorObj();
             var o = db.getLastErrorObj();
@@ -1317,40 +1503,29 @@ rs.debug.getLastOpWritten = function(server) {
 };
 
 /**
- * Compares optimes. Returns -1 if ot1 is 'earlier' than ot2, 1 if 'later' and 0 if equal.
- *
- * Note: Since Protocol Version 1 was introduced for replication, 'optimes'
- * can come in two different formats. This function will throw an error when the opTime
- * passed do not have the same protocol version.
- *
- * Optime Formats:
- * PV0: Timestamp
- * PV1: {ts:Timestamp, t:NumberLong}
+ * Compares OpTimes in the format {ts:Timestamp, t:NumberLong}.
+ * Returns -1 if ot1 is 'earlier' than ot2, 1 if 'later' and 0 if equal.
  */
 rs.compareOpTimes = function(ot1, ot2) {
-    function _isOptimeV1(optime) {
-        return (optime.hasOwnProperty("ts") && optime.hasOwnProperty("t"));
+
+    function _isValidOptime(opTime) {
+        let timestampIsValid = (opTime.hasOwnProperty("ts") && (opTime.ts !== Timestamp(0, 0)));
+        let termIsValid = (opTime.hasOwnProperty("t") && (opTime.t != -1));
+
+        return timestampIsValid && termIsValid;
     }
 
-    // Make sure both optimes have a timestamp and a term.
-    var ot1 = _isOptimeV1(ot1) ? ot1 : {ts: ot1, t: NumberLong(-1)};
-    var ot2 = _isOptimeV1(ot2) ? ot2 : {ts: ot2, t: NumberLong(-1)};
-
-    if ((ot1.t == -1 && ot2.t != -1) || (ot1.t != -1 && ot2.t == -1)) {
-        throw Error('cannot compare optimes between different protocol versions');
+    if (!_isValidOptime(ot1) || !_isValidOptime(ot2)) {
+        throw Error("invalid optimes, received: " + tojson(ot1) + " and " + tojson(ot2));
     }
 
-    if (!friendlyEqual(ot1.t, ot2.t)) {
-        if (ot1.t < ot2.t) {
-            return -1;
-        } else {
-            return 1;
-        }
+    if (ot1.t > ot2.t) {
+        return 1;
+    } else if (ot1.t < ot2.t) {
+        return -1;
+    } else {
+        return timestampCmp(ot1.ts, ot2.ts);
     }
-    // else equal terms, so proceed to compare timestamp component.
-
-    // Otherwise, choose the optime with the lower timestamp.
-    return timestampCmp(ot1.ts, ot2.ts);
 };
 
 help = shellHelper.help = function(x) {

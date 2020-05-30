@@ -27,6 +27,8 @@
  *    then also delete it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/dbtests/mock/mock_dbclient_cursor.h"
 
 namespace mongo {
@@ -34,7 +36,7 @@ MockDBClientCursor::MockDBClientCursor(mongo::DBClientBase* client,
                                        const mongo::BSONArray& resultSet)
     : mongo::DBClientCursor(client, "", 0, 0, 0) {
     _resultSet = resultSet.copy();
-    _cursor.reset(new mongo::DBClientMockCursor(BSONArray(_resultSet)));
+    _cursor.reset(new mongo::DBClientMockCursor(client, BSONArray(_resultSet)));
 }
 
 bool MockDBClientCursor::more() {

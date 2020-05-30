@@ -29,9 +29,9 @@
 
 #include <vector>
 
+#include "mongo/bson/mutable/element.h"
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
-#include "mongo/db/auth/privilege_parser.h"
 #include "mongo/db/auth/resource_pattern.h"
 
 namespace mongo {
@@ -52,6 +52,16 @@ public:
      */
     static void addPrivilegeToPrivilegeVector(PrivilegeVector* privileges,
                                               const Privilege& privilegeToAdd);
+
+    static void addPrivilegesToPrivilegeVector(PrivilegeVector* privileges,
+                                               const PrivilegeVector& privilegesToAdd);
+
+    /**
+     * Takes a vector of privileges and fills the output param "resultArray" with a BSON array
+     * representation of the privileges.
+     */
+    static Status getBSONForPrivileges(const PrivilegeVector& privileges,
+                                       mutablebson::Element resultArray);
 
 
     Privilege(){};

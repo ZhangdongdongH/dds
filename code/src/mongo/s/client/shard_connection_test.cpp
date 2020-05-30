@@ -25,22 +25,15 @@
  *    then also delete it in the license file.
  */
 
-#include <cstdint>
+#include "mongo/platform/basic.h"
+
 #include <vector>
 
-#include "mongo/base/init.h"
-#include "mongo/client/connpool.h"
-#include "mongo/db/auth/authorization_manager.h"
-#include "mongo/db/auth/authorization_manager_global.h"
-#include "mongo/db/auth/authz_manager_external_state_mock.h"
 #include "mongo/db/client.h"
-#include "mongo/db/service_context.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/s/client/shard_connection.h"
-#include "mongo/stdx/memory.h"
-#include "mongo/stdx/thread.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/socket_exception.h"
 
@@ -53,20 +46,12 @@
 namespace mongo {
 namespace {
 
-using std::string;
-using std::vector;
+const std::string TARGET_HOST = "$dummy:27017";
 
-const string TARGET_HOST = "$dummy:27017";
-
-/**
- * Warning: cannot run in parallel
- */
-class ShardConnFixture : public mongo::unittest::Test {
+class ShardConnFixture : public ServiceContextTest {
 public:
     void setUp() {
-        if (!haveClient()) {
-            Client::initThread("ShardConnFixture", getGlobalServiceContext(), NULL);
-        }
+        Client::initThreadIfNotAlready("ShardConnFixture");
         _maxPoolSizePerHost = mongo::shardConnectionPool.getMaxPoolSize();
 
         mongo::ConnectionString::setConnectionHook(
@@ -113,38 +98,42 @@ protected:
     void checkNewConns(void (*checkFunc)(uint64_t, uint64_t),
                        uint64_t arg2,
                        size_t newConnsToCreate) {
-        vector<ShardConnection*> newConnList;
+        // The check below creates new connections and tries to differentiate them from older ones
+        // using the creation timestamp. On certain hardware the clock resolution is not high enough
+        // and the new connections end up getting the same time, which makes the test unreliable.
+        // Adding the sleep below makes the test more robust.
+        //
+        // A more proper solution would be to use a MockTimeSource and explicitly control the time,
+        // but since this test supports legacy functionality only used by map/reduce we won't spend
+        // time rewriting it.
+        sleepmillis(5);
+
+        std::vector<std::unique_ptr<ShardConnection>> newConnList;
         for (size_t x = 0; x < newConnsToCreate; x++) {
-            ShardConnection* newConn =
-                new ShardConnection(ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
+            auto newConn = std::make_unique<ShardConnection>(
+                ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
             checkFunc(newConn->get()->getSockCreationMicroSec(), arg2);
-            newConnList.push_back(newConn);
+            newConnList.emplace_back(std::move(newConn));
         }
 
         const uint64_t oldCreationTime = mongo::curTimeMicros64();
 
-        for (vector<ShardConnection*>::iterator iter = newConnList.begin();
-             iter != newConnList.end();
-             ++iter) {
-            (*iter)->done();
-            delete *iter;
+        for (auto& conn : newConnList) {
+            conn->done();
         }
 
         newConnList.clear();
 
         // Check that connections created after the purge was put back to the pool.
         for (size_t x = 0; x < newConnsToCreate; x++) {
-            ShardConnection* newConn =
-                new ShardConnection(ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
+            auto newConn = std::make_unique<ShardConnection>(
+                ConnectionString(HostAndPort(TARGET_HOST)), "test.user");
             ASSERT_LESS_THAN(newConn->get()->getSockCreationMicroSec(), oldCreationTime);
-            newConnList.push_back(newConn);
+            newConnList.emplace_back(std::move(newConn));
         }
 
-        for (vector<ShardConnection*>::iterator iter = newConnList.begin();
-             iter != newConnList.end();
-             ++iter) {
-            (*iter)->done();
-            delete *iter;
+        for (auto& conn : newConnList) {
+            conn->done();
         }
     }
 
@@ -180,7 +169,7 @@ TEST_F(ShardConnFixture, InvalidateBadConnInPool) {
 
     try {
         conn2.get()->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+    } catch (const mongo::NetworkException&) {
     }
 
     conn2.done();
@@ -199,7 +188,7 @@ TEST_F(ShardConnFixture, DontReturnKnownBadConnToPool) {
 
     try {
         conn3.get()->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+    } catch (const mongo::NetworkException&) {
     }
 
     restartServer();
@@ -222,7 +211,7 @@ TEST_F(ShardConnFixture, BadConnClearsPoolWhenKilled) {
 
     try {
         conn3.get()->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+    } catch (const mongo::NetworkException&) {
     }
 
     restartServer();
@@ -275,7 +264,7 @@ TEST_F(ShardConnFixture, InvalidateBadConnEvenWhenPoolIsFull) {
 
     try {
         conn2.get()->query("test.user", mongo::Query());
-    } catch (const mongo::SocketException&) {
+    } catch (const mongo::NetworkException&) {
     }
 
     conn2.done();

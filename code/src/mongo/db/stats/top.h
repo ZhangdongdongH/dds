@@ -35,7 +35,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/stats/operation_latency_histogram.h"
 #include "mongo/util/concurrency/mutex.h"
-#include "mongo/util/net/message.h"
 #include "mongo/util/string_map.h"
 
 namespace mongo {
@@ -84,13 +83,19 @@ public:
         OperationLatencyHistogram opLatencyHistogram;
     };
 
+    enum class LockType {
+        ReadLocked,
+        WriteLocked,
+        NotLocked,
+    };
+
     typedef StringMap<CollectionData> UsageMap;
 
 public:
-    void record(OperationContext* txn,
+    void record(OperationContext* opCtx,
                 StringData ns,
                 LogicalOp logicalOp,
-                int lockType,
+                LockType lockType,
                 long long micros,
                 bool command,
                 Command::ReadWriteType readWriteType);
@@ -107,11 +112,16 @@ public:
     void appendLatencyStats(StringData ns, bool includeHistograms, BSONObjBuilder* builder);
 
     /**
-     * Increments the global histogram.
+     * Increments the global histogram only if the operation came from a user.
      */
-    void incrementGlobalLatencyStats(OperationContext* txn,
+    void incrementGlobalLatencyStats(OperationContext* opCtx,
                                      uint64_t latency,
                                      Command::ReadWriteType readWriteType);
+
+    /**
+     * Increments the global transactions histogram.
+     */
+    void incrementGlobalTransactionLatencyStats(uint64_t latency);
 
     /**
      * Appends the global latency statistics.
@@ -123,14 +133,14 @@ private:
 
     void _appendStatsEntry(BSONObjBuilder& b, const char* statsName, const UsageData& map) const;
 
-    void _record(OperationContext* txn,
+    void _record(OperationContext* opCtx,
                  CollectionData& c,
                  LogicalOp logicalOp,
-                 int lockType,
+                 LockType lockType,
                  long long micros,
                  Command::ReadWriteType readWriteType);
 
-    void _incrementHistogram(OperationContext* txn,
+    void _incrementHistogram(OperationContext* opCtx,
                              long long latency,
                              OperationLatencyHistogram* histogram,
                              Command::ReadWriteType readWriteType);

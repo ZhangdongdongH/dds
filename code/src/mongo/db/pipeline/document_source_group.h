@@ -38,7 +38,7 @@
 
 namespace mongo {
 
-class DocumentSourceGroup final : public DocumentSource, public SplittableDocumentSource {
+class DocumentSourceGroup final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
     using Accumulators = std::vector<boost::intrusive_ptr<Accumulator>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
@@ -48,9 +48,8 @@ public:
     // Virtuals from DocumentSource.
     boost::intrusive_ptr<DocumentSource> optimize() final;
     GetDepsReturn getDependencies(DepsTracker* deps) const final;
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
     GetNextResult getNext() final;
-    void dispose() final;
     const char* getSourceName() const final;
     BSONObjSet getOutputSorts() final;
 
@@ -61,15 +60,23 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const boost::intrusive_ptr<Expression>& groupByExpression,
         std::vector<AccumulationStatement> accumulationStatements,
-        Variables::Id numVariables,
         size_t maxMemoryUsageBytes = kDefaultMaxMemoryUsageBytes);
 
     /**
-     * Parses 'elem' into a $group stage, or throws a UserException if 'elem' was an invalid
+     * Parses 'elem' into a $group stage, or throws a AssertionException if 'elem' was an invalid
      * specification.
      */
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kBlocking,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kWritesTmpData,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
+    }
 
     /**
      * Add an accumulator, which will become a field in each Document that results from grouping.
@@ -92,12 +99,12 @@ public:
         return _streaming;
     }
 
-    // Virtuals for SplittableDocumentSource.
+    // Virtuals for NeedsMergerDocumentSource.
     boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final;
 
 protected:
-    void doInjectExpressionContext() final;
+    void doDispose() final;
 
 private:
     explicit DocumentSourceGroup(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
@@ -142,7 +149,7 @@ private:
     /**
      * Computes the internal representation of the group key.
      */
-    Value computeId(Variables* vars);
+    Value computeId(const Document& root);
 
     /**
      * Converts the internal representation of the group key to the _id shape specified by the
@@ -150,20 +157,11 @@ private:
      */
     Value expandId(const Value& val);
 
-    /**
-     * 'vFieldName' contains the field names for the result documents, 'vpAccumulatorFactory'
-     * contains the accumulator factories for the result documents, and 'vpExpression' contains the
-     * common expressions used by each instance of each accumulator in order to find the right-hand
-     * side of what gets added to the accumulator. These three vectors parallel each other.
-     */
-    std::vector<std::string> vFieldName;
-    std::vector<Accumulator::Factory> vpAccumulatorFactory;
-    std::vector<boost::intrusive_ptr<Expression>> vpExpression;
+    std::vector<AccumulationStatement> _accumulatedFields;
 
     bool _doingMerge;
     size_t _memoryUsageBytes = 0;
     size_t _maxMemoryUsageBytes;
-    std::unique_ptr<Variables> _variables;
     std::vector<std::string> _idFieldNames;  // used when id is a document
     std::vector<boost::intrusive_ptr<Expression>> _idExpressions;
 
@@ -187,7 +185,7 @@ private:
 
     // Only used when '_spilled' is true.
     std::unique_ptr<Sorter<Value, Value>::Iterator> _sorterIterator;
-    const bool _extSortAllowed;
+    const bool _allowDiskUse;
 
     std::pair<Value, Value> _firstPartOfNextGroup;
     // Only used when '_sorted' is true.

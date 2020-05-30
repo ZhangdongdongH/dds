@@ -30,12 +30,14 @@
 
 #include "mongo/platform/basic.h"
 
+#include <memory>
 
+#include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/catalog/index_catalog_entry.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/json.h"
-#include "mongo/db/operation_context_noop.h"
+#include "mongo/db/storage/kv/kv_prefix.h"
 #include "mongo/db/storage/sorted_data_interface_test_harness.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_index.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
@@ -47,60 +49,9 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
 using std::string;
-
-class MyHarnessHelper final : public HarnessHelper {
-public:
-    MyHarnessHelper() : _dbpath("wt_test"), _conn(NULL) {
-        const char* config = "create,cache_size=1G,";
-        int ret = wiredtiger_open(_dbpath.path().c_str(), NULL, config, &_conn);
-        invariantWTOK(ret);
-
-        _sessionCache = new WiredTigerSessionCache(_conn);
-    }
-
-    ~MyHarnessHelper() final {
-        delete _sessionCache;
-        _conn->close(_conn, NULL);
-    }
-
-    std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) final {
-        std::string ns = "test.wt";
-        OperationContextNoop txn(newRecoveryUnit().release());
-
-        BSONObj spec = BSON("key" << BSON("a" << 1) << "name"
-                                  << "testIndex"
-                                  << "ns"
-                                  << ns);
-
-        IndexDescriptor desc(NULL, "", spec);
-
-        StatusWith<std::string> result =
-            WiredTigerIndex::generateCreateString(kWiredTigerEngineName, "", "", desc);
-        ASSERT_OK(result.getStatus());
-
-        string uri = "table:" + ns;
-        invariantWTOK(WiredTigerIndex::Create(&txn, uri, result.getValue()));
-
-        if (unique)
-            return stdx::make_unique<WiredTigerIndexUnique>(&txn, uri, &desc);
-        return stdx::make_unique<WiredTigerIndexStandard>(&txn, uri, &desc);
-    }
-
-    std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
-        return stdx::make_unique<WiredTigerRecoveryUnit>(_sessionCache);
-    }
-
-private:
-    unittest::TempDir _dbpath;
-    WT_CONNECTION* _conn;
-    WiredTigerSessionCache* _sessionCache;
-};
-
-std::unique_ptr<HarnessHelper> newHarnessHelper() {
-    return stdx::make_unique<MyHarnessHelper>();
-}
 
 TEST(WiredTigerIndexTest, GenerateCreateStringEmptyDocument) {
     BSONObj spec = fromjson("{}");
@@ -142,4 +93,5 @@ TEST(WiredTigerIndexTest, GenerateCreateStringValidConfigStringOption) {
     ASSERT_EQ(WiredTigerIndex::parseIndexOptions(spec), std::string("prefix_compression=true,"));
 }
 
+}  // namespace
 }  // namespace mongo

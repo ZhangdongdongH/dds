@@ -63,7 +63,6 @@ public:
                        StringData applicationName,
                        double so_timeout = 0,
                        MongoURI uri = {});
-    virtual ~DBClientReplicaSet();
 
     /**
      * Returns false if no member of the set were reachable. This object
@@ -108,7 +107,7 @@ public:
 
     virtual void update(const std::string& ns, Query query, BSONObj obj, int flags);
 
-    virtual void killCursor(long long cursorID);
+    virtual void killCursor(const NamespaceString& ns, long long cursorID);
 
     // ---- access raw connections ----
 
@@ -132,9 +131,9 @@ public:
     // ---- callback pieces -------
 
     virtual void say(Message& toSend, bool isRetry = false, std::string* actualServer = 0);
-    virtual bool recv(Message& toRecv);
-    virtual void checkResponse(const char* data,
-                               int nReturned,
+    virtual bool recv(Message& toRecv, int lastRequestId);
+    virtual void checkResponse(const std::vector<BSONObj>& batch,
+                               bool networkError,
                                bool* retry = NULL,
                                std::string* targetHost = NULL);
 
@@ -186,16 +185,11 @@ public:
         return true;
     }
 
-    rpc::UniqueReply runCommandWithMetadata(StringData database,
-                                            StringData command,
-                                            const BSONObj& metadata,
-                                            const BSONObj& commandArgs) final;
-
-    std::tuple<rpc::UniqueReply, DBClientWithCommands*> runCommandWithMetadataAndTarget(
-        StringData database,
-        StringData command,
-        const BSONObj& metadata,
-        const BSONObj& commandArgs) final;
+    using DBClientBase::runCommandWithTarget;
+    std::pair<rpc::UniqueReply, DBClientBase*> runCommandWithTarget(OpMsgRequest request) final;
+    std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> runCommandWithTarget(
+        OpMsgRequest request, std::shared_ptr<DBClientBase> me) final;
+    DBClientBase* runFireAndForgetCommand(OpMsgRequest request) final;
 
     void setRequestMetadataWriter(rpc::RequestMetadataWriter writer) final;
 
@@ -224,6 +218,14 @@ public:
      * returning secondary connections to the pool.
      */
     virtual void reset();
+
+    bool isReplicaSetMember() const override {
+        return true;
+    }
+
+    bool isMongos() const override {
+        return false;
+    }
 
     /**
      * @bool setting if true, DBClientReplicaSet connections will make sure that secondary
@@ -303,7 +305,7 @@ private:
     std::shared_ptr<ReplicaSetMonitor> _rsm;
 
     HostAndPort _masterHost;
-    std::unique_ptr<DBClientConnection> _master;
+    std::shared_ptr<DBClientConnection> _master;
 
     // Last used host in a slaveOk query (can be a primary).
     HostAndPort _lastSlaveOkHost;
@@ -311,7 +313,7 @@ private:
     // Connection can either be owned here or returned to the connection pool. Note that
     // if connection is primary, it is owned by _master so it is incorrect to return
     // it to the pool.
-    std::unique_ptr<DBClientConnection> _lastSlaveOkConn;
+    std::shared_ptr<DBClientConnection> _lastSlaveOkConn;
     std::shared_ptr<ReadPreferenceSetting> _lastReadPref;
 
     double _so_timeout;

@@ -41,7 +41,7 @@ namespace mongo {
 
 class ListOfMatchExpression : public MatchExpression {
 public:
-    ListOfMatchExpression(MatchType type) : MatchExpression(type) {}
+    explicit ListOfMatchExpression(MatchType type) : MatchExpression(type) {}
     virtual ~ListOfMatchExpression();
 
     /**
@@ -65,9 +65,21 @@ public:
         return _expressions[i];
     }
 
+    /*
+     * Replaces the ith child with nullptr, and releases ownership of the child.
+     */
     virtual std::unique_ptr<MatchExpression> releaseChild(size_t i) {
         auto child = std::unique_ptr<MatchExpression>(_expressions[i]);
         _expressions[i] = nullptr;
+        return child;
+    }
+
+    /*
+     * Removes the ith child, and releases ownership of the child.
+     */
+    virtual std::unique_ptr<MatchExpression> removeChild(size_t i) {
+        auto child = std::unique_ptr<MatchExpression>(_expressions[i]);
+        _expressions.erase(_expressions.begin() + i);
         return child;
     }
 
@@ -77,22 +89,31 @@ public:
 
     bool equivalent(const MatchExpression* other) const;
 
+    MatchCategory getCategory() const final {
+        return MatchCategory::kLogical;
+    }
+
 protected:
     void _debugList(StringBuilder& debug, int level) const;
 
     void _listToBSON(BSONArrayBuilder* out) const;
 
 private:
+    ExpressionOptimizerFunc getOptimizer() const final;
+
     std::vector<MatchExpression*> _expressions;
 };
 
 class AndMatchExpression : public ListOfMatchExpression {
 public:
+    static constexpr StringData kName = "$and"_sd;
+
     AndMatchExpression() : ListOfMatchExpression(AND) {}
     virtual ~AndMatchExpression() {}
 
     virtual bool matches(const MatchableDocument* doc, MatchDetails* details = 0) const;
-    virtual bool matchesSingleElement(const BSONElement& e) const;
+
+    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     virtual std::unique_ptr<MatchExpression> shallowClone() const {
         std::unique_ptr<AndMatchExpression> self = stdx::make_unique<AndMatchExpression>();
@@ -108,15 +129,20 @@ public:
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
     virtual void serialize(BSONObjBuilder* out) const;
+
+    bool isTriviallyTrue() const final;
 };
 
 class OrMatchExpression : public ListOfMatchExpression {
 public:
+    static constexpr StringData kName = "$or"_sd;
+
     OrMatchExpression() : ListOfMatchExpression(OR) {}
     virtual ~OrMatchExpression() {}
 
     virtual bool matches(const MatchableDocument* doc, MatchDetails* details = 0) const;
-    virtual bool matchesSingleElement(const BSONElement& e) const;
+
+    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     virtual std::unique_ptr<MatchExpression> shallowClone() const {
         std::unique_ptr<OrMatchExpression> self = stdx::make_unique<OrMatchExpression>();
@@ -132,15 +158,20 @@ public:
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
     virtual void serialize(BSONObjBuilder* out) const;
+
+    bool isTriviallyFalse() const final;
 };
 
 class NorMatchExpression : public ListOfMatchExpression {
 public:
+    static constexpr StringData kName = "$nor"_sd;
+
     NorMatchExpression() : ListOfMatchExpression(NOR) {}
     virtual ~NorMatchExpression() {}
 
     virtual bool matches(const MatchableDocument* doc, MatchDetails* details = 0) const;
-    virtual bool matchesSingleElement(const BSONElement& e) const;
+
+    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     virtual std::unique_ptr<MatchExpression> shallowClone() const {
         std::unique_ptr<NorMatchExpression> self = stdx::make_unique<NorMatchExpression>();
@@ -158,21 +189,13 @@ public:
     virtual void serialize(BSONObjBuilder* out) const;
 };
 
-class NotMatchExpression : public MatchExpression {
+class NotMatchExpression final : public MatchExpression {
 public:
-    NotMatchExpression() : MatchExpression(NOT) {}
-    NotMatchExpression(MatchExpression* e) : MatchExpression(NOT), _exp(e) {}
-    /**
-     * @param exp - I own it, and will delete
-     */
-    virtual Status init(MatchExpression* exp) {
-        _exp.reset(exp);
-        return Status::OK();
-    }
+    explicit NotMatchExpression(MatchExpression* e) : MatchExpression(NOT), _exp(e) {}
 
     virtual std::unique_ptr<MatchExpression> shallowClone() const {
-        std::unique_ptr<NotMatchExpression> self = stdx::make_unique<NotMatchExpression>();
-        self->init(_exp->shallowClone().release());
+        std::unique_ptr<NotMatchExpression> self =
+            stdx::make_unique<NotMatchExpression>(_exp->shallowClone().release());
         if (getTag()) {
             self->setTag(getTag()->clone());
         }
@@ -183,8 +206,8 @@ public:
         return !_exp->matches(doc, NULL);
     }
 
-    virtual bool matchesSingleElement(const BSONElement& e) const {
-        return !_exp->matchesSingleElement(e);
+    bool matchesSingleElement(const BSONElement& elt, MatchDetails* details = nullptr) const final {
+        return !_exp->matchesSingleElement(elt, details);
     }
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
@@ -193,12 +216,16 @@ public:
 
     bool equivalent(const MatchExpression* other) const;
 
-    virtual size_t numChildren() const {
+    size_t numChildren() const final {
         return 1;
     }
 
-    virtual MatchExpression* getChild(size_t i) const {
+    MatchExpression* getChild(size_t i) const final {
         return _exp.get();
+    }
+
+    std::vector<MatchExpression*>* getChildVector() final {
+        return nullptr;
     }
 
     MatchExpression* releaseChild(void) {
@@ -209,7 +236,13 @@ public:
         _exp.reset(newChild);
     }
 
+    MatchCategory getCategory() const final {
+        return MatchCategory::kLogical;
+    }
+
 private:
+    ExpressionOptimizerFunc getOptimizer() const final;
+
     std::unique_ptr<MatchExpression> _exp;
 };
 }

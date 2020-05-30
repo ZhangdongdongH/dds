@@ -132,22 +132,15 @@ PlanStage::StageState MergeSortStage::doWork(WorkingSetID* out) {
             _noResultToMerge.pop();
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+            // The stage which produces a failure is responsible for allocating a working set member
+            // with error details.
+            invariant(WorkingSet::INVALID_ID != id);
             *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "merge sort stage failed to read in results from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-            }
+            return code;
+        } else if (PlanStage::NEED_YIELD == code) {
+            *out = id;
             return code;
         } else {
-            if (PlanStage::NEED_YIELD == code) {
-                *out = id;
-            }
-
             return code;
         }
     }
@@ -174,7 +167,7 @@ PlanStage::StageState MergeSortStage::doWork(WorkingSetID* out) {
 }
 
 
-void MergeSortStage::doInvalidate(OperationContext* txn,
+void MergeSortStage::doInvalidate(OperationContext* opCtx,
                                   const RecordId& dl,
                                   InvalidationType type) {
     // Go through our data and see if we're holding on to the invalidated RecordId.
@@ -184,7 +177,7 @@ void MergeSortStage::doInvalidate(OperationContext* txn,
         WorkingSetMember* member = _ws->get(valueIt->id);
         if (member->hasRecordId() && (dl == member->recordId)) {
             // Fetch the about-to-be mutated result.
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
             ++_specificStats.forcedFetches;
         }
     }

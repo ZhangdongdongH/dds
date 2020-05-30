@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoreplay
 
 import (
@@ -167,15 +173,18 @@ func newPreprocessCursorManager(opChan <-chan *RecordedOp) (*preprocessCursorMan
 	// Loop over all the ops found in the file
 	for op := range opChan {
 
+		opCode := op.RawOp.Header.OpCode
 		// If they don't produce a cursor, skip them
-		if op.RawOp.Header.OpCode != OpCodeGetMore && op.RawOp.Header.OpCode != OpCodeKillCursors &&
-			op.RawOp.Header.OpCode != OpCodeReply && op.RawOp.Header.OpCode != OpCodeCommandReply && op.RawOp.Header.OpCode != OpCodeCommand {
+		if opCode != OpCodeGetMore && opCode != OpCodeKillCursors &&
+			opCode != OpCodeReply && opCode != OpCodeCommandReply &&
+			opCode != OpCodeCommand && opCode != OpCodeMessage {
 			continue
 		}
-		if op.RawOp.Header.OpCode == OpCodeCommand {
+		if opCode == OpCodeCommand {
 			commandName, err := getCommandName(&op.RawOp)
 			if err != nil {
-				return nil, err
+				userInfoLogger.Logvf(DebugLow, "preprocessing op no command name: %v", err)
+				continue
 			}
 			if commandName != "getMore" && commandName != "getmore" {
 				continue
@@ -184,7 +193,8 @@ func newPreprocessCursorManager(opChan <-chan *RecordedOp) (*preprocessCursorMan
 
 		parsedOp, err := op.RawOp.Parse()
 		if err != nil {
-			return nil, err
+			userInfoLogger.Logvf(DebugLow, "preprocessing op parse error: %v", err)
+			continue
 		}
 
 		switch castOp := parsedOp.(type) {
@@ -194,7 +204,8 @@ func newPreprocessCursorManager(opChan <-chan *RecordedOp) (*preprocessCursorMan
 			// cursor
 			cursorIDs, err := castOp.getCursorIDs()
 			if err != nil {
-				return nil, err
+				userInfoLogger.Logvf(DebugLow, "preprocessing op no cursorId: %v", err)
+				continue
 			}
 			for _, cursorID := range cursorIDs {
 				if cursorID == 0 {
@@ -209,13 +220,17 @@ func newPreprocessCursorManager(opChan <-chan *RecordedOp) (*preprocessCursorMan
 			// cursor id.
 			cursorID, err := castOp.getCursorID()
 			if err != nil {
-				return nil, err
+				userInfoLogger.Logvf(DebugLow, "preprocessing op no cursorId: %v", err)
+				continue
 			}
 			if cursorID == 0 {
 				continue
 			}
 			cursorsSeen.trackReplied(cursorID, op)
-
+		default:
+			// In this case, parsing the op revealed it to not be a replyable
+			// or able to be rewritten
+			continue
 		}
 	}
 
@@ -228,7 +243,6 @@ func newPreprocessCursorManager(opChan <-chan *RecordedOp) (*preprocessCursorMan
 				replyConn:   counter.replyConn,
 			}
 			result.opToCursors[counter.opOriginKey] = cursorID
-
 		}
 	}
 	userInfoLogger.Logvf(Always, "Preprocess complete")

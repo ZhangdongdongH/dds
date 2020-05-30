@@ -28,6 +28,8 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
+
 #include "mongo/base/status.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/server_options.h"
@@ -44,13 +46,7 @@ class Environment;
 
 namespace moe = mongo::optionenvironment;
 
-struct MongodGlobalParams {
-    bool scriptingEnabled;  // --noscripting
-
-    MongodGlobalParams() : scriptingEnabled(true) {}
-};
-
-extern MongodGlobalParams mongodGlobalParams;
+extern bool skipShardingConfigurationChecks;
 
 Status addMongodOptions(moe::OptionSection* options);
 
@@ -83,7 +79,4 @@ Status canonicalizeMongodOptions(moe::Environment* params);
 StatusWith<repl::ReplSettings> parseMongodReplicationOptions(const moe::Environment& params);
 
 Status storeMongodOptions(const moe::Environment& params);
-
-void setGlobalReplSettings(const repl::ReplSettings& settings);
-const repl::ReplSettings& getGlobalReplSettings();
 }

@@ -103,8 +103,9 @@ int ProcessInfo::getVirtualMemorySize() {
     if ((kd = kvm_open(NULL, "/dev/null", "/dev/null", O_RDONLY, err)) == NULL)
         return -1;
     kinfo_proc* task = kvm_getprocs(kd, KERN_PROC_PID, _pid.toNative(), &cnt);
+    int vss = task->ki_size / 1024 / 1024;  // convert from bytes to MB
     kvm_close(kd);
-    return task->ki_size / 1024 / 1024;  // convert from bytes to MB
+    return vss;
 }
 
 int ProcessInfo::getResidentSize() {
@@ -114,8 +115,9 @@ int ProcessInfo::getResidentSize() {
     if ((kd = kvm_open(NULL, "/dev/null", "/dev/null", O_RDONLY, err)) == NULL)
         return -1;
     kinfo_proc* task = kvm_getprocs(kd, KERN_PROC_PID, _pid.toNative(), &cnt);
+    int rss = task->ki_rssize * sysconf(_SC_PAGESIZE) / 1024 / 1024;  // convert from pages to MB
     kvm_close(kd);
-    return task->ki_rssize * sysconf(_SC_PAGESIZE) / 1024 / 1024;  // convert from pages to MB
+    return rss;
 }
 
 double ProcessInfo::getSystemMemoryPressurePercentage() {
@@ -187,4 +189,12 @@ bool ProcessInfo::pagesInMemory(const void* start, size_t numPages, vector<char>
     }
     return true;
 }
+
+// get the number of CPUs available to the scheduler
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
+    long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
+    if (nprocs)
+        return nprocs;
+    return boost::none;
 }
+}  // namespace mongo

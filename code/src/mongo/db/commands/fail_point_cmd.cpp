@@ -35,13 +35,11 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-using std::string;
-using std::stringstream;
 
 /**
  * Command for modifying installed fail points.
@@ -64,63 +62,44 @@ using std::stringstream;
  *    data: <Object> // optional arbitrary object to store.
  * }
  */
-class FaultInjectCmd : public Command {
+class FaultInjectCmd : public BasicCommand {
 public:
-    FaultInjectCmd() : Command("configureFailPoint") {}
+    FaultInjectCmd() : BasicCommand("configureFailPoint") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-    // No auth needed because it only works when enabled via command line.
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
-
-    virtual void help(stringstream& h) const {
-        h << "modifies the settings of a fail point";
+    bool requiresAuth() const override {
+        return false;
     }
 
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        const string failPointName(cmdObj.firstElement().str());
-        FailPointRegistry* registry = getGlobalFailPointRegistry();
-        FailPoint* failPoint = registry->getFailPoint(failPointName);
+    // No auth needed because it only works when enabled via command line.
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {}
 
-        if (failPoint == NULL) {
-            errmsg = failPointName + " not found";
-            return false;
-        }
+    std::string help() const override {
+        return "modifies the settings of a fail point";
+    }
 
-        FailPoint::Mode mode;
-        FailPoint::ValType val;
-        BSONObj data;
-        std::tie(mode, val, data) = uassertStatusOK(FailPoint::parseBSON(cmdObj));
-
-        failPoint->setMode(mode, val, data);
-        warning() << "failpoint: " << failPointName << " set to: " << failPoint->toBSON();
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        const std::string failPointName(cmdObj.firstElement().str());
+        setGlobalFailPoint(failPointName, cmdObj);
 
         return true;
     }
 };
-MONGO_INITIALIZER(RegisterFaultInjectCmd)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
-        // Leaked intentionally: a Command registers itself when constructed.
-        new FaultInjectCmd();
-    }
-    return Status::OK();
-}
+MONGO_REGISTER_TEST_COMMAND(FaultInjectCmd);
 }

@@ -49,12 +49,16 @@ class ReplaceRootTransformation final
     : public DocumentSourceSingleDocumentTransformation::TransformerInterface {
 
 public:
-    ReplaceRootTransformation() {}
+    ReplaceRootTransformation(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : _expCtx(expCtx) {}
 
-    Document applyTransformation(Document input) final {
+    TransformerType getType() const final {
+        return TransformerType::kReplaceRoot;
+    }
+
+    Document applyTransformation(const Document& input) final {
         // Extract subdocument in the form of a Value.
-        _variables->setRoot(input);
-        Value newRoot = _newRoot->evaluate(_variables.get());
+        Value newRoot = _newRoot->evaluate(input);
 
         // The newRoot expression, if it exists, must evaluate to an object.
         uassert(40228,
@@ -76,8 +80,8 @@ public:
         _newRoot->optimize();
     }
 
-    Document serialize(bool explain) const final {
-        return Document{{"newRoot", _newRoot->serialize(explain)}};
+    Document serializeStageOptions(boost::optional<ExplainOptions::Verbosity> explain) const final {
+        return Document{{"newRoot", _newRoot->serialize(static_cast<bool>(explain))}};
     }
 
     DocumentSource::GetDepsReturn addDependencies(DepsTracker* deps) const final {
@@ -87,17 +91,14 @@ public:
         return DocumentSource::EXHAUSTIVE_FIELDS;
     }
 
-    void injectExpressionContext(const boost::intrusive_ptr<ExpressionContext>& pExpCtx) final {
-        _newRoot->injectExpressionContext(pExpCtx);
-    }
-
     DocumentSource::GetModPathsReturn getModifiedPaths() const final {
         // Replaces the entire root, so all paths are modified.
-        return {DocumentSource::GetModPathsReturn::Type::kAllPaths, std::set<std::string>{}};
+        return {DocumentSource::GetModPathsReturn::Type::kAllPaths, std::set<std::string>{}, {}};
     }
 
     // Create the replaceRoot transformer. Uasserts on invalid input.
-    static std::unique_ptr<ReplaceRootTransformation> create(const BSONElement& spec) {
+    static std::unique_ptr<ReplaceRootTransformation> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONElement& spec) {
 
         // Confirm that the stage was called with an object.
         uassert(40229,
@@ -107,16 +108,15 @@ public:
 
         // Create the pointer, parse the stage, and return.
         std::unique_ptr<ReplaceRootTransformation> parsedReplaceRoot =
-            stdx::make_unique<ReplaceRootTransformation>();
-        parsedReplaceRoot->parse(spec);
+            stdx::make_unique<ReplaceRootTransformation>(expCtx);
+        parsedReplaceRoot->parse(expCtx, spec);
         return parsedReplaceRoot;
     }
 
     // Check for valid replaceRoot options, and populate internal state variables.
-    void parse(const BSONElement& spec) {
+    void parse(const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONElement& spec) {
         // We need a VariablesParseState in order to parse the 'newRoot' expression.
-        VariablesIdGenerator idGenerator;
-        VariablesParseState vps(&idGenerator);
+        VariablesParseState vps = expCtx->variablesParseState;
 
         // Get the options from this stage. Currently the only option is newRoot.
         for (auto&& argument : spec.Obj()) {
@@ -124,7 +124,7 @@ public:
 
             if (argName == "newRoot") {
                 // Allows for field path, object, and other expressions.
-                _newRoot = Expression::parseOperand(argument, vps);
+                _newRoot = Expression::parseOperand(expCtx, argument, vps);
             } else {
                 uasserted(40230,
                           str::stream() << "unrecognized option to $replaceRoot stage: " << argName
@@ -134,12 +134,11 @@ public:
 
         // Check that there was a new root specified.
         uassert(40231, "no newRoot specified for the $replaceRoot stage", _newRoot);
-        _variables = stdx::make_unique<Variables>(idGenerator.getIdCount());
     }
 
 private:
-    std::unique_ptr<Variables> _variables;
     boost::intrusive_ptr<Expression> _newRoot;
+    const boost::intrusive_ptr<ExpressionContext> _expCtx;
 };
 
 REGISTER_DOCUMENT_SOURCE(replaceRoot,
@@ -149,8 +148,12 @@ REGISTER_DOCUMENT_SOURCE(replaceRoot,
 intrusive_ptr<DocumentSource> DocumentSourceReplaceRoot::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
 
+    const bool isIndependentOfAnyCollection = false;
     return new DocumentSourceSingleDocumentTransformation(
-        pExpCtx, ReplaceRootTransformation::create(elem), "$replaceRoot");
+        pExpCtx,
+        ReplaceRootTransformation::create(pExpCtx, elem),
+        "$replaceRoot",
+        isIndependentOfAnyCollection);
 }
 
 }  // namespace mongo

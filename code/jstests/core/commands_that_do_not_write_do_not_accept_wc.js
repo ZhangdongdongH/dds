@@ -2,6 +2,11 @@
  * This file tests commands that do not support write concern. It passes both valid and invalid
  * writeConcern fields to commands and expects the commands to fail with a writeConcernNotSupported
  * error.
+ *
+ * @tags: [
+ *   assumes_write_concern_unchanged,
+ *   does_not_support_stepdowns,
+ * ]
  */
 
 (function() {
@@ -12,7 +17,7 @@
 
     commands.push({count: collName, query: {type: 'oak'}});
 
-    commands.push({aggregate: collName, pipeline: [{$sort: {type: 1}}]});
+    commands.push({aggregate: collName, pipeline: [{$sort: {type: 1}}], cursor: {}});
 
     commands.push({
         mapReduce: collName,

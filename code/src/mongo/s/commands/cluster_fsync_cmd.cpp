@@ -38,41 +38,39 @@
 namespace mongo {
 namespace {
 
-class FsyncCommand : public Command {
+class FsyncCommand : public ErrmsgCommandDeprecated {
 public:
-    FsyncCommand() : Command("fsync", false, "fsync") {}
+    FsyncCommand() : ErrmsgCommandDeprecated("fsync") {}
 
-    virtual bool slaveOk() const {
+    std::string help() const override {
+        return "invoke fsync on all shards belonging to the cluster";
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool adminOnly() const {
-        return true;
-    }
-
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "invoke fsync on all shards belonging to the cluster";
-    }
-
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::fsync);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         if (cmdObj["lock"].trueValue()) {
             errmsg = "can't do lock through mongos";
             return false;
@@ -83,18 +81,19 @@ public:
         bool ok = true;
         int numFiles = 0;
 
+        auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
         std::vector<ShardId> shardIds;
-        grid.shardRegistry()->getAllShardIds(&shardIds);
+        shardRegistry->getAllShardIdsNoReload(&shardIds);
 
         for (const ShardId& shardId : shardIds) {
-            auto shardStatus = grid.shardRegistry()->getShard(txn, shardId);
+            auto shardStatus = shardRegistry->getShard(opCtx, shardId);
             if (!shardStatus.isOK()) {
                 continue;
             }
             const auto s = shardStatus.getValue();
 
             auto response = uassertStatusOK(s->runCommandWithFixedRetryAttempts(
-                txn,
+                opCtx,
                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                 "admin",
                 BSON("fsync" << 1),
@@ -114,6 +113,7 @@ public:
 
         result.append("numFiles", numFiles);
         result.append("all", sub.obj());
+
         return ok;
     }
 

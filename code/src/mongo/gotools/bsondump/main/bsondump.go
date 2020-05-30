@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Main package for the bsondump tool.
 package main
 
@@ -17,7 +23,7 @@ func main() {
 	bsonDumpOpts := &bsondump.BSONDumpOptions{}
 	opts.AddOptions(bsonDumpOpts)
 
-	args, err := opts.Parse()
+	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
 		log.Logvf(log.Always, "error parsing command line options: %v", err)
 		log.Logvf(log.Always, "try 'bsondump --help' for more information")

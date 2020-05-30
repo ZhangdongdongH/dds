@@ -28,196 +28,159 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/chunk_version.h"
-#include "mongo/s/client/shard.h"
+#include "mongo/s/shard_id.h"
 
 namespace mongo {
 
-class ChunkManager;
-class ChunkType;
-class OperationContext;
+class BSONObj;
 
 /**
-   config.chunks
-   { ns : "alleyinsider.fs.chunks" , min : {} , max : {} , server : "localhost:30001" }
-
-   x is in a shard iff
-   min <= x < max
+ * Represents a cache entry for a single Chunk. Owned by a RoutingTableHistory.
  */
-class Chunk {
-    MONGO_DISALLOW_COPYING(Chunk);
-
+class ChunkInfo {
 public:
-    enum SplitPointMode {
-        // Determines the split points that will make the current chunk smaller than
-        // the current chunk size setting. Gives empty result if chunk is not big enough.
-        normal,
-
-        // Will get a split which approximately splits the chunk into 2 halves,
-        // regardless of the size of the chunk.
-        atMedian,
-
-        // Behaves like normal, with additional special heuristics for "top chunks"
-        // (the 1 or 2 chunks in the extreme ends of the chunk key space).
-        autoSplitInternal
-    };
-
-    Chunk(OperationContext* txn, ChunkManager* manager, const ChunkType& from);
-
-    Chunk(ChunkManager* manager,
-          const BSONObj& min,
-          const BSONObj& max,
-          const ShardId& shardId,
-          ChunkVersion lastmod,
-          uint64_t initialDataWritten);
-
-    //
-    // chunk boundary support
-    //
+    explicit ChunkInfo(const ChunkType& from);
 
     const BSONObj& getMin() const {
-        return _min;
+        return _range.getMin();
     }
 
     const BSONObj& getMax() const {
-        return _max;
+        return _range.getMax();
     }
 
-    // Returns true if this chunk contains the given shard key, and false otherwise
-    //
-    // Note: this function takes an extracted *key*, not an original document
-    // (the point may be computed by, say, hashing a given field or projecting
-    //  to a subset of fields).
-    bool containsKey(const BSONObj& shardKey) const;
-
-    //
-    // chunk version support
-    //
-
-    void appendShortVersion(const char* name, BSONObjBuilder& b) const;
+    const ShardId& getShardIdAt(const boost::optional<Timestamp>& ts) const;
 
     ChunkVersion getLastmod() const {
         return _lastmod;
     }
 
-    //
-    // split support
-    //
-
-    /**
-     * Get/increment/set the estimation of how much data was written for this chunk.
-     */
-    uint64_t getBytesWritten() const;
-    void addBytesWritten(uint64_t bytesWrittenIncrement);
-    void setBytesWritten(uint64_t newBytesWritten);
-
-    /**
-     * if the amount of data written nears the max size of a shard
-     * then we check the real size, and if its too big, we split
-     * @return if something was split
-     */
-    bool splitIfShould(OperationContext* txn, long dataWritten);
-
-    /**
-     * Splits this chunk at a non-specificed split key to be chosen by the
-     * mongod holding this chunk.
-     *
-     * @param mode
-     * @param res the object containing details about the split execution
-     * @param resultingSplits the number of resulting split points. Set to NULL to ignore.
-     *
-     * @throws UserException
-     */
-    StatusWith<boost::optional<ChunkRange>> split(OperationContext* txn,
-                                                  SplitPointMode mode,
-                                                  size_t* resultingSplits) const;
-
-    /**
-     * marks this chunk as a jumbo chunk
-     * that means the chunk will be inelligble for migrates
-     */
-    void markAsJumbo(OperationContext* txn) const;
+    const auto& getHistory() const {
+        return _history;
+    }
 
     bool isJumbo() const {
         return _jumbo;
     }
 
-    //
-    // public constants
-    //
-
-    static const int MaxObjectPerChunk{250000};
-
-    //
-    // accessors and helpers
-    //
-
+    /**
+     * Returns a string represenation of the chunk for logging.
+     */
     std::string toString() const;
 
-    friend std::ostream& operator<<(std::ostream& out, const Chunk& c) {
-        return (out << c.toString());
+    // Returns true if this chunk contains the given shard key, and false otherwise
+    //
+    // Note: this function takes an extracted *key*, not an original document (the point may be
+    // computed by, say, hashing a given field or projecting to a subset of fields).
+    bool containsKey(const BSONObj& shardKey) const;
+
+    /**
+     * Get/increment/set the estimation of how much data was written for this chunk.
+     */
+    uint64_t getBytesWritten() const;
+    uint64_t addBytesWritten(uint64_t bytesWrittenIncrement);
+    void clearBytesWritten();
+
+    bool shouldSplit(uint64_t desiredChunkSize, bool minIsInf, bool maxIsInf) const;
+
+    /**
+     * Marks this chunk as jumbo. Only moves from false to true once and is used by the balancer.
+     */
+    void markAsJumbo();
+
+private:
+    const ChunkRange _range;
+
+    const ShardId _shardId;
+
+    const ChunkVersion _lastmod;
+
+    const std::vector<ChunkHistory> _history;
+
+    // Indicates whether this chunk should be treated as jumbo and not attempted to be moved or
+    // split
+    mutable bool _jumbo;
+
+    // Statistics for the approximate data written to this chunk
+    mutable uint64_t _dataWritten;
+};
+
+class Chunk {
+public:
+    // Test whether we should split once data * kSplitTestFactor > chunkSize (approximately)
+    static const uint64_t kSplitTestFactor = 5;
+
+    Chunk(ChunkInfo& chunkInfo, const boost::optional<Timestamp>& atClusterTime)
+        : _chunkInfo(chunkInfo), _atClusterTime(atClusterTime) {}
+
+    const BSONObj& getMin() const {
+        return _chunkInfo.getMin();
     }
 
-    // chunk equality is determined by comparing the min and max bounds of the chunk
-    bool operator==(const Chunk& s) const;
-    bool operator!=(const Chunk& s) const {
-        return !(*this == s);
+    const BSONObj& getMax() const {
+        return _chunkInfo.getMax();
     }
 
-    ShardId getShardId() const {
-        return _shardId;
+    const ShardId& getShardId() const {
+        return _chunkInfo.getShardIdAt(_atClusterTime);
     }
-    const ChunkManager* getManager() const {
-        return _manager;
+
+    ChunkVersion getLastmod() const {
+        return _chunkInfo.getLastmod();
+    }
+
+    const auto& getHistory() const {
+        return _chunkInfo.getHistory();
+    }
+
+    bool isJumbo() const {
+        return _chunkInfo.isJumbo();
+    }
+
+    /**
+     * Returns a string represenation of the chunk for logging.
+     */
+    std::string toString() const {
+        return _chunkInfo.toString();
+    }
+
+    // Returns true if this chunk contains the given shard key, and false otherwise
+    //
+    // Note: this function takes an extracted *key*, not an original document (the point may be
+    // computed by, say, hashing a given field or projecting to a subset of fields).
+    bool containsKey(const BSONObj& shardKey) const {
+        return _chunkInfo.containsKey(shardKey);
+    }
+
+    /**
+     * Get/increment/set the estimation of how much data was written for this chunk.
+     */
+    uint64_t getBytesWritten() const {
+        return _chunkInfo.getBytesWritten();
+    }
+    uint64_t addBytesWritten(uint64_t bytesWrittenIncrement) {
+        return _chunkInfo.addBytesWritten(bytesWrittenIncrement);
+    }
+    void clearBytesWritten() {
+        _chunkInfo.clearBytesWritten();
+    }
+
+    bool shouldSplit(uint64_t desiredChunkSize, bool minIsInf, bool maxIsInf) const {
+        return _chunkInfo.shouldSplit(desiredChunkSize, minIsInf, maxIsInf);
+    }
+
+    /**
+     * Marks this chunk as jumbo. Only moves from false to true once and is used by the balancer.
+     */
+    void markAsJumbo() {
+        _chunkInfo.markAsJumbo();
     }
 
 private:
-    /**
-     * Returns the connection string for the shard on which this chunk resides.
-     */
-    ConnectionString _getShardConnectionString(OperationContext* txn) const;
-
-    // if min/max key is pos/neg infinity
-    bool _minIsInf() const;
-    bool _maxIsInf() const;
-
-    // The chunk manager, which owns this chunk. Not owned by the chunk.
-    const ChunkManager* _manager;
-
-    BSONObj _min;
-    BSONObj _max;
-    ShardId _shardId;
-    const ChunkVersion _lastmod;
-    mutable bool _jumbo;
-
-    // Statistics for the approximate data written by this chunk
-    uint64_t _dataWritten;
-
-    // methods, etc..
-
-    /**
-     * Returns the split point that will result in one of the chunk having exactly one
-     * document. Also returns an empty document if the split point cannot be determined.
-     *
-     * @param doSplitAtLower determines which side of the split will have exactly one document.
-     *        True means that the split point chosen will be closer to the lower bound.
-     *
-     * Warning: this assumes that the shard key is not "special"- that is, the shardKeyPattern
-     *          is simply an ordered list of ascending/descending field names. Examples:
-     *          {a : 1, b : -1} is not special. {a : "hashed"} is.
-     */
-    BSONObj _getExtremeKey(OperationContext* txn, bool doSplitAtLower) const;
-
-    /**
-     * Determines the appropriate split points for this chunk.
-     *
-     * @param atMedian perform a single split at the middle of this chunk.
-     * @param splitPoints out parameter containing the chosen split points. Can be empty.
-     */
-    std::vector<BSONObj> _determineSplitPoints(OperationContext* txn, bool atMedian) const;
+    ChunkInfo& _chunkInfo;
+    const boost::optional<Timestamp> _atClusterTime;
 };
 
 }  // namespace mongo

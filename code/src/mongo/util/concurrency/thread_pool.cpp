@@ -35,6 +35,7 @@
 #include "mongo/base/status.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -156,8 +157,10 @@ void ThreadPool::_join_inlock(stdx::unique_lock<stdx::mutex>* lk) {
     });
     _setState_inlock(joining);
     ++_numIdleThreads;
-    while (!_pendingTasks.empty()) {
-        _doOneTask(lk);
+    if (!_pendingTasks.empty()) {
+        lk->unlock();
+        _drainPendingTasks();
+        lk->lock();
     }
     --_numIdleThreads;
     ThreadList threadsToJoin;
@@ -169,6 +172,22 @@ void ThreadPool::_join_inlock(stdx::unique_lock<stdx::mutex>* lk) {
     lk->lock();
     invariant(_state == joining);
     _setState_inlock(shutdownComplete);
+}
+
+void ThreadPool::_drainPendingTasks() {
+    // Tasks cannot be run inline because they can create OperationContexts and the join() caller
+    // may already have one associated with the thread.
+    stdx::thread cleanThread = stdx::thread([&] {
+        const std::string threadName = str::stream() << _options.threadNamePrefix
+                                                     << _nextThreadId++;
+        setThreadName(threadName);
+        _options.onCreateThread(threadName);
+        stdx::unique_lock<stdx::mutex> lock(_mutex);
+        while (!_pendingTasks.empty()) {
+            _doOneTask(&lock);
+        }
+    });
+    cleanThread.join();
 }
 
 Status ThreadPool::schedule(Task task) {
@@ -262,6 +281,7 @@ void ThreadPool::_consumeTasks() {
 
                 LOG(3) << "Not reaping because the earliest retirement date is "
                        << nextThreadRetirementDate;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait_until(lk, nextThreadRetirementDate.toSystemTimePoint());
             } else {
                 // Since the number of threads is not more than minThreads, this thread is not
@@ -270,6 +290,7 @@ void ThreadPool::_consumeTasks() {
                 // would be eligible for retirement once they had no work left to do.
                 LOG(3) << "waiting for work; I am one of " << _threads.size() << " thread(s);"
                        << " the minimum number of threads is " << _options.minThreads;
+                MONGO_IDLE_THREAD_BLOCK;
                 _workAvailable.wait(lk);
             }
             continue;
@@ -361,7 +382,7 @@ void ThreadPool::_startWorkerThread_inlock() {
     invariant(_threads.size() < _options.maxThreads);
     const std::string threadName = str::stream() << _options.threadNamePrefix << _nextThreadId++;
     try {
-        _threads.emplace_back(stdx::bind(&ThreadPool::_workerThreadBody, this, threadName));
+        _threads.emplace_back([this, threadName] { _workerThreadBody(this, threadName); });
         ++_numIdleThreads;
     } catch (const std::exception& ex) {
         error() << "Failed to start " << threadName << "; " << _threads.size()

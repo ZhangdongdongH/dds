@@ -121,9 +121,6 @@ void ConnectionString::_finishInit() {
             uassert(ErrorCodes::FailedToParse,
                     "Cannot specify a replica set name for a ConnectionString of type MASTER",
                     _setName.empty());
-            uassert(ErrorCodes::FailedToParse,
-                    "ConnectionStrings of type MASTER must contain exactly one server",
-                    _servers.size() == 1);
             break;
         case SET:
             uassert(ErrorCodes::FailedToParse,
@@ -218,6 +215,10 @@ StatusWith<ConnectionString> ConnectionString::parse(const std::string& url) {
     }
 
     return Status(ErrorCodes::FailedToParse, str::stream() << "invalid url [" << url << "]");
+}
+
+ConnectionString ConnectionString::deserialize(StringData url) {
+    return uassertStatusOK(parse(url.toString()));
 }
 
 std::string ConnectionString::typeToString(ConnectionType type) {

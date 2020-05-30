@@ -49,12 +49,12 @@ using stdx::make_unique;
 // static
 const char* FetchStage::kStageType = "FETCH";
 
-FetchStage::FetchStage(OperationContext* txn,
+FetchStage::FetchStage(OperationContext* opCtx,
                        WorkingSet* ws,
                        PlanStage* child,
                        const MatchExpression* filter,
                        const Collection* collection)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _ws(ws),
       _filter(filter),
@@ -120,7 +120,7 @@ PlanStage::StageState FetchStage::doWork(WorkingSetID* out) {
                     _ws->free(id);
                     return NEED_TIME;
                 }
-            } catch (const WriteConflictException& wce) {
+            } catch (const WriteConflictException&) {
                 // Ensure that the BSONObj underlying the WorkingSetMember is owned because it may
                 // be freed when we yield.
                 member->makeObjOwnedIfNeeded();
@@ -132,16 +132,10 @@ PlanStage::StageState FetchStage::doWork(WorkingSetID* out) {
 
         return returnIfMatches(member, id, out);
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "fetch stage failed to read in results from child";
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
         return status;
     } else if (PlanStage::NEED_YIELD == status) {
         *out = id;
@@ -170,14 +164,14 @@ void FetchStage::doReattachToOperationContext() {
         _cursor->reattachToOperationContext(getOpCtx());
 }
 
-void FetchStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void FetchStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // It's possible that the recordId getting invalidated is the one we're about to
     // fetch. In this case we do a "forced fetch" and put the WSM in owned object state.
     if (WorkingSet::INVALID_ID != _idRetrying) {
         WorkingSetMember* member = _ws->get(_idRetrying);
         if (member->hasRecordId() && (member->recordId == dl)) {
             // Fetch it now and kill the recordId.
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
         }
     }
 }

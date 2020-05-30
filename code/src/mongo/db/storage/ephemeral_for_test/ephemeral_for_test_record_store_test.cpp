@@ -1,5 +1,3 @@
-// ephemeral_for_test_record_store_test.cpp
-
 /**
  *    Copyright (C) 2014 MongoDB Inc.
  *
@@ -32,27 +30,41 @@
 
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store.h"
 
+#include "mongo/base/init.h"
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 #include "mongo/db/storage/record_store_test_harness.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
-class EphemeralForTestHarnessHelper final : public HarnessHelper {
+class EphemeralForTestHarnessHelper final : public RecordStoreHarnessHelper {
 public:
     EphemeralForTestHarnessHelper() {}
 
-    std::unique_ptr<RecordStore> newNonCappedRecordStore() final {
-        return stdx::make_unique<EphemeralForTestRecordStore>("a.b", &data);
-    }
-    std::unique_ptr<RecordStore> newCappedRecordStore(int64_t cappedSizeBytes,
-                                                      int64_t cappedMaxDocs) final {
-        return stdx::make_unique<EphemeralForTestRecordStore>(
-            "a.b", &data, true, cappedSizeBytes, cappedMaxDocs);
+    virtual std::unique_ptr<RecordStore> newNonCappedRecordStore() {
+        return newNonCappedRecordStore("a.b");
     }
 
-    RecoveryUnit* newRecoveryUnit() final {
-        return new EphemeralForTestRecoveryUnit();
+    virtual std::unique_ptr<RecordStore> newNonCappedRecordStore(const std::string& ns) {
+        return stdx::make_unique<EphemeralForTestRecordStore>(ns, &data);
+    }
+
+    virtual std::unique_ptr<RecordStore> newCappedRecordStore(int64_t cappedSizeBytes,
+                                                              int64_t cappedMaxDocs) {
+        return newCappedRecordStore("a.b", cappedSizeBytes, cappedMaxDocs);
+    }
+
+    virtual std::unique_ptr<RecordStore> newCappedRecordStore(const std::string& ns,
+                                                              int64_t cappedSizeBytes,
+                                                              int64_t cappedMaxDocs) final {
+        return stdx::make_unique<EphemeralForTestRecordStore>(
+            ns, &data, true, cappedSizeBytes, cappedMaxDocs);
+    }
+
+    std::unique_ptr<RecoveryUnit> newRecoveryUnit() final {
+        return stdx::make_unique<EphemeralForTestRecoveryUnit>();
     }
 
     bool supportsDocLocking() final {
@@ -62,7 +74,13 @@ public:
     std::shared_ptr<void> data;
 };
 
-std::unique_ptr<HarnessHelper> newHarnessHelper() {
+std::unique_ptr<HarnessHelper> makeHarnessHelper() {
     return stdx::make_unique<EphemeralForTestHarnessHelper>();
 }
+
+MONGO_INITIALIZER(RegisterHarnessFactory)(InitializerContext* const) {
+    mongo::registerHarnessHelperFactory(makeHarnessHelper);
+    return Status::OK();
 }
+}  // namespace
+}  // namespace mongo

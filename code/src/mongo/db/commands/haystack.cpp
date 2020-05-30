@@ -35,6 +35,7 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
@@ -43,6 +44,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/find_common.h"
 
 /**
@@ -58,23 +60,21 @@ namespace mongo {
 using std::string;
 using std::vector;
 
-class GeoHaystackSearchCommand : public Command {
+class GeoHaystackSearchCommand : public ErrmsgCommandDeprecated {
 public:
-    GeoHaystackSearchCommand() : Command("geoSearch") {}
+    GeoHaystackSearchCommand() : ErrmsgCommandDeprecated("geoSearch") {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    bool slaveOverrideOk() const {
-        return true;
-    }
-
-    bool supportsReadConcern() const final {
+    bool supportsReadConcern(const std::string& dbName,
+                             const BSONObj& cmdObj,
+                             repl::ReadConcernLevel level) const final {
         return true;
     }
 
@@ -88,21 +88,25 @@ public:
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::find);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        const NamespaceString nss = parseNsCollectionRequired(dbname, cmdObj);
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
+        const NamespaceString nss = CommandHelpers::parseNsCollectionRequired(dbname, cmdObj);
 
-        AutoGetCollectionForRead ctx(txn, nss.ns());
+        AutoGetCollectionForReadCommand ctx(opCtx, nss);
+
+        // Check whether we are allowed to read from this node after acquiring our locks.
+        auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+        uassertStatusOK(replCoord->checkCanServeReadsFor(
+            opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
         Collection* collection = ctx.getCollection();
         if (!collection) {
@@ -111,7 +115,7 @@ public:
         }
 
         vector<IndexDescriptor*> idxs;
-        collection->getIndexCatalog()->findIndexByType(txn, IndexNames::GEO_HAYSTACK, idxs);
+        collection->getIndexCatalog()->findIndexByType(opCtx, IndexNames::GEO_HAYSTACK, idxs);
         if (idxs.size() == 0) {
             errmsg = "no geoSearch index";
             return false;
@@ -136,7 +140,7 @@ public:
         IndexDescriptor* desc = idxs[0];
         HaystackAccessMethod* ham =
             static_cast<HaystackAccessMethod*>(collection->getIndexCatalog()->getIndex(desc));
-        ham->searchCommand(txn,
+        ham->searchCommand(opCtx,
                            collection,
                            nearElt.Obj(),
                            maxDistance.numberDouble(),

@@ -86,6 +86,19 @@ typedef std::string PlanID;
  *   This is done by QueryPlanner::tagAccordingToCache.
  */
 struct PlanCacheIndexTree {
+
+    /**
+     * An OrPushdown is the cached version of an OrPushdownTag::Destination. It indicates that this
+     * node is a predicate that can be used inside of a sibling indexed OR, to tighten index bounds
+     * or satisfy the first field in the index.
+     */
+    struct OrPushdown {
+        std::string indexName;
+        size_t position;
+        bool canCombineBounds;
+        std::deque<size_t> route;
+    };
+
     PlanCacheIndexTree() : entry(nullptr), index_pos(0), canCombineBounds(true) {}
 
     ~PlanCacheIndexTree() {
@@ -123,6 +136,8 @@ struct PlanCacheIndexTree {
     // and is used to ensure that bounds are correctly intersected and/or compounded when a query is
     // planned from the plan cache.
     bool canCombineBounds;
+
+    std::vector<OrPushdown> orPushdowns;
 };
 
 /**
@@ -252,6 +267,7 @@ public:
     BSONObj sort;
     BSONObj projection;
     BSONObj collation;
+    Date_t timeOfCreation;
 
     //
     // Performance stats
@@ -297,7 +313,9 @@ public:
      * Record solutions for query. Best plan is first element in list.
      * Each query in the cache will have more than 1 plan because we only
      * add queries which are considered by the multi plan runner (which happens
-     * only when the query planner generates multiple candidate plans).
+     * only when the query planner generates multiple candidate plans). Callers are responsible
+     * for passing the current time so that the time the plan cache entry was created is stored
+     * in the plan cache.
      *
      * Takes ownership of 'why'.
      *
@@ -306,7 +324,8 @@ public:
      */
     Status add(const CanonicalQuery& query,
                const std::vector<QuerySolution*>& solns,
-               PlanRankingDecision* why);
+               PlanRankingDecision* why,
+               Date_t now);
 
     /**
      * Look up the cached data access for the provided 'query'.  Used by the query planner
@@ -404,10 +423,6 @@ private:
 
     // Protects _cache.
     mutable stdx::mutex _cacheMutex;
-
-    // Counter for write notifications since initialization or last clear() invocation.  Starts
-    // at 0.
-    AtomicInt32 _writeOperations;
 
     // Full namespace of collection.
     std::string _ns;

@@ -40,34 +40,32 @@
 namespace mongo {
 namespace {
 
-class CmdShardingResetError : public Command {
+class CmdShardingResetError : public BasicCommand {
 public:
-    CmdShardingResetError() : Command("resetError", false, "reseterror") {}
+    CmdShardingResetError() : BasicCommand("resetError", "reseterror") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         // No auth required
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         LastError::get(cc()).reset();
 
-        const std::set<std::string>* shards = ClusterLastErrorInfo::get(cc()).getPrevShardHosts();
+        const std::set<std::string>* shards = ClusterLastErrorInfo::get(cc())->getPrevShardHosts();
 
         for (std::set<std::string>::const_iterator i = shards->begin(); i != shards->end(); i++) {
             const std::string shardName = *i;
@@ -77,7 +75,8 @@ public:
             BSONObj res;
 
             // Don't care about result from shards.
-            conn->runCommand(dbname, cmdObj, res);
+            conn->runCommand(
+                dbname, CommandHelpers::filterCommandRequestForPassthrough(cmdObj), res);
             conn.done();
         }
 

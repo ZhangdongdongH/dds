@@ -1,5 +1,3 @@
-// mmap_v1_engine.cpp
-
 /**
 *    Copyright (C) 2014 MongoDB Inc.
 *
@@ -36,7 +34,13 @@
 #include <boost/filesystem/path.hpp>
 #include <fstream>
 
+#ifdef __linux__
+#include <sys/sysmacros.h>
+#endif
+
+#include "mongo/db/client.h"
 #include "mongo/db/mongod_options.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/mmap_v1/data_file_sync.h"
 #include "mongo/db/storage/mmap_v1/dur.h"
 #include "mongo/db/storage/mmap_v1/dur_journal.h"
@@ -60,8 +64,6 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
-MMAPV1Options mmapv1GlobalOptions;
-
 namespace {
 
 #if !defined(__sun)
@@ -71,6 +73,11 @@ void checkForUncleanShutdown(MMAPV1Engine* storageEngine,
                              const StorageEngineLockFile& lockFile) {
     string name = lockFile.getFilespec();
     bool oldFile = lockFile.createdByUncleanShutdown();
+
+    if (doingRepair) {
+        // This logic was previously in shared option parsing code.
+        storageGlobalParams.dur = false;
+    }
 
     if (oldFile) {
         // we check this here because we want to see if we can get the lock
@@ -146,6 +153,11 @@ void checkForUncleanShutdown(MMAPV1Engine* storageEngine,
                              bool doingRepair,
                              const StorageEngineLockFile& lockFile) {
     // TODO - this is very bad that the code above not running here.
+
+    if (doingRepair) {
+        // This logic was previously in shared option parsing code.
+        storageGlobalParams.dur = false;
+    }
 
     // Not related to lock file, but this is where we handle unclean shutdown
     if (!storageGlobalParams.dur && dur::haveJournalFiles()) {
@@ -303,21 +315,24 @@ DatabaseCatalogEntry* MMAPV1Engine::getDatabaseCatalogEntry(OperationContext* op
     return entry;
 }
 
-Status MMAPV1Engine::closeDatabase(OperationContext* txn, StringData db) {
+Status MMAPV1Engine::closeDatabase(OperationContext* opCtx, StringData db) {
     // Before the files are closed, flush any potentially outstanding changes, which might
     // reference this database. Otherwise we will assert when subsequent applications of the
     // global journal entries occur, which happen to have write intents for the removed files.
-    getDur().syncDataAndTruncateJournal(txn);
+    getDur().syncDataAndTruncateJournal(opCtx);
 
     stdx::lock_guard<stdx::mutex> lk(_entryMapMutex);
     MMAPV1DatabaseCatalogEntry* entry = _entryMap[db.toString()];
+    if (entry) {
+        entry->close(opCtx);
+    }
     delete entry;
     _entryMap.erase(db.toString());
     return Status::OK();
 }
 
-Status MMAPV1Engine::dropDatabase(OperationContext* txn, StringData db) {
-    Status status = closeDatabase(txn, db);
+Status MMAPV1Engine::dropDatabase(OperationContext* opCtx, StringData db) {
+    Status status = closeDatabase(opCtx, db);
     if (!status.isOK())
         return status;
 
@@ -345,15 +360,15 @@ void MMAPV1Engine::_listDatabases(const std::string& directory, std::vector<std:
     }
 }
 
-int MMAPV1Engine::flushAllFiles(bool sync) {
-    return MongoFile::flushAll(sync);
+int MMAPV1Engine::flushAllFiles(OperationContext* opCtx, bool sync) {
+    return MongoFile::flushAll(opCtx, sync);
 }
 
-Status MMAPV1Engine::beginBackup(OperationContext* txn) {
+Status MMAPV1Engine::beginBackup(OperationContext* opCtx) {
     return Status::OK();
 }
 
-void MMAPV1Engine::endBackup(OperationContext* txn) {
+void MMAPV1Engine::endBackup(OperationContext* opCtx) {
     return;
 }
 
@@ -374,21 +389,32 @@ void MMAPV1Engine::cleanShutdown() {
     // we would only hang here if the file_allocator code generates a
     // synchronous signal, which we don't expect
     log() << "shutdown: waiting for fs preallocator..." << endl;
+    auto opCtx = cc().getOperationContext();
+
+    // In some cases we may shutdown early before we have any operation context yet, but we need
+    // one for synchronization purposes.
+    ServiceContext::UniqueOperationContext newTxn;
+    if (!opCtx) {
+        newTxn = cc().makeOperationContext();
+        opCtx = newTxn.get();
+        invariant(opCtx);
+    }
+
     FileAllocator::get()->waitUntilFinished();
 
     if (storageGlobalParams.dur) {
         log() << "shutdown: final commit..." << endl;
 
-        getDur().commitAndStopDurThread();
+        getDur().commitAndStopDurThread(opCtx);
     }
 
     log() << "shutdown: closing all files..." << endl;
     stringstream ss3;
-    MemoryMappedFile::closeAllFiles(ss3);
+    MemoryMappedFile::closeAllFiles(opCtx, ss3);
     log() << ss3.str() << endl;
 }
 
 void MMAPV1Engine::setJournalListener(JournalListener* jl) {
     dur::setJournalListener(jl);
 }
-}
+}  // namespace mongo

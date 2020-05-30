@@ -28,9 +28,11 @@
 
 #pragma once
 
+#include <boost/container/flat_set.hpp>
 #include <initializer_list>
 #include <map>
 #include <set>
+#include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data_comparator_interface.h"
@@ -51,6 +53,42 @@ class BSONComparatorInterfaceBase {
     MONGO_DISALLOW_COPYING(BSONComparatorInterfaceBase);
 
 public:
+    BSONComparatorInterfaceBase(BSONComparatorInterfaceBase&& other) = default;
+    BSONComparatorInterfaceBase& operator=(BSONComparatorInterfaceBase&& other) = default;
+
+    /**
+     * Set of rules used in the comparison of BSON Objects and Elements.
+     */
+    enum ComparisonRules {
+        // Set this bit to consider the field name in element comparisons.
+        // if (kConsiderFieldName = 0) --> 'a: 1' == 'b: 1'
+        // if (kConsiderFieldName = 1) --> 'a: 1' != 'b: 1'
+        kConsiderFieldName = 1 << 0,
+
+        // Set this bit to ignore the element order in BSON Object comparisons. This field will
+        // remain set/unset for nested objects.
+        //
+        // e.g. if kIgnoreFieldOrder == 1, then the following objects are considered equal:
+        //
+        // obj1: {
+        //     a: {
+        //         b: 1,
+        //         c: 1
+        //     },
+        //     d: 1
+        // }
+        //
+        // obj2: {
+        //     d: 1,
+        //     a: {
+        //         c: 1,
+        //         b: 1,
+        //     },
+        // }
+        kIgnoreFieldOrder = 1 << 1,
+    };
+    using ComparisonRulesSet = uint32_t;
+
     /**
      * A deferred comparison between two objects of type T, which can be converted into a boolean
      * via the evaluate() method.
@@ -121,6 +159,8 @@ public:
     };
 
     using Set = std::set<T, LessThan>;
+
+    using FlatSet = boost::container::flat_set<T, LessThan>;
 
     using UnorderedSet = stdx::unordered_set<T, Hasher, EqualTo>;
 
@@ -207,6 +247,10 @@ protected:
         return Set(init, LessThan(this));
     }
 
+    FlatSet makeFlatSet(const std::vector<T>& elements) const {
+        return FlatSet(elements.begin(), elements.end(), LessThan(this));
+    }
+
     UnorderedSet makeUnorderedSet(std::initializer_list<T> init = {}) const {
         return UnorderedSet(init, 0, Hasher(this), EqualTo(this));
     }
@@ -229,7 +273,7 @@ protected:
      */
     static void hashCombineBSONObj(size_t& seed,
                                    const BSONObj& objToHash,
-                                   bool considerFieldName,
+                                   ComparisonRulesSet rules,
                                    const StringData::ComparatorInterface* stringComparator);
 
     /**
@@ -239,7 +283,7 @@ protected:
      */
     static void hashCombineBSONElement(size_t& seed,
                                        BSONElement elemToHash,
-                                       bool considerFieldName,
+                                       ComparisonRulesSet rules,
                                        const StringData::ComparatorInterface* stringComparator);
 };
 

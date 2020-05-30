@@ -10,13 +10,15 @@ load('jstests/replsets/rslib.js');
                 oplogSize: 10,
             }
         },
+        verbose: 3,
+        other: {rsOptions: {verbose: 1}}
     });
     var replTest = st.rs0;
 
     var config = replTest.getReplSetConfig();
     // Add a delay long enough so getLastError would actually 'wait' for write concern.
     config.members[1].slaveDelay = 3;
-    config.version = 2;
+    config.version = replTest.getReplSetConfigFromNode().version + 1;
 
     reconfig(replTest, config, true);
 

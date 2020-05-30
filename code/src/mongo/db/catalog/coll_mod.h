@@ -28,6 +28,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
+#include "mongo/db/catalog/collection_options.h"
 
 namespace mongo {
 class BSONObj;
@@ -36,18 +37,45 @@ class Collection;
 class NamespaceString;
 class OperationContext;
 
-struct CollModRequest;
-
-StatusWith<CollModRequest> parseCollModRequest(OperationContext* txn,
-                                               const NamespaceString& nss,
-                                               Collection* coll,
-                                               const BSONObj& cmdObj);
+/**
+ * Adds UUIDs to all replicated collections of all databases if they do not already have UUIDs. If
+ * this function is not necessary for SERVER-33247, it can be removed.
+ */
+void addCollectionUUIDs(OperationContext* opCtx);
 
 /**
  * Performs the collection modification described in "cmdObj" on the collection "ns".
  */
-Status collMod(OperationContext* txn,
+Status collMod(OperationContext* opCtx,
                const NamespaceString& ns,
                const BSONObj& cmdObj,
                BSONObjBuilder* result);
+
+/*
+ * Adds uuid to the collection "ns" if the collection does not already have a UUID.
+ * This is called if a collection failed to be assigned a UUID during upgrade to 3.6.
+ */
+Status collModForUUIDUpgrade(OperationContext* opCtx,
+                             const NamespaceString& ns,
+                             const BSONObj& cmdObj,
+                             CollectionUUID uuid);
+
+/**
+ * Applies the collMod operation and optionally updates formatVersion of unique indexes belonging
+ * to collection "nss".
+ */
+Status collModWithUpgrade(OperationContext* opCtx,
+                          const NamespaceString& nss,
+                          const BSONObj& cmdObj);
+
+/*
+ * Updates the unique indexes to timestamp safe unique index format on setFCV=4.2. It also updates
+ * non-replicated unique indexes indirectly by calling updateNonReplicatedUniqueIndexes().
+ */
+void updateUniqueIndexesOnUpgrade(OperationContext* opCtx);
+
+/*
+ * Updates non-replicated unique indexes to timestamp safe unique index format.
+ */
+Status updateNonReplicatedUniqueIndexes(OperationContext* opCtx);
 }  // namespace mongo

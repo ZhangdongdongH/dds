@@ -178,30 +178,39 @@ public:
 };
 
 TEST_F(AuthClientTest, MongoCR) {
+    // This test excludes the MONGODB-CR support found in mongo/shell/mongodbcr.cpp
+    // so it should fail to auth.
+    // jstests exist to ensure MONGODB-CR continues to work from the client.
     auto params = loadMongoCRConversation();
-    auth::authenticateClient(std::move(params), "", "", _runCommandCallback);
+    ASSERT_THROWS(
+        auth::authenticateClient(std::move(params), HostAndPort(), "", _runCommandCallback),
+        DBException);
 }
 
 TEST_F(AuthClientTest, asyncMongoCR) {
+    // As with the sync version above, we expect authentication to fail
+    // since this test was built without MONGODB-CR support.
     auto params = loadMongoCRConversation();
-    auth::authenticateClient(
-        std::move(params), "", "", _runCommandCallback, [this](auth::AuthResponse response) {
-            ASSERT(response.isOK());
-        });
+    auth::authenticateClient(std::move(params),
+                             HostAndPort(),
+                             "",
+                             _runCommandCallback,
+                             [this](auth::AuthResponse response) { ASSERT(!response.isOK()); });
 }
 
 #ifdef MONGO_CONFIG_SSL
 TEST_F(AuthClientTest, X509) {
     auto params = loadX509Conversation();
-    auth::authenticateClient(std::move(params), "", _username, _runCommandCallback);
+    auth::authenticateClient(std::move(params), HostAndPort(), _username, _runCommandCallback);
 }
 
 TEST_F(AuthClientTest, asyncX509) {
     auto params = loadX509Conversation();
-    auth::authenticateClient(
-        std::move(params), "", _username, _runCommandCallback, [this](auth::AuthResponse response) {
-            ASSERT(response.isOK());
-        });
+    auth::authenticateClient(std::move(params),
+                             HostAndPort(),
+                             _username,
+                             _runCommandCallback,
+                             [this](auth::AuthResponse response) { ASSERT(response.isOK()); });
 }
 #endif
 

@@ -52,7 +52,7 @@ struct GetMoreRequest {
      */
     GetMoreRequest(NamespaceString namespaceString,
                    CursorId id,
-                   boost::optional<long long> sizeOfBatch,
+                   boost::optional<std::int64_t> sizeOfBatch,
                    boost::optional<Milliseconds> awaitDataTimeout,
                    boost::optional<long long> term,
                    boost::optional<repl::OpTime> lastKnownCommittedOpTime);
@@ -69,14 +69,14 @@ struct GetMoreRequest {
      */
     BSONObj toBSON() const;
 
-    static std::string parseNs(const std::string& dbname, const BSONObj& cmdObj);
+    static NamespaceString parseNs(const std::string& dbname, const BSONObj& cmdObj);
 
     const NamespaceString nss;
     const CursorId cursorid;
 
     // The batch size is optional. If not provided, we will put as many documents into the batch
     // as fit within the byte limit.
-    const boost::optional<long long> batchSize;
+    const boost::optional<std::int64_t> batchSize;
 
     // The number of milliseconds for which a getMore on a tailable, awaitData query should block.
     const boost::optional<Milliseconds> awaitDataTimeout;

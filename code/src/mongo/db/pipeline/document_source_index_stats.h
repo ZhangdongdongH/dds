@@ -37,15 +37,48 @@ namespace mongo {
  * Provides a document source interface to retrieve index statistics for a given namespace.
  * Each document returned represents a single index and mongod instance.
  */
-class DocumentSourceIndexStats final : public DocumentSourceNeedsMongod {
+class DocumentSourceIndexStats final : public DocumentSource {
 public:
+    class LiteParsed final : public LiteParsedDocumentSource {
+    public:
+        static std::unique_ptr<LiteParsed> parse(const AggregationRequest& request,
+                                                 const BSONElement& spec) {
+            return stdx::make_unique<LiteParsed>(request.getNamespaceString());
+        }
+
+        explicit LiteParsed(NamespaceString nss) : _nss(std::move(nss)) {}
+
+        stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
+            return stdx::unordered_set<NamespaceString>();
+        }
+
+        PrivilegeVector requiredPrivileges(bool isMongos) const final {
+            return {Privilege(ResourcePattern::forExactNamespace(_nss), ActionType::indexStats)};
+        }
+
+        bool isInitialSource() const final {
+            return true;
+        }
+
+    private:
+        const NamespaceString _nss;
+    };
+
     // virtuals from DocumentSource
     GetNextResult getNext() final;
     const char* getSourceName() const final;
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
-    virtual bool isValidInitialSource() const final {
-        return true;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kAnyShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kNotAllowed);
+
+        constraints.requiresInputDocSource = false;
+        return constraints;
     }
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(

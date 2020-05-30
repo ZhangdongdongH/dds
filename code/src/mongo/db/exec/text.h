@@ -29,7 +29,6 @@
 #pragma once
 
 #include <memory>
-#include <vector>
 
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/exec/working_set.h"
@@ -40,12 +39,10 @@
 
 namespace mongo {
 
-using std::unique_ptr;
-using std::vector;
-
 using fts::FTSQueryImpl;
 using fts::FTSSpec;
 
+class MatchExpression;
 class OperationContext;
 
 struct TextStageParams {
@@ -62,6 +59,10 @@ struct TextStageParams {
 
     // The text query.
     FTSQueryImpl query;
+
+    // True if we need the text score in the output, because the projection includes the 'textScore'
+    // metadata field.
+    bool wantTextScore = true;
 };
 
 /**
@@ -71,11 +72,10 @@ struct TextStageParams {
  */
 class TextStage final : public PlanStage {
 public:
-    TextStage(OperationContext* txn,
+    TextStage(OperationContext* opCtx,
               const TextStageParams& params,
               WorkingSet* ws,
               const MatchExpression* filter);
-
 
     StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;
@@ -94,9 +94,10 @@ private:
     /**
      * Helper method to built the query execution plan for the text stage.
      */
-    unique_ptr<PlanStage> buildTextTree(OperationContext* txn,
-                                        WorkingSet* ws,
-                                        const MatchExpression* filter) const;
+    std::unique_ptr<PlanStage> buildTextTree(OperationContext* opCtx,
+                                             WorkingSet* ws,
+                                             const MatchExpression* filter,
+                                             bool wantTextScore) const;
 
     // Parameters of this text stage.
     TextStageParams _params;

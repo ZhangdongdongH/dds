@@ -39,15 +39,16 @@
 #include "mongo/db/storage/record_store_test_harness.h"
 #include "mongo/unittest/unittest.h"
 
+namespace mongo {
+namespace {
+
 using std::unique_ptr;
 using std::string;
 using std::stringstream;
 
-namespace mongo {
-
 // Insert a record and try to update it.
 TEST(RecordStoreTestHarness, UpdateRecord) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -62,7 +63,7 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
         {
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -83,8 +84,8 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
                 rs->updateRecord(opCtx.get(), loc, data.c_str(), data.size() + 1, false, NULL);
 
             if (ErrorCodes::NeedsDocumentMove == res) {
-                StatusWith<RecordId> newLocation =
-                    rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                StatusWith<RecordId> newLocation = rs->insertRecord(
+                    opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
                 ASSERT_OK(newLocation.getStatus());
                 rs->deleteRecord(opCtx.get(), loc);
                 loc = newLocation.getValue();
@@ -108,7 +109,7 @@ TEST(RecordStoreTestHarness, UpdateRecord) {
 
 // Insert multiple records and try to update them.
 TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -127,7 +128,7 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
 
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             uow.commit();
@@ -151,8 +152,8 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
                 rs->updateRecord(opCtx.get(), locs[i], data.c_str(), data.size() + 1, false, NULL);
 
             if (ErrorCodes::NeedsDocumentMove == res) {
-                StatusWith<RecordId> newLocation =
-                    rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                StatusWith<RecordId> newLocation = rs->insertRecord(
+                    opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
                 ASSERT_OK(newLocation.getStatus());
                 rs->deleteRecord(opCtx.get(), locs[i]);
                 locs[i] = newLocation.getValue();
@@ -180,7 +181,7 @@ TEST(RecordStoreTestHarness, UpdateMultipleRecords) {
 
 // Insert a record, try to update it, and examine how the UpdateNotifier is called.
 TEST(RecordStoreTestHarness, UpdateRecordWithMoveNotifier) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -194,8 +195,8 @@ TEST(RecordStoreTestHarness, UpdateRecordWithMoveNotifier) {
         ServiceContext::UniqueOperationContext opCtx(harnessHelper->newOperationContext());
         {
             WriteUnitOfWork uow(opCtx.get());
-            StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), oldData.c_str(), oldData.size() + 1, false);
+            StatusWith<RecordId> res = rs->insertRecord(
+                opCtx.get(), oldData.c_str(), oldData.size() + 1, Timestamp(), false);
             ASSERT_OK(res.getStatus());
             loc = res.getValue();
             uow.commit();
@@ -218,8 +219,8 @@ TEST(RecordStoreTestHarness, UpdateRecordWithMoveNotifier) {
                 opCtx.get(), loc, newData.c_str(), newData.size() + 1, false, &umn);
 
             if (ErrorCodes::NeedsDocumentMove == res) {
-                StatusWith<RecordId> newLocation =
-                    rs->insertRecord(opCtx.get(), newData.c_str(), newData.size() + 1, false);
+                StatusWith<RecordId> newLocation = rs->insertRecord(
+                    opCtx.get(), newData.c_str(), newData.size() + 1, Timestamp(), false);
                 ASSERT_OK(newLocation.getStatus());
                 rs->deleteRecord(opCtx.get(), loc);
                 loc = newLocation.getValue();
@@ -243,4 +244,5 @@ TEST(RecordStoreTestHarness, UpdateRecordWithMoveNotifier) {
     }
 }
 
+}  // namespace
 }  // namespace mongo

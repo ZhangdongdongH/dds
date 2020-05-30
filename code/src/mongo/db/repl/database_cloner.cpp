@@ -41,26 +41,43 @@
 #include "mongo/db/commands/list_collections_filter.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/server_parameters.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/destructor_guard.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 namespace repl {
 
+// Failpoint which causes the initial sync function to hang before running listCollections.
+MONGO_FAIL_POINT_DEFINE(initialSyncHangBeforeListCollections);
+
 namespace {
 
 using LockGuard = stdx::lock_guard<stdx::mutex>;
 using UniqueLock = stdx::unique_lock<stdx::mutex>;
+using executor::RemoteCommandRequest;
 
 const char* kNameFieldName = "name";
 const char* kOptionsFieldName = "options";
+const char* kInfoFieldName = "info";
+const char* kUUIDFieldName = "uuid";
+
+// The batchSize to use for the find/getMore queries called by the CollectionCloner
+constexpr int kUseARMDefaultBatchSize = -1;
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(collectionClonerBatchSize, int, kUseARMDefaultBatchSize);
 
 // The number of attempts for the listCollections commands.
 MONGO_EXPORT_SERVER_PARAMETER(numInitialSyncListCollectionsAttempts, int, 3);
+
+// The number of cursors to use in the collection cloning process.
+MONGO_EXPORT_SERVER_PARAMETER(maxNumInitialSyncCollectionClonerCursors, int, 1);
+
+// Failpoint which causes initial sync to hang right after listCollections, but before cloning
+// any colelctions in the 'database' database.
+MONGO_FAIL_POINT_DEFINE(initialSyncHangAfterListCollections);
 
 /**
  * Default listCollections predicate.
@@ -84,7 +101,7 @@ BSONObj createListCollectionsCommandObject(const BSONObj& filter) {
 }  // namespace
 
 DatabaseCloner::DatabaseCloner(executor::TaskExecutor* executor,
-                               OldThreadPool* dbWorkThreadPool,
+                               ThreadPool* dbWorkThreadPool,
                                const HostAndPort& source,
                                const std::string& dbname,
                                const BSONObj& listCollectionsFilter,
@@ -108,15 +125,16 @@ DatabaseCloner::DatabaseCloner(executor::TaskExecutor* executor,
                               _source,
                               _dbname,
                               createListCollectionsCommandObject(_listCollectionsFilter),
-                              stdx::bind(&DatabaseCloner::_listCollectionsCallback,
-                                         this,
-                                         stdx::placeholders::_1,
-                                         stdx::placeholders::_2,
-                                         stdx::placeholders::_3),
-                              rpc::ServerSelectionMetadata(true, boost::none).toBSON(),
-                              RemoteCommandRequest::kNoTimeout,
+                              [=](const StatusWith<Fetcher::QueryResponse>& result,
+                                  Fetcher::NextAction * nextAction,
+                                  BSONObjBuilder * getMoreBob) {
+                                  _listCollectionsCallback(result, nextAction, getMoreBob);
+                              },
+                              ReadPreferenceSetting::secondaryPreferredMetadata(),
+                              RemoteCommandRequest::kNoTimeout /* find network timeout */,
+                              RemoteCommandRequest::kNoTimeout /* getMore network timeout */,
                               RemoteCommandRetryScheduler::makeRetryPolicy(
-                                  numInitialSyncListCollectionsAttempts,
+                                  numInitialSyncListCollectionsAttempts.load(),
                                   executor::RemoteCommandRequest::kNoTimeout,
                                   RemoteCommandRetryScheduler::kAllRetriableErrors)),
       _startCollectionCloner([](CollectionCloner& cloner) { return cloner.startup(); }) {
@@ -140,34 +158,47 @@ const std::vector<BSONObj>& DatabaseCloner::getCollectionInfos_forTest() const {
     return _collectionInfos;
 }
 
-std::string DatabaseCloner::getDiagnosticString() const {
-    LockGuard lk(_mutex);
-    return _getDiagnosticString_inlock();
-}
-
-std::string DatabaseCloner::_getDiagnosticString_inlock() const {
-    str::stream output;
-    output << "DatabaseCloner";
-    output << " executor: " << _executor->getDiagnosticString();
-    output << " source: " << _source.toString();
-    output << " database: " << _dbname;
-    output << " listCollections filter" << _listCollectionsFilter;
-    output << " active: " << _active;
-    output << " collection info objects (empty if listCollections is in progress): "
-           << _collectionInfos.size();
-    return output;
-}
-
 bool DatabaseCloner::isActive() const {
     LockGuard lk(_mutex);
-    return _active;
+    return _isActive_inlock();
 }
 
-Status DatabaseCloner::startup() {
-    LockGuard lk(_mutex);
+bool DatabaseCloner::_isActive_inlock() const {
+    return State::kRunning == _state || State::kShuttingDown == _state;
+}
 
-    if (_active) {
-        return Status(ErrorCodes::IllegalOperation, "database cloner already started");
+bool DatabaseCloner::_isShuttingDown() const {
+    LockGuard lk(_mutex);
+    return State::kShuttingDown == _state;
+}
+
+Status DatabaseCloner::startup() noexcept {
+    UniqueLock lk(_mutex);
+
+    switch (_state) {
+        case State::kPreStart:
+            _state = State::kRunning;
+            break;
+        case State::kRunning:
+            return Status(ErrorCodes::InternalError, "database cloner already started");
+        case State::kShuttingDown:
+            return Status(ErrorCodes::ShutdownInProgress, "database cloner shutting down");
+        case State::kComplete:
+            return Status(ErrorCodes::ShutdownInProgress, "database cloner completed");
+    }
+
+    MONGO_FAIL_POINT_BLOCK(initialSyncHangBeforeListCollections, customArgs) {
+        const auto& data = customArgs.getData();
+        const auto databaseElem = data["database"];
+        if (!databaseElem || databaseElem.checkAndGetStringData() == _dbname) {
+            lk.unlock();
+            log() << "initial sync - initialSyncHangBeforeListCollections fail point "
+                     "enabled. Blocking until fail point is disabled.";
+            while (MONGO_FAIL_POINT(initialSyncHangBeforeListCollections) && !_isShuttingDown()) {
+                mongo::sleepsecs(1);
+            }
+            lk.lock();
+        }
     }
 
     _stats.start = _executor->now();
@@ -176,21 +207,31 @@ Status DatabaseCloner::startup() {
     if (!scheduleResult.isOK()) {
         error() << "Error scheduling listCollections for database: " << _dbname
                 << ", error:" << scheduleResult;
+        _state = State::kComplete;
         return scheduleResult;
     }
-
-    _active = true;
 
     return Status::OK();
 }
 
 void DatabaseCloner::shutdown() {
-    {
-        LockGuard lk(_mutex);
-
-        if (!_active) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    switch (_state) {
+        case State::kPreStart:
+            // Transition directly from PreStart to Complete if not started yet.
+            _state = State::kComplete;
             return;
-        }
+        case State::kRunning:
+            _state = State::kShuttingDown;
+            break;
+        case State::kShuttingDown:
+        case State::kComplete:
+            // Nothing to do if we are already in ShuttingDown or Complete state.
+            return;
+    }
+
+    for (auto&& collectionCloner : _collectionCloners) {
+        collectionCloner.shutdown();
     }
 
     _listCollectionsFetcher.shutdown();
@@ -207,7 +248,7 @@ DatabaseCloner::Stats DatabaseCloner::getStats() const {
 
 void DatabaseCloner::join() {
     UniqueLock lk(_mutex);
-    _condition.wait(lk, [this]() { return !_active; });
+    _condition.wait(lk, [this]() { return !_isActive_inlock(); });
 }
 
 void DatabaseCloner::setScheduleDbWorkFn_forTest(const CollectionCloner::ScheduleDbWorkFn& work) {
@@ -221,17 +262,19 @@ void DatabaseCloner::setStartCollectionClonerFn(
     _startCollectionCloner = startCollectionCloner;
 }
 
+DatabaseCloner::State DatabaseCloner::getState_forTest() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _state;
+}
+
 void DatabaseCloner::_listCollectionsCallback(const StatusWith<Fetcher::QueryResponse>& result,
                                               Fetcher::NextAction* nextAction,
                                               BSONObjBuilder* getMoreBob) {
     if (!result.isOK()) {
-        _finishCallback({result.getStatus().code(),
-                         str::stream() << "While issuing listCollections on db '" << _dbname
-                                       << "' (host:"
-                                       << _source.toString()
-                                       << ") there was an error '"
-                                       << result.getStatus().reason()
-                                       << "'"});
+        _finishCallback(result.getStatus().withContext(
+            str::stream() << "Error issuing listCollections on db '" << _dbname << "' (host:"
+                          << _source.toString()
+                          << ")"));
         return;
     }
 
@@ -259,6 +302,17 @@ void DatabaseCloner::_listCollectionsCallback(const StatusWith<Fetcher::QueryRes
     if (_collectionInfos.empty()) {
         _finishCallback_inlock(lk, Status::OK());
         return;
+    }
+
+    MONGO_FAIL_POINT_BLOCK(initialSyncHangAfterListCollections, options) {
+        const BSONObj& data = options.getData();
+        if (data["database"].String() == _dbname) {
+            log() << "initial sync - initialSyncHangAfterListCollections fail point "
+                     "enabled. Blocking until fail point is disabled.";
+            while (MONGO_FAIL_POINT(initialSyncHangAfterListCollections)) {
+                mongo::sleepsecs(1);
+            }
+        }
     }
 
     _collectionNamespaces.reserve(_collectionInfos.size());
@@ -314,11 +368,26 @@ void DatabaseCloner::_listCollectionsCallback(const StatusWith<Fetcher::QueryRes
         }
         const BSONObj optionsObj = optionsElement.Obj();
         CollectionOptions options;
-        Status parseStatus = options.parse(optionsObj);
+        auto parseStatus = options.parse(optionsObj, CollectionOptions::parseForStorage);
         if (!parseStatus.isOK()) {
             _finishCallback_inlock(lk, parseStatus);
             return;
         }
+
+        BSONElement infoElement = info.getField(kInfoFieldName);
+        if (infoElement.isABSONObj()) {
+            BSONElement uuidElement = infoElement[kUUIDFieldName];
+            if (!uuidElement.eoo()) {
+                auto res = CollectionUUID::parse(uuidElement);
+                if (!res.isOK()) {
+                    _finishCallback_inlock(lk, res.getStatus());
+                    return;
+                }
+                options.uuid = res.getValue();
+            }
+        }
+        // TODO(SERVER-27994): Ensure UUID present when FCV >= "3.6".
+
         seen.insert(collectionName);
 
         _collectionNamespaces.emplace_back(_dbname, collectionName);
@@ -331,10 +400,11 @@ void DatabaseCloner::_listCollectionsCallback(const StatusWith<Fetcher::QueryRes
                 _source,
                 nss,
                 options,
-                stdx::bind(
-                    &DatabaseCloner::_collectionClonerCallback, this, stdx::placeholders::_1, nss),
-                _storageInterface);
-        } catch (const UserException& ex) {
+                [=](const Status& status) { return _collectionClonerCallback(status, nss); },
+                _storageInterface,
+                collectionClonerBatchSize,
+                maxNumInitialSyncCollectionClonerCursors.load());
+        } catch (const AssertionException& ex) {
             _finishCallback_inlock(lk, ex.toStatus());
             return;
         }
@@ -365,11 +435,8 @@ void DatabaseCloner::_collectionClonerCallback(const Status& status, const Names
 
     UniqueLock lk(_mutex);
     if (!status.isOK()) {
-        newStatus = {status.code(),
-                     str::stream() << "While cloning collection '" << nss.toString()
-                                   << "' there was an error '"
-                                   << status.reason()
-                                   << "'"};
+        newStatus = status.withContext(
+            str::stream() << "Error cloning collection '" << nss.toString() << "'");
         _failedNamespaces.push_back({newStatus, nss});
     }
     ++_stats.clonedCollections;
@@ -409,7 +476,8 @@ void DatabaseCloner::_collectionClonerCallback(const Status& status, const Names
 void DatabaseCloner::_finishCallback(const Status& status) {
     _onCompletion(status);
     LockGuard lk(_mutex);
-    _active = false;
+    invariant(_state != State::kComplete);
+    _state = State::kComplete;
     _condition.notify_all();
     _stats.end = _executor->now();
     LOG(1) << "    database: " << _dbname << ", stats: " << _stats.toString();
@@ -455,6 +523,20 @@ void DatabaseCloner::Stats::append(BSONObjBuilder* builder) const {
         collection.append(&collectionBuilder);
         collectionBuilder.doneFast();
     }
+}
+
+std::ostream& operator<<(std::ostream& os, const DatabaseCloner::State& state) {
+    switch (state) {
+        case DatabaseCloner::State::kPreStart:
+            return os << "PreStart";
+        case DatabaseCloner::State::kRunning:
+            return os << "Running";
+        case DatabaseCloner::State::kShuttingDown:
+            return os << "ShuttingDown";
+        case DatabaseCloner::State::kComplete:
+            return os << "Complete";
+    }
+    MONGO_UNREACHABLE;
 }
 
 }  // namespace repl

@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Main package for the mongorestore tool.
 package main
 
@@ -23,15 +29,16 @@ const (
 func main() {
 	// initialize command-line opts
 	opts := options.New("mongorestore", mongorestore.Usage,
-		options.EnabledOptions{Auth: true, Connection: true})
+		options.EnabledOptions{Auth: true, Connection: true, URI: true})
 	nsOpts := &mongorestore.NSOptions{}
 	opts.AddOptions(nsOpts)
 	inputOpts := &mongorestore.InputOptions{}
 	opts.AddOptions(inputOpts)
 	outputOpts := &mongorestore.OutputOptions{}
 	opts.AddOptions(outputOpts)
+	opts.URI.AddKnownURIParameters(options.KnownURIOptionsWriteConcern)
 
-	extraArgs, err := opts.Parse()
+	extraArgs, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
 		log.Logvf(log.Always, "error parsing command line options: %v", err)
 		log.Logvf(log.Always, "try 'mongorestore --help' for more information")
@@ -53,6 +60,9 @@ func main() {
 
 	log.SetVerbosity(opts.Verbosity)
 
+	// verify uri options and log them
+	opts.URI.LogUnsupportedOptions()
+
 	targetDir, err := getTargetDirFromArgs(extraArgs, inputOpts.Directory)
 	if err != nil {
 		log.Logvf(log.Always, "%v", err)
@@ -61,17 +71,12 @@ func main() {
 	}
 	targetDir = util.ToUniversalPath(targetDir)
 
-	// connect directly, unless a replica set name is explicitly specified
-	_, setName := util.ParseConnectionString(opts.Host)
-	opts.Direct = (setName == "")
-	opts.ReplicaSetName = setName
-
 	provider, err := db.NewSessionProvider(*opts)
-	defer provider.Close()
 	if err != nil {
 		log.Logvf(log.Always, "error connecting to host: %v", err)
 		os.Exit(util.ExitError)
 	}
+	defer provider.Close()
 	provider.SetBypassDocumentValidation(outputOpts.BypassDocumentValidation)
 
 	// disable TCP timeouts for restore jobs

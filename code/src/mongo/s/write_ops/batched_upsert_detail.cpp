@@ -35,35 +35,11 @@ namespace mongo {
 
 using std::string;
 
-using mongoutils::str::stream;
-
 const BSONField<int> BatchedUpsertDetail::index("index");
 const BSONField<BSONObj> BatchedUpsertDetail::upsertedID("_id");
 
 BatchedUpsertDetail::BatchedUpsertDetail() {
     clear();
-}
-
-BatchedUpsertDetail::~BatchedUpsertDetail() {}
-
-bool BatchedUpsertDetail::isValid(std::string* errMsg) const {
-    std::string dummy;
-    if (errMsg == NULL) {
-        errMsg = &dummy;
-    }
-
-    // All the mandatory fields must be present.
-    if (!_isIndexSet) {
-        *errMsg = stream() << "missing " << index.name() << " field";
-        return false;
-    }
-
-    if (!_isUpsertedIDSet) {
-        *errMsg = stream() << "missing " << upsertedID.name() << " field";
-        return false;
-    }
-
-    return true;
 }
 
 BSONObj BatchedUpsertDetail::toBSON() const {
@@ -117,10 +93,6 @@ void BatchedUpsertDetail::cloneTo(BatchedUpsertDetail* other) const {
 
     other->_upsertedID = _upsertedID;
     other->_isUpsertedIDSet = _isUpsertedIDSet;
-}
-
-std::string BatchedUpsertDetail::toString() const {
-    return "implement me";
 }
 
 void BatchedUpsertDetail::setIndex(int index) {

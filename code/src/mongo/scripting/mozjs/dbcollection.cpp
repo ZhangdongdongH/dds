@@ -32,7 +32,6 @@
 
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/s/local_sharding_info.h"
 #include "mongo/scripting/mozjs/bson.h"
 #include "mongo/scripting/mozjs/db.h"
 #include "mongo/scripting/mozjs/implscope.h"
@@ -44,11 +43,11 @@ namespace mozjs {
 
 const char* const DBCollectionInfo::className = "DBCollection";
 
-void DBCollectionInfo::getProperty(JSContext* cx,
-                                   JS::HandleObject obj,
-                                   JS::HandleId id,
-                                   JS::MutableHandleValue vp) {
-    DBInfo::getProperty(cx, obj, id, vp);
+void DBCollectionInfo::resolve(JSContext* cx,
+                               JS::HandleObject obj,
+                               JS::HandleId id,
+                               bool* resolvedp) {
+    DBInfo::resolve(cx, obj, id, resolvedp);
 }
 
 void DBCollectionInfo::construct(JSContext* cx, JS::CallArgs args) {
@@ -71,13 +70,6 @@ void DBCollectionInfo::construct(JSContext* cx, JS::CallArgs args) {
     o.setValue(InternedString::_db, args.get(1));
     o.setValue(InternedString::_shortName, args.get(2));
     o.setValue(InternedString::_fullName, args.get(3));
-
-    std::string fullName = ValueWriter(cx, args.get(3)).toString();
-
-    auto context = scope->getOpContext();
-    if (context && haveLocalShardingInfo(context, fullName)) {
-        uasserted(ErrorCodes::BadValue, "can't use sharded collection from db.eval");
-    }
 
     args.rval().setObjectOrNull(thisv);
 }

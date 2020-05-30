@@ -46,16 +46,16 @@ WiredTigerEngineRuntimeConfigParameter::WiredTigerEngineRuntimeConfigParameter(
       _engine(engine) {}
 
 
-void WiredTigerEngineRuntimeConfigParameter::append(OperationContext* txn,
+void WiredTigerEngineRuntimeConfigParameter::append(OperationContext* opCtx,
                                                     BSONObjBuilder& b,
                                                     const std::string& name) {
-    b << name << "";
+    b << name << _currentValue;
 }
 
 Status WiredTigerEngineRuntimeConfigParameter::set(const BSONElement& newValueElement) {
     try {
         return setFromString(newValueElement.String());
-    } catch (const MsgAssertionException& msg) {
+    } catch (const AssertionException& msg) {
         return Status(
             ErrorCodes::BadValue,
             mongoutils::str::stream()
@@ -90,6 +90,7 @@ Status WiredTigerEngineRuntimeConfigParameter::setFromString(const std::string& 
         return Status(ErrorCodes::BadValue, result);
     }
 
+    _currentValue = str;
     return Status::OK();
 }
 }

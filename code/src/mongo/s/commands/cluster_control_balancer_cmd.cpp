@@ -41,17 +41,17 @@ namespace {
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference{ReadPreference::PrimaryOnly};
 
-class BalancerControlCommand : public Command {
+class BalancerControlCommand : public BasicCommand {
 public:
     BalancerControlCommand(StringData name,
                            StringData configsvrCommandName,
                            ActionType authorizationAction)
-        : Command(name),
+        : BasicCommand(name),
           _configsvrCommandName(configsvrCommandName),
           _authorizationAction(authorizationAction) {}
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -62,13 +62,13 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "Starts or stops the sharding balancer.";
+    std::string help() const override {
+        return "Starts or stops the sharding balancer.";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
                 _authorizationAction)) {
@@ -77,15 +77,13 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
-        auto configShard = Grid::get(txn)->shardRegistry()->getConfigShard();
+        auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto cmdResponse = uassertStatusOK(
-            configShard->runCommandWithFixedRetryAttempts(txn,
+            configShard->runCommandWithFixedRetryAttempts(opCtx,
                                                           kPrimaryOnlyReadPreference,
                                                           "admin",
                                                           BSON(_configsvrCommandName << 1),
@@ -93,7 +91,7 @@ public:
         uassertStatusOK(cmdResponse.commandStatus);
 
         // Append any return value from the response, which the config server returned
-        result.appendElements(cmdResponse.response);
+        CommandHelpers::filterCommandReplyForPassthrough(cmdResponse.response, &result);
 
         return true;
     }

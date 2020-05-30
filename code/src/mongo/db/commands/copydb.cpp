@@ -26,6 +26,7 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/status.h"
@@ -33,13 +34,17 @@
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/commands/copydb.h"
 #include "mongo/db/commands/copydb_start_commands.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/util/log.h"
 
 namespace {
 
@@ -48,7 +53,8 @@ using namespace mongo;
 using std::string;
 using std::stringstream;
 
-/* Usage:
+/* The copydb command is deprecated. See http://dochub.mongodb.org/core/copydb-clone-deprecation.
+ * Usage:
  * admindb.$cmd.findOne( { copydb: 1, fromhost: <connection string>, fromdb: <db>,
  *                         todb: <db>[, username: <username>, nonce: <nonce>, key: <key>] } );
  *
@@ -86,16 +92,16 @@ using std::stringstream;
  * NOTE: Since internal cluster auth works differently, "copydb" currently doesn't work between
  * shards in a cluster when auth is enabled.  See SERVER-13080.
  */
-class CmdCopyDb : public Command {
+class CmdCopyDb : public ErrmsgCommandDeprecated {
 public:
-    CmdCopyDb() : Command("copydb") {}
+    CmdCopyDb() : ErrmsgCommandDeprecated("copydb") {}
 
     virtual bool adminOnly() const {
         return true;
     }
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -104,25 +110,29 @@ public:
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         return copydb::checkAuthForCopydbCommand(client, dbname, cmdObj);
     }
 
-    virtual void help(stringstream& help) const {
-        help << "copy a database from another host to this host\n";
-        help << "usage: {copydb: 1, fromhost: <connection string>, fromdb: <db>, todb: <db>"
-             << "[, slaveOk: <bool>, username: <username>, nonce: <nonce>, key: <key>]}";
+    std::string help() const override {
+        return "copy a database from another host to this host\n"
+               "usage: {copydb: 1, fromhost: <connection string>, fromdb: <db>, todb: <db>"
+               "[, slaveOk: <bool>, username: <username>, nonce: <nonce>, key: <key>]}";
     }
 
-    virtual bool run(OperationContext* txn,
-                     const string& dbname,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
+        const char* deprecationWarning =
+            "Support for the copydb command has been deprecated. See "
+            "http://dochub.mongodb.org/core/copydb-clone-deprecation";
+        warning() << deprecationWarning;
+        result.append("note", deprecationWarning);
         boost::optional<DisableDocumentValidation> maybeDisableValidation;
         if (shouldBypassDocumentValidationForCommand(cmdObj))
-            maybeDisableValidation.emplace(txn);
+            maybeDisableValidation.emplace(opCtx);
 
         string fromhost = cmdObj.getStringField("fromhost");
         bool fromSelf = fromhost.empty();
@@ -134,50 +144,41 @@ public:
         }
 
         CloneOptions cloneOptions;
-        cloneOptions.fromDB = cmdObj.getStringField("fromdb");
+        const auto fromdbElt = cmdObj["fromdb"];
+        uassert(ErrorCodes::TypeMismatch,
+                "'fromdb' must be of type String",
+                fromdbElt.type() == BSONType::String);
+        cloneOptions.fromDB = fromdbElt.str();
         cloneOptions.slaveOk = cmdObj["slaveOk"].trueValue();
         cloneOptions.useReplAuth = false;
-        cloneOptions.snapshot = true;
 
-        string todb = cmdObj.getStringField("todb");
-        if (fromhost.empty() || todb.empty() || cloneOptions.fromDB.empty()) {
+        const auto todbElt = cmdObj["todb"];
+        uassert(ErrorCodes::TypeMismatch,
+                "'todb' must be of type String",
+                todbElt.type() == BSONType::String);
+        const std::string todb = todbElt.str();
+
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "Invalid 'todb' name: " << todb,
+                NamespaceString::validDBName(todb, NamespaceString::DollarInDbNameBehavior::Allow));
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "Invalid 'fromdb' name: " << cloneOptions.fromDB,
+                NamespaceString::validDBName(cloneOptions.fromDB,
+                                             NamespaceString::DollarInDbNameBehavior::Allow));
+
+        if (fromhost.empty()) {
             errmsg =
                 "params missing - {copydb: 1, fromhost: <connection string>, "
                 "fromdb: <db>, todb: <db>}";
             return false;
         }
 
-        if (!NamespaceString::validDBName(todb, NamespaceString::DollarInDbNameBehavior::Allow)) {
-            errmsg = "invalid todb name: " + todb;
-            return false;
-        }
-
         Cloner cloner;
 
-        // Get MONGODB-CR parameters
-        string username = cmdObj.getStringField("username");
-        string nonce = cmdObj.getStringField("nonce");
-        string key = cmdObj.getStringField("key");
+        auto& authConn = CopyDbAuthConnection::forClient(opCtx->getClient());
 
-        auto& authConn = CopyDbAuthConnection::forClient(txn->getClient());
-
-        if (!username.empty() && !nonce.empty() && !key.empty()) {
-            uassert(13008, "must call copydbgetnonce first", authConn.get());
-            BSONObj ret;
-            {
-                if (!authConn->runCommand(
-                        cloneOptions.fromDB,
-                        BSON("authenticate" << 1 << "user" << username << "nonce" << nonce << "key"
-                                            << key),
-                        ret)) {
-                    errmsg = "unable to login " + ret.toString();
-                    authConn.reset();
-                    return false;
-                }
-            }
-            cloner.setConnection(authConn.release());
-        } else if (cmdObj.hasField(saslCommandConversationIdFieldName) &&
-                   cmdObj.hasField(saslCommandPayloadFieldName)) {
+        if (cmdObj.hasField(saslCommandConversationIdFieldName) &&
+            cmdObj.hasField(saslCommandPayloadFieldName)) {
             uassert(25487, "must call copydbsaslstart first", authConn.get());
             BSONObj ret;
             if (!authConn->runCommand(
@@ -191,21 +192,21 @@ public:
             }
 
             if (!ret["done"].Bool()) {
-                result.appendElements(ret);
+                CommandHelpers::filterCommandReplyForPassthrough(ret, &result);
                 return true;
             }
 
             result.append("done", true);
-            cloner.setConnection(authConn.release());
+            cloner.setConnection(std::move(authConn));
         } else if (!fromSelf) {
             // If fromSelf leave the cloner's conn empty, it will use a DBDirectClient instead.
             const ConnectionString cs(uassertStatusOK(ConnectionString::parse(fromhost)));
 
-            DBClientBase* conn = cs.connect(StringData(), errmsg);
+            auto conn = cs.connect(StringData(), errmsg);
             if (!conn) {
                 return false;
             }
-            cloner.setConnection(conn);
+            cloner.setConnection(std::move(conn));
         }
 
         // Either we didn't need the authConn (if we even had one), or we already moved it
@@ -214,13 +215,13 @@ public:
 
         if (fromSelf) {
             // SERVER-4328 todo lock just the two db's not everything for the fromself case
-            ScopedTransaction transaction(txn, MODE_X);
-            Lock::GlobalWrite lk(txn->lockState());
-            uassertStatusOK(cloner.copyDb(txn, todb, fromhost, cloneOptions, NULL));
+            // SERVER-34431 TODO: Add calls to DatabaseShardingState::get().checkDbVersion()
+            // for source databases.
+            Lock::GlobalWrite lk(opCtx);
+            uassertStatusOK(cloner.copyDb(opCtx, todb, fromhost, cloneOptions, NULL));
         } else {
-            ScopedTransaction transaction(txn, MODE_IX);
-            Lock::DBLock lk(txn->lockState(), todb, MODE_X);
-            uassertStatusOK(cloner.copyDb(txn, todb, fromhost, cloneOptions, NULL));
+            AutoGetDb autoDb(opCtx, todb, MODE_X);
+            uassertStatusOK(cloner.copyDb(opCtx, todb, fromhost, cloneOptions, NULL));
         }
 
         return true;

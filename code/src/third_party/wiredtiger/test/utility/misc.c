@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -27,22 +27,33 @@
  */
 #include "test_util.h"
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#endif
+
 void (*custom_die)(void) = NULL;
+const char *progname = "program name not set";
 
 /*
- * die --
- *	Report an error and quit.
+ * testutil_die --
+ *	Report an error and abort.
  */
 void
 testutil_die(int e, const char *fmt, ...)
 {
 	va_list ap;
 
+	/* Flush output to be sure it doesn't mix with fatal errors. */
+	(void)fflush(stdout);
+	(void)fflush(stderr);
+
 	/* Allow test programs to cleanup on fatal error. */
 	if (custom_die != NULL)
 		(*custom_die)();
 
+	fprintf(stderr, "%s: FAILED", progname);
 	if (fmt != NULL) {
+		fprintf(stderr, ": ");
 		va_start(ap, fmt);
 		vfprintf(stderr, fmt, ap);
 		va_end(ap);
@@ -50,8 +61,23 @@ testutil_die(int e, const char *fmt, ...)
 	if (e != 0)
 		fprintf(stderr, ": %s", wiredtiger_strerror(e));
 	fprintf(stderr, "\n");
+	fprintf(stderr, "process aborting\n");
 
-	exit(EXIT_FAILURE);
+	abort();
+}
+
+/*
+ * testutil_set_progname --
+ *	Set the global program name for error handling.
+ */
+const char *
+testutil_set_progname(char * const *argv)
+{
+	if ((progname = strrchr(argv[0], DIR_DELIM)) == NULL)
+		progname = argv[0];
+	else
+		++progname;
+	return (progname);
 }
 
 /*
@@ -78,7 +104,7 @@ testutil_work_dir_from_path(char *buffer, size_t len, const char *dir)
  *	Remove the work directory.
  */
 void
-testutil_clean_work_dir(char *dir)
+testutil_clean_work_dir(const char *dir)
 {
 	size_t len;
 	int ret;
@@ -91,14 +117,14 @@ testutil_clean_work_dir(char *dir)
 	if ((buf = malloc(len)) == NULL)
 		testutil_die(ENOMEM, "Failed to allocate memory");
 
-	snprintf(buf, len, "%s %s %s %s", DIR_EXISTS_COMMAND, dir,
-		 RM_COMMAND, dir);
+	testutil_check(__wt_snprintf(
+	    buf, len, "%s %s %s %s", DIR_EXISTS_COMMAND, dir, RM_COMMAND, dir));
 #else
 	len = strlen(dir) + strlen(RM_COMMAND) + 1;
 	if ((buf = malloc(len)) == NULL)
 		testutil_die(ENOMEM, "Failed to allocate memory");
 
-	snprintf(buf, len, "%s%s", RM_COMMAND, dir);
+	testutil_check(__wt_snprintf(buf, len, "%s%s", RM_COMMAND, dir));
 #endif
 
 	if ((ret = system(buf)) != 0 && ret != ENOENT)
@@ -111,10 +137,9 @@ testutil_clean_work_dir(char *dir)
  *	Delete the existing work directory, then create a new one.
  */
 void
-testutil_make_work_dir(char *dir)
+testutil_make_work_dir(const char *dir)
 {
 	size_t len;
-	int ret;
 	char *buf;
 
 	testutil_clean_work_dir(dir);
@@ -125,10 +150,27 @@ testutil_make_work_dir(char *dir)
 		testutil_die(ENOMEM, "Failed to allocate memory");
 
 	/* mkdir shares syntax between Windows and Linux */
-	snprintf(buf, len, "%s%s", MKDIR_COMMAND, dir);
-	if ((ret = system(buf)) != 0)
-		testutil_die(ret, "%s", buf);
+	testutil_check(__wt_snprintf(buf, len, "%s%s", MKDIR_COMMAND, dir));
+	testutil_check(system(buf));
 	free(buf);
+}
+
+/*
+ * testutil_progress --
+ *	Print a progress message to the progress file.
+ */
+void
+testutil_progress(TEST_OPTS *opts, const char *message)
+{
+	FILE *fp;
+	time_t now;
+
+	if ((fp = fopen(opts->progress_file_name, "a")) == NULL)
+		testutil_die(errno, "fopen");
+	(void)time(&now);
+	fprintf(fp, "[%" PRIuMAX "] %s\n", (uintmax_t)now, message);
+	if (fclose(fp) != 0)
+		testutil_die(errno, "fclose");
 }
 
 /*
@@ -145,25 +187,65 @@ testutil_cleanup(TEST_OPTS *opts)
 		testutil_clean_work_dir(opts->home);
 
 	free(opts->uri);
+	free(opts->progress_file_name);
 	free(opts->home);
 }
 
 /*
- * testutil_disable_long_tests --
- *	Return if TESTUTIL_DISABLE_LONG_TESTS is set.
+ * testutil_is_flag_set --
+ *	Return if an environment variable flag is set.
  */
 bool
-testutil_disable_long_tests(void)
+testutil_is_flag_set(const char *flag)
 {
 	const char *res;
+	bool enable_long_tests;
 
-	if (__wt_getenv(NULL,
-	    "TESTUTIL_DISABLE_LONG_TESTS", &res) == WT_NOTFOUND)
+	if (__wt_getenv(NULL, flag, &res) != 0 || res == NULL)
 		return (false);
 
+	/*
+	 * This is a boolean test. So if the environment variable is set to any
+	 * value other than 0, we return success.
+	 */
+	enable_long_tests = res[0] != '0';
+
 	free((void *)res);
-	return (true);
+
+	return (enable_long_tests);
 }
+
+#ifndef _WIN32
+/*
+ * testutil_sleep_wait --
+ *	Wait for a process up to a number of seconds.
+ */
+void
+testutil_sleep_wait(uint32_t seconds, pid_t pid)
+{
+	pid_t got;
+	int status;
+
+	while (seconds > 0) {
+		if ((got = waitpid(pid, &status, WNOHANG|WUNTRACED)) == pid) {
+			if (WIFEXITED(status))
+				testutil_die(EINVAL,
+				    "Child process %" PRIu64 " exited early"
+				    " with status %d", (uint64_t)pid,
+				    WEXITSTATUS(status));
+			if (WIFSIGNALED(status))
+				testutil_die(EINVAL,
+				    "Child process %" PRIu64 " terminated "
+				    " with signal %d", (uint64_t)pid,
+				    WTERMSIG(status));
+		} else if (got == -1)
+			testutil_die(errno, "waitpid");
+
+		--seconds;
+		sleep(1);
+	}
+}
+#endif
 
 /*
  * dcalloc --
@@ -201,6 +283,7 @@ void *
 drealloc(void *p, size_t len)
 {
 	void *t;
+
 	if ((t = realloc(p, len)) != NULL)
 		return (t);
 	testutil_die(errno, "realloc: %" WT_SIZET_FMT "B", len);
@@ -233,4 +316,27 @@ dstrndup(const char *str, size_t len)
 	p = dcalloc(len + 1, sizeof(char));
 	memcpy(p, str, len);
 	return (p);
+}
+
+/*
+ * example_setup --
+ *	Set the program name, create a home directory for the example programs.
+ */
+const char *
+example_setup(int argc, char * const *argv)
+{
+	const char *home;
+
+	(void)argc;					/* Unused variable */
+
+	(void)testutil_set_progname(argv);
+
+	/*
+	 * Create a clean test directory for this run of the test program if the
+	 * environment variable isn't already set (as is done by make check).
+	 */
+	if ((home = getenv("WIREDTIGER_HOME")) == NULL)
+		home = "WT_HOME";
+	testutil_make_work_dir(home);
+	return (home);
 }

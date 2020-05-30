@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -14,6 +14,7 @@
  */
 int
 __wt_getenv(WT_SESSION_IMPL *session, const char *variable, const char **envp)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	const char *temp;
 
@@ -22,5 +23,5 @@ __wt_getenv(WT_SESSION_IMPL *session, const char *variable, const char **envp)
 	if (((temp = getenv(variable)) != NULL) && strlen(temp) > 0)
 		return (__wt_strdup(session, temp, envp));
 
-	return (WT_NOTFOUND);
+	return (0);
 }

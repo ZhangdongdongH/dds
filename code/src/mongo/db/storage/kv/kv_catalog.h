@@ -38,6 +38,7 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
+#include "mongo/db/storage/kv/kv_prefix.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
@@ -50,9 +51,12 @@ public:
     class FeatureTracker;
 
     /**
-     * @param rs - does NOT take ownership
+     * @param rs - does NOT take ownership. The RecordStore must be thread-safe, in particular
+     * with concurrent calls to RecordStore::find, updateRecord, insertRecord, deleteRecord and
+     * dataFor. The KVCatalog does not utilize Cursors and those methods may omit further
+     * protection.
      */
-    KVCatalog(RecordStore* rs, bool isRsThreadSafe, bool directoryPerDb, bool directoryForIndexes);
+    KVCatalog(RecordStore* rs, bool directoryPerDb, bool directoryForIndexes);
     ~KVCatalog();
 
     void init(OperationContext* opCtx);
@@ -62,13 +66,16 @@ public:
     /**
      * @return error or ident for instance
      */
-    Status newCollection(OperationContext* opCtx, StringData ns, const CollectionOptions& options);
+    Status newCollection(OperationContext* opCtx,
+                         StringData ns,
+                         const CollectionOptions& options,
+                         KVPrefix prefix);
 
     std::string getCollectionIdent(StringData ns) const;
 
     std::string getIndexIdent(OperationContext* opCtx, StringData ns, StringData idName) const;
 
-    const BSONCollectionCatalogEntry::MetaData getMetaData(OperationContext* opCtx, StringData ns);
+    BSONCollectionCatalogEntry::MetaData getMetaData(OperationContext* opCtx, StringData ns) const;
     void putMetaData(OperationContext* opCtx,
                      StringData ns,
                      BSONCollectionCatalogEntry::MetaData& md);
@@ -85,10 +92,24 @@ public:
 
     bool isUserDataIdent(StringData ident) const;
 
+    bool isCollectionIdent(StringData ident) const;
+
     FeatureTracker* getFeatureTracker() const {
         invariant(_featureTracker);
         return _featureTracker.get();
     }
+
+    RecordStore* getRecordStore() {
+        return _rs;
+    }
+
+    /**
+     * Create an entry in the catalog for an orphaned collection found in the
+     * storage engine. Return the generated ns of the collection.
+     * Note that this function does not recreate the _id index on the collection because it does not
+     * have access to index catalog.
+     */
+    StatusWith<std::string> newOrphanedIdent(OperationContext* opCtx, std::string ident);
 
 private:
     class AddIdentChange;
@@ -108,7 +129,6 @@ private:
     bool _hasEntryCollidingWithRand() const;
 
     RecordStore* _rs;  // not owned
-    const bool _isRsThreadSafe;
     const bool _directoryPerDb;
     const bool _directoryForIndexes;
 

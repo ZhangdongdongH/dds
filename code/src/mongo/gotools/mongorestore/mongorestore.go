@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Package mongorestore writes BSON data to a MongoDB instance.
 package mongorestore
 
@@ -36,6 +42,9 @@ type MongoRestore struct {
 
 	TargetDirectory string
 
+	// Skip restoring users and roles, regardless of namespace, when true.
+	SkipUsersAndRoles bool
+
 	// other internal state
 	manager *intents.Manager
 	safety  *mgo.Safe
@@ -62,8 +71,9 @@ type MongoRestore struct {
 	// channel on which to notify if/when a termination signal is received
 	termChan chan struct{}
 
-	// for testing. If set, this value will be used instead of os.Stdin
-	stdin io.Reader
+	// Reader to take care of BSON input if not reading from the local filesystem.
+	// This is initialized to os.Stdin if unset.
+	InputReader io.Reader
 }
 
 type collectionIndexes map[string][]IndexDocument
@@ -136,7 +146,8 @@ func (restore *MongoRestore) ParseAndValidateOptions() error {
 	}
 
 	log.Logvf(log.DebugLow, "connected to node type: %v", nodeType)
-	restore.safety, err = db.BuildWriteConcern(restore.OutputOptions.WriteConcern, nodeType)
+	restore.safety, err = db.BuildWriteConcern(restore.OutputOptions.WriteConcern, nodeType,
+		restore.ToolOptions.URI.ParsedConnString())
 	if err != nil {
 		return fmt.Errorf("error parsing write concern: %v", err)
 	}
@@ -215,6 +226,20 @@ func (restore *MongoRestore) ParseAndValidateOptions() error {
 			"cannot specify a negative number of insertion workers per collection")
 	}
 
+	if restore.OutputOptions.PreserveUUID {
+		if !restore.OutputOptions.Drop {
+			return fmt.Errorf("cannot specify --preserveUUID without --drop")
+		}
+
+		ok, err := restore.SessionProvider.SupportsCollectionUUID()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("target host does not support --preserveUUID")
+		}
+	}
+
 	// a single dash signals reading from stdin
 	if restore.TargetDirectory == "-" {
 		if restore.InputOptions.Archive != "" {
@@ -225,8 +250,8 @@ func (restore *MongoRestore) ParseAndValidateOptions() error {
 			return fmt.Errorf("cannot restore from stdin without a specified collection")
 		}
 	}
-	if restore.stdin == nil {
-		restore.stdin = os.Stdin
+	if restore.InputReader == nil {
+		restore.InputReader = os.Stdin
 	}
 
 	return nil
@@ -248,13 +273,15 @@ func (restore *MongoRestore) Restore() error {
 	}
 
 	if restore.InputOptions.Archive != "" {
-		archiveReader, err := restore.getArchiveReader()
-		if err != nil {
-			return err
-		}
-		restore.archive = &archive.Reader{
-			In:      archiveReader,
-			Prelude: &archive.Prelude{},
+		if restore.archive == nil {
+			archiveReader, err := restore.getArchiveReader()
+			if err != nil {
+				return err
+			}
+			restore.archive = &archive.Reader{
+				In:      archiveReader,
+				Prelude: &archive.Prelude{},
+			}
 		}
 		err = restore.archive.Prelude.Read(restore.archive.In)
 		if err != nil {
@@ -316,9 +343,7 @@ func (restore *MongoRestore) Restore() error {
 	// Create the demux before intent creation, because muted archive intents need
 	// to register themselves with the demux directly
 	if restore.InputOptions.Archive != "" {
-		restore.archive.Demux = &archive.Demultiplexer{
-			In: restore.archive.In,
-		}
+		restore.archive.Demux = archive.CreateDemux(restore.archive.Prelude.NamespaceMetadatas, restore.archive.In)
 	}
 
 	switch {
@@ -386,13 +411,18 @@ func (restore *MongoRestore) Restore() error {
 		return nil
 	}
 
+	demuxFinished := make(chan interface{})
+	var demuxErr error
 	if restore.InputOptions.Archive != "" {
 		namespaceChan := make(chan string, 1)
 		namespaceErrorChan := make(chan error)
 		restore.archive.Demux.NamespaceChan = namespaceChan
 		restore.archive.Demux.NamespaceErrorChan = namespaceErrorChan
 
-		go restore.archive.Demux.Run()
+		go func() {
+			demuxErr = restore.archive.Demux.Run()
+			close(demuxFinished)
+		}()
 		// consume the new namespace announcement from the demux for all of the special collections
 		// that get cached when being read out of the archive.
 		// The first regular collection found gets pushed back on to the namespaceChan
@@ -481,14 +511,19 @@ func (restore *MongoRestore) Restore() error {
 		}
 	}
 
-	log.Logv(log.Always, "done")
+	defer log.Logv(log.Always, "done")
+
+	if restore.InputOptions.Archive != "" {
+		<-demuxFinished
+		return demuxErr
+	}
 
 	return nil
 }
 
 func (restore *MongoRestore) getArchiveReader() (rc io.ReadCloser, err error) {
 	if restore.InputOptions.Archive == "-" {
-		rc = ioutil.NopCloser(restore.stdin)
+		rc = ioutil.NopCloser(restore.InputReader)
 	} else {
 		targetStat, err := os.Stat(restore.InputOptions.Archive)
 		if err != nil {

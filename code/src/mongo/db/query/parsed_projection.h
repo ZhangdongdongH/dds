@@ -45,10 +45,10 @@ public:
      * Returns Status::OK() if it's a valid spec.
      * Returns a Status indicating how it's invalid otherwise.
      */
-    static Status make(const BSONObj& spec,
+    static Status make(OperationContext* opCtx,
+                       const BSONObj& spec,
                        const MatchExpression* const query,
-                       ParsedProjection** out,
-                       const ExtensionsCallback& extensionsCallback);
+                       ParsedProjection** out);
 
     /**
      * Returns true if the projection requires match details from the query,
@@ -82,6 +82,10 @@ public:
         return _source;
     }
 
+    bool wantTextScore() const {
+        return _wantTextScore;
+    }
+
     /**
      * Does the projection want geoNear metadata?  If so any geoNear stage should include them.
      */
@@ -107,6 +111,14 @@ public:
      * 'a.b', and the projection {'a.b': 0} will not preserve the element located at 'a'.
      */
     bool isFieldRetainedExactly(StringData path) const;
+
+    /**
+     * Returns true if the project contains any paths with multiple path pieces (e.g. returns true
+     * for {_id: 0, "a.b": 1} and returns false for {_id: 0, a: 1, b: 1}).
+     */
+    bool hasDottedFieldPath() const {
+        return _hasDottedFieldPath;
+    }
 
 private:
     /**
@@ -172,6 +184,8 @@ private:
 
     BSONObj _source;
 
+    bool _wantTextScore = false;
+
     bool _wantGeoNearDistance = false;
 
     bool _wantGeoNearPoint = false;
@@ -180,6 +194,8 @@ private:
 
     // Whether this projection includes a sortKey meta-projection.
     bool _wantSortKey = false;
+
+    bool _hasDottedFieldPath = false;
 };
 
 }  // namespace mongo

@@ -94,7 +94,6 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
     BSONElement fsyncEl;
     BSONElement wEl;
 
-
     for (auto e : obj) {
         const auto fieldName = e.fieldNameStringData();
         if (fieldName == kJFieldName) {
@@ -152,21 +151,24 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
 }
 
 StatusWith<WriteConcernOptions> WriteConcernOptions::extractWCFromCommand(
-    const BSONObj& cmdObj, const std::string& dbName, const WriteConcernOptions& defaultWC) {
+    const BSONObj& cmdObj, const WriteConcernOptions& defaultWC) {
     WriteConcernOptions writeConcern = defaultWC;
     writeConcern.usedDefault = true;
     if (writeConcern.wNumNodes == 0 && writeConcern.wMode.empty()) {
         writeConcern.wNumNodes = 1;
     }
 
+    // Return the default write concern if no write concern is provided. We check for the existence
+    // of the write concern field up front in order to avoid the expense of constructing an error
+    // status in bsonExtractTypedField() below.
+    if (!cmdObj.hasField(kWriteConcernField)) {
+        return writeConcern;
+    }
+
     BSONElement writeConcernElement;
     Status wcStatus =
         bsonExtractTypedField(cmdObj, kWriteConcernField, Object, &writeConcernElement);
     if (!wcStatus.isOK()) {
-        if (wcStatus == ErrorCodes::NoSuchKey) {
-            // Return default write concern if no write concern is given.
-            return writeConcern;
-        }
         return wcStatus;
     }
 
@@ -209,10 +211,6 @@ BSONObj WriteConcernOptions::toBSON() const {
 
 bool WriteConcernOptions::shouldWaitForOtherNodes() const {
     return !wMode.empty() || wNumNodes > 1;
-}
-
-bool WriteConcernOptions::validForConfigServers() const {
-    return wMode == kMajority;
 }
 
 }  // namespace mongo

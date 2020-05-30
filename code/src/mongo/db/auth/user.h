@@ -31,13 +31,16 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/crypto/sha1_block.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
+#include "mongo/db/auth/restriction_set.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user_name.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/platform/unordered_map.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_map.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -59,6 +62,7 @@ class User {
     MONGO_DISALLOW_COPYING(User);
 
 public:
+    template <typename HashBlock>
     struct SCRAMCredentials {
         SCRAMCredentials() : iterationCount(0), salt(""), serverKey(""), storedKey("") {}
 
@@ -66,16 +70,35 @@ public:
         std::string salt;
         std::string serverKey;
         std::string storedKey;
+
+        bool isValid() const {
+            constexpr auto kEncodedHashLength = base64::encodedLength(HashBlock::kHashLength);
+            constexpr auto kEncodedSaltLength = base64::encodedLength(HashBlock::kHashLength - 4);
+
+            return (iterationCount > 0) && (salt.size() == kEncodedSaltLength) &&
+                base64::validate(salt) && (serverKey.size() == kEncodedHashLength) &&
+                base64::validate(serverKey) && (storedKey.size() == kEncodedHashLength) &&
+                base64::validate(storedKey);
+        }
     };
     struct CredentialData {
-        CredentialData() : password(""), scram(), isExternal(false) {}
+        CredentialData() : scram_sha1(), scram_sha256(), isExternal(false) {}
 
-        std::string password;
-        SCRAMCredentials scram;
+        SCRAMCredentials<SHA1Block> scram_sha1;
+        SCRAMCredentials<SHA256Block> scram_sha256;
         bool isExternal;
+
+        // Select the template determined version of SCRAMCredentials.
+        // For example: creds.scram<SHA1Block>().isValid()
+        // is equivalent to creds.scram_sha1.isValid()
+        template <typename HashBlock>
+        SCRAMCredentials<HashBlock>& scram();
+
+        template <typename HashBlock>
+        const SCRAMCredentials<HashBlock>& scram() const;
     };
 
-    typedef unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
+    typedef stdx::unordered_map<ResourcePattern, Privilege> ResourcePrivilegeMap;
 
     explicit User(const UserName& name);
     ~User();
@@ -83,7 +106,17 @@ public:
     /**
      * Returns the user name for this user.
      */
-    const UserName& getName() const;
+    const UserName& getName() const {
+        return _name;
+    }
+
+    /**
+     * Returns a digest of the user's identity
+     */
+    const SHA256Block& getDigest() const {
+        return _digest;
+    }
+
 
     /**
      * Returns an iterator over the names of the user's direct roles
@@ -118,6 +151,11 @@ public:
     const ActionSet getActionsForResource(const ResourcePattern& resource) const;
 
     /**
+     * Returns true if the user has is allowed to perform an action on the given resource.
+     */
+    bool hasActionsForResource(const ResourcePattern& resource) const;
+
+    /**
      * Returns true if this copy of information about this user is still valid. If this returns
      * false, this object should no longer be used and should be returned to the
      * AuthorizationManager and a new User object for this user should be requested.
@@ -129,11 +167,6 @@ public:
      * only caller of this.
      */
     uint32_t getRefCount() const;
-
-    /**
-     * Clones this user into a new, valid User object with refcount of 0.
-     */
-    User* clone() const;
 
     // Mutators below.  Mutation functions should *only* be called by the AuthorizationManager
 
@@ -179,6 +212,19 @@ public:
     void addPrivileges(const PrivilegeVector& privileges);
 
     /**
+     * Replaces any existing authentication restrictions with "restrictions".
+     */
+    void setRestrictions(RestrictionDocuments restrictions) &;
+
+    /**
+     * Gets any set authentication restrictions.
+     */
+    const RestrictionDocuments& getRestrictions() const& noexcept {
+        return _restrictions;
+    }
+    void getRestrictions() && = delete;
+
+    /**
      * Marks this instance of the User object as invalid, most likely because information about
      * the user has been updated and needs to be reloaded from the AuthorizationManager.
      *
@@ -206,17 +252,23 @@ public:
 private:
     UserName _name;
 
+    // Digest of the full username
+    SHA256Block _digest;
+
     // Maps resource name to privilege on that resource
     ResourcePrivilegeMap _privileges;
 
     // Roles the user has privileges from
-    unordered_set<RoleName> _roles;
+    stdx::unordered_set<RoleName> _roles;
 
     // Roles that the user indirectly has privileges from, due to role inheritance.
     std::vector<RoleName> _indirectRoles;
 
     // Credential information.
     CredentialData _credentials;
+
+    // Restrictions which must be met by a Client in order to authenticate as this user.
+    RestrictionDocuments _restrictions;
 
     // _refCount and _isInvalidated are modified exclusively by the AuthorizationManager
     // _isInvalidated can be read by any consumer of User, but _refCount can only be

@@ -28,6 +28,7 @@
 #pragma once
 
 #include <set>
+#include <string>
 
 #include "mongo/db/client.h"
 #include "mongo/s/write_ops/batch_write_exec.h"
@@ -40,7 +41,7 @@ namespace mongo {
  */
 class ClusterLastErrorInfo {
 public:
-    static const Client::Decoration<ClusterLastErrorInfo> get;
+    static const Client::Decoration<std::shared_ptr<ClusterLastErrorInfo>> get;
 
     /** new request not associated (yet or ever) with a client */
     void newRequest();
@@ -61,6 +62,7 @@ public:
      * gets shards used on the previous request
      */
     std::set<std::string>* getPrevShardHosts() const {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return &_prev->shardHostsWritten;
     }
 
@@ -68,14 +70,8 @@ public:
      * Gets the shards, hosts, and opTimes the client last wrote to with write commands.
      */
     const HostOpTimeMap& getPrevHostOpTimes() const {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
         return _prev->hostOpTimes;
-    }
-
-    /**
-     * resets the information stored for the current request
-     */
-    void clearRequestInfo() {
-        _cur->clear();
     }
 
     void disableForCommand();
@@ -90,6 +86,9 @@ private:
         std::set<std::string> shardHostsWritten;
         HostOpTimeMap hostOpTimes;
     };
+
+    // Protects _infos, _cur, and _prev.
+    mutable stdx::mutex _mutex;
 
     // We use 2 so we can flip for getLastError type operations.
     RequestInfo _infos[2];

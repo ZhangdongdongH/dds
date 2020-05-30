@@ -32,10 +32,14 @@
 
 #include "mongo/db/concurrency/lock_manager.h"
 
-#include "mongo/base/simple_string_data_comparator.h"
+#include <third_party/murmurhash3/MurmurHash3.h>
+
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -94,6 +98,11 @@ uint32_t modeMask(LockMode mode) {
     return 1 << mode;
 }
 
+uint64_t hashStringData(StringData str) {
+    char hash[16];
+    MurmurHash3_x64_128(str.rawData(), str.size(), 0, hash);
+    return static_cast<size_t>(ConstDataView(hash).read<LittleEndian<std::uint64_t>>());
+}
 
 /**
  * Maps the resource id to a human-readable string.
@@ -179,7 +188,7 @@ struct LockHead {
     }
 
     /**
-     * Finish creation of request and put it on the lockhead's conflict or granted queues. Returns
+     * Finish creation of request and put it on the LockHead's conflict or granted queues. Returns
      * LOCK_WAITING for conflict case and LOCK_OK otherwise.
      */
     LockResult newRequest(LockRequest* request) {
@@ -273,7 +282,7 @@ struct LockHead {
     // the end of the queue. Conversion requests are granted from the beginning forward.
     LockRequestList grantedList;
 
-    // Counts the grants and coversion counts for each of the supported lock modes. These
+    // Counts the grants and conversion counts for each of the supported lock modes. These
     // counts should exactly match the aggregated modes on the granted list.
     uint32_t grantedCounts[LockModesCount];
 
@@ -288,7 +297,7 @@ struct LockHead {
     // Doubly-linked list of requests, which have not been granted yet because they conflict
     // with the set of granted modes. Requests are queued at the end of the queue and are
     // granted from the beginning forward, which gives these locks FIFO ordering. Exceptions
-    // are high-priorty locks, such as the MMAP V1 flush lock.
+    // are high-priority locks, such as the MMAP V1 flush lock.
     LockRequestList conflictList;
 
     // Counts the conflicting requests for each of the lock modes. These counts should exactly
@@ -329,7 +338,7 @@ struct LockHead {
  * of resourceId to PartitionedLockHead.
  *
  * As long as all lock requests for a resource have an intent mode, as opposed to a conflicting
- * mode, its LockHead may reference ParitionedLockHeads. A partitioned LockHead will not have
+ * mode, its LockHead may reference PartitionedLockHeads. A partitioned LockHead will not have
  * any conflicts. The total set of granted requests (with intent mode) is the union of
  * its grantedList and all grantedLists in PartitionedLockHeads.
  *
@@ -388,7 +397,7 @@ void LockHead::migratePartitionedLockHeads() {
             partition->data.erase(it);
             delete partitionedLock;
         }
-        // Don't pop-back to early as otherwise the lock will be considered not partioned in
+        // Don't pop-back to early as otherwise the lock will be considered not partitioned in
         // newRequest().
         partitions.pop_back();
     }
@@ -590,7 +599,9 @@ bool LockManager::unlock(LockRequest* request) {
         lock->decGrantedModeCount(request->mode);
 
         if (request->compatibleFirst) {
+            invariant(lock->compatibleFirstCount > 0);
             lock->compatibleFirstCount--;
+            invariant(lock->compatibleFirstCount == 0 || !lock->grantedList.empty());
         }
 
         _onLockModeChanged(lock, lock->grantedCounts[request->mode] == 0);
@@ -619,7 +630,7 @@ bool LockManager::unlock(LockRequest* request) {
         _onLockModeChanged(lock, lock->grantedCounts[request->convertMode] == 0);
     } else {
         // Invalid request status
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     return (request->recursiveCount == 0);
@@ -781,8 +792,8 @@ void LockManager::_onLockModeChanged(LockHead* lock, bool checkConflictQueue) {
 
         iter->notify->notify(lock->resourceId, LOCK_OK);
 
-        // Small optimization - nothing is compatible with MODE_X, so no point in looking
-        // further in the conflict queue.
+        // Small optimization - nothing is compatible with a newly granted MODE_X, so no point in
+        // looking further in the conflict queue. Conflicting MODE_X requests are skipped above.
         if (iter->mode == MODE_X) {
             break;
         }
@@ -895,8 +906,12 @@ void LockManager::_dumpBucket(const LockBucket* bucket) const {
         sb << "GRANTED:\n";
         for (const LockRequest* iter = lock->grantedList._front; iter != nullptr;
              iter = iter->next) {
+            std::stringstream threadId;
+            threadId << iter->locker->getThreadId() << " | " << std::showbase << std::hex
+                     << iter->locker->getThreadId();
             sb << '\t' << "LockRequest " << iter->locker->getId() << " @ " << iter->locker << ": "
                << "Mode = " << modeName(iter->mode) << "; "
+               << "Thread = " << threadId.str() << "; "
                << "ConvertMode = " << modeName(iter->convertMode) << "; "
                << "EnqueueAtFront = " << iter->enqueueAtFront << "; "
                << "CompatibleFirst = " << iter->compatibleFirst << "; " << '\n';
@@ -905,8 +920,12 @@ void LockManager::_dumpBucket(const LockBucket* bucket) const {
         sb << "PENDING:\n";
         for (const LockRequest* iter = lock->conflictList._front; iter != nullptr;
              iter = iter->next) {
+            std::stringstream threadId;
+            threadId << iter->locker->getThreadId() << " | " << std::showbase << std::hex
+                     << iter->locker->getThreadId();
             sb << '\t' << "LockRequest " << iter->locker->getId() << " @ " << iter->locker << ": "
                << "Mode = " << modeName(iter->mode) << "; "
+               << "Thread = " << threadId.str() << "; "
                << "ConvertMode = " << modeName(iter->convertMode) << "; "
                << "EnqueueAtFront = " << iter->enqueueAtFront << "; "
                << "CompatibleFirst = " << iter->compatibleFirst << "; " << '\n';
@@ -1105,14 +1124,14 @@ uint64_t ResourceId::fullHash(ResourceType type, uint64_t hashId) {
 }
 
 ResourceId::ResourceId(ResourceType type, StringData ns)
-    : _fullHash(fullHash(type, SimpleStringDataComparator::kInstance.hash(ns))) {
+    : _fullHash(fullHash(type, hashStringData(ns))) {
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns.toString();
 #endif
 }
 
 ResourceId::ResourceId(ResourceType type, const std::string& ns)
-    : _fullHash(fullHash(type, SimpleStringDataComparator::kInstance.hash(ns))) {
+    : _fullHash(fullHash(type, hashStringData(ns))) {
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns;
 #endif
@@ -1123,6 +1142,9 @@ ResourceId::ResourceId(ResourceType type, uint64_t hashId) : _fullHash(fullHash(
 std::string ResourceId::toString() const {
     StringBuilder ss;
     ss << "{" << _fullHash << ": " << resourceTypeName(getType()) << ", " << getHashId();
+    if (getType() == RESOURCE_MUTEX) {
+        ss << ", " << Lock::ResourceMutex::getName(*this);
+    }
 
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     ss << ", " << _nsCopy;

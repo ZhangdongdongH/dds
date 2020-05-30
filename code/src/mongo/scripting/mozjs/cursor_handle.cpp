@@ -69,7 +69,7 @@ void CursorHandleInfo::finalize(JSFreeOp* fop, JSObject* obj) {
         const long long cursorId = cursorTracker->cursorId;
         if (cursorId) {
             try {
-                cursorTracker->client->killCursor(cursorId);
+                cursorTracker->client->killCursor(cursorTracker->ns, cursorId);
             } catch (...) {
                 auto status = exceptionToStatus();
 
@@ -81,7 +81,7 @@ void CursorHandleInfo::finalize(JSFreeOp* fop, JSObject* obj) {
             }
         }
 
-        delete cursorTracker;
+        getScope(fop)->trackedDelete(cursorTracker);
     }
 }
 

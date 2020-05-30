@@ -28,21 +28,32 @@
 
 #pragma once
 
-#include <string>
+#include <vector>
 
-#include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/shard_id.h"
-#include "mongo/s/write_ops/batched_delete_document.h"
-#include "mongo/s/write_ops/batched_update_document.h"
+#include "mongo/s/stale_exception.h"
 
 namespace mongo {
 
 class OperationContext;
-struct ShardEndpoint;
+
+/**
+ * Combines a shard and the version which that shard should be using
+ */
+struct ShardEndpoint {
+    ShardEndpoint(const ShardId& shardName, const ChunkVersion& shardVersion)
+        : shardName(shardName), shardVersion(shardVersion) {}
+
+    ShardEndpoint(const ShardEndpoint& other)
+        : shardName(other.shardName), shardVersion(other.shardVersion) {}
+
+    ShardId shardName;
+    ChunkVersion shardVersion;
+};
 
 /**
  * The NSTargeter interface is used by a WriteOp to generate and target child write operations
@@ -83,41 +94,39 @@ public:
      *
      * Returns !OK with message if document could not be targeted for other reasons.
      */
-    virtual Status targetInsert(OperationContext* txn,
-                                const BSONObj& doc,
-                                ShardEndpoint** endpoint) const = 0;
+    virtual StatusWith<ShardEndpoint> targetInsert(OperationContext* opCtx,
+                                                   const BSONObj& doc) const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for a potentially multi-shard update.
      *
      * Returns OK and fills the endpoints; returns a status describing the error otherwise.
      */
-    virtual Status targetUpdate(OperationContext* txn,
-                                const BatchedUpdateDocument& updateDoc,
-                                std::vector<ShardEndpoint*>* endpoints) const = 0;
+    virtual StatusWith<std::vector<ShardEndpoint>> targetUpdate(
+        OperationContext* opCtx, const write_ops::UpdateOpEntry& updateDoc) const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for a potentially multi-shard delete.
      *
      * Returns OK and fills the endpoints; returns a status describing the error otherwise.
      */
-    virtual Status targetDelete(OperationContext* txn,
-                                const BatchedDeleteDocument& deleteDoc,
-                                std::vector<ShardEndpoint*>* endpoints) const = 0;
+    virtual StatusWith<std::vector<ShardEndpoint>> targetDelete(
+        OperationContext* opCtx, const write_ops::DeleteOpEntry& deleteDoc) const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for the entire collection.
      *
      * Returns !OK with message if the full collection could not be targeted.
      */
-    virtual Status targetCollection(std::vector<ShardEndpoint*>* endpoints) const = 0;
+    virtual StatusWith<std::vector<ShardEndpoint>> targetCollection() const = 0;
 
     /**
      * Returns a vector of ShardEndpoints for all shards.
      *
      * Returns !OK with message if all shards could not be targeted.
      */
-    virtual Status targetAllShards(std::vector<ShardEndpoint*>* endpoints) const = 0;
+    virtual StatusWith<std::vector<ShardEndpoint>> targetAllShards(
+        OperationContext* opCtx) const = 0;
 
     /**
      * Informs the targeter that a targeting failure occurred during one of the last targeting
@@ -133,7 +142,8 @@ public:
      *
      * If stale responses are is noted, we must not have noted that we cannot target.
      */
-    virtual void noteStaleResponse(const ShardEndpoint& endpoint, const BSONObj& staleInfo) = 0;
+    virtual void noteStaleResponse(const ShardEndpoint& endpoint,
+                                   const StaleConfigInfo& staleInfo) = 0;
 
     /**
      * Refreshes the targeting metadata for the namespace if needed, based on previously-noted
@@ -147,22 +157,7 @@ public:
      * NOTE: This function may block for shared resources or network calls.
      * Returns !OK with message if could not refresh
      */
-    virtual Status refreshIfNeeded(OperationContext* txn, bool* wasChanged) = 0;
-};
-
-/**
- * A ShardEndpoint represents a destination for a targeted query or document.  It contains both
- * the logical target (shard name/version/broadcast) and the physical target (host name).
- */
-struct ShardEndpoint {
-    ShardEndpoint(const ShardEndpoint& other)
-        : shardName(other.shardName), shardVersion(other.shardVersion) {}
-
-    ShardEndpoint(const ShardId& shardName, const ChunkVersion& shardVersion)
-        : shardName(shardName), shardVersion(shardVersion) {}
-
-    const ShardId shardName;
-    const ChunkVersion shardVersion;
+    virtual Status refreshIfNeeded(OperationContext* opCtx, bool* wasChanged) = 0;
 };
 
 }  // namespace mongo

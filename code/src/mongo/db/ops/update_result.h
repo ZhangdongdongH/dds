@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,14 +28,9 @@
 
 #pragma once
 
-#include "mongo/db/curop.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/util/mongoutils/str.h"
+#include "mongo/bson/bsonobj.h"
 
 namespace mongo {
-
-namespace str = mongoutils::str;
 
 struct UpdateResult {
     UpdateResult(bool existing_,
@@ -44,6 +39,7 @@ struct UpdateResult {
                  unsigned long long numMatched_,
                  const BSONObj& upsertedObject_);
 
+    std::string toString() const;
 
     // if existing objects were modified
     const bool existing;
@@ -59,12 +55,6 @@ struct UpdateResult {
 
     // if something was upserted, the new _id of the object
     BSONObj upserted;
-
-    const std::string toString() const {
-        return str::stream() << " upserted: " << upserted << " modifiers: " << modifiers
-                             << " existing: " << existing << " numDocsModified: " << numDocsModified
-                             << " numMatched: " << numMatched;
-    }
 };
 
 }  // namespace mongo

@@ -33,25 +33,32 @@
 
 #include "mongo/dbtests/dbtests.h"
 
+#include "mongo/base/init.h"
 #include "mongo/base/initializer.h"
+#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/catalog/index_create.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/logical_clock.h"
+#include "mongo/db/repl/drop_pending_collection_reaper.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d.h"
+#include "mongo/db/service_entry_point_mongod.h"
 #include "mongo/db/wire_version.h"
 #include "mongo/dbtests/framework.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/transport/transport_layer_manager.h"
+#include "mongo/util/clock_source_mock.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers_synchronous.h"
 #include "mongo/util/startup_test.h"
-#include "mongo/util/static_observer.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
@@ -62,15 +69,21 @@ const auto kIndexVersion = IndexDescriptor::IndexVersion::kV2;
 
 void initWireSpec() {
     WireSpec& spec = WireSpec::instance();
-    // accept from any version
-    spec.incoming.minWireVersion = RELEASE_2_4_AND_BEFORE;
-    spec.incoming.maxWireVersion = COMMANDS_ACCEPT_WRITE_CONCERN;
-    // connect to any version
-    spec.outgoing.minWireVersion = RELEASE_2_4_AND_BEFORE;
-    spec.outgoing.maxWireVersion = COMMANDS_ACCEPT_WRITE_CONCERN;
+
+    // Accept from internal clients of the same version, as in upgrade featureCompatibilityVersion.
+    spec.incomingInternalClient.minWireVersion = LATEST_WIRE_VERSION;
+    spec.incomingInternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+
+    // Accept from any version external client.
+    spec.incomingExternalClient.minWireVersion = RELEASE_2_4_AND_BEFORE;
+    spec.incomingExternalClient.maxWireVersion = LATEST_WIRE_VERSION;
+
+    // Connect to servers of the same version, as in upgrade featureCompatibilityVersion.
+    spec.outgoing.minWireVersion = LATEST_WIRE_VERSION;
+    spec.outgoing.maxWireVersion = LATEST_WIRE_VERSION;
 }
 
-Status createIndex(OperationContext* txn, StringData ns, const BSONObj& keys, bool unique) {
+Status createIndex(OperationContext* opCtx, StringData ns, const BSONObj& keys, bool unique) {
     BSONObjBuilder specBuilder;
     specBuilder.append("name", DBClientBase::genIndexName(keys));
     specBuilder.append("ns", ns);
@@ -79,19 +92,19 @@ Status createIndex(OperationContext* txn, StringData ns, const BSONObj& keys, bo
     if (unique) {
         specBuilder.appendBool("unique", true);
     }
-    return createIndexFromSpec(txn, ns, specBuilder.done());
+    return createIndexFromSpec(opCtx, ns, specBuilder.done());
 }
 
-Status createIndexFromSpec(OperationContext* txn, StringData ns, const BSONObj& spec) {
-    AutoGetOrCreateDb autoDb(txn, nsToDatabaseSubstring(ns), MODE_X);
+Status createIndexFromSpec(OperationContext* opCtx, StringData ns, const BSONObj& spec) {
+    AutoGetOrCreateDb autoDb(opCtx, nsToDatabaseSubstring(ns), MODE_X);
     Collection* coll;
     {
-        WriteUnitOfWork wunit(txn);
-        coll = autoDb.getDb()->getOrCreateCollection(txn, ns);
+        WriteUnitOfWork wunit(opCtx);
+        coll = autoDb.getDb()->getOrCreateCollection(opCtx, NamespaceString(ns));
         invariant(coll);
         wunit.commit();
     }
-    MultiIndexBlock indexer(txn, coll);
+    MultiIndexBlock indexer(opCtx, coll);
     Status status = indexer.init(spec).getStatus();
     if (status == ErrorCodes::IndexAlreadyExists) {
         return Status::OK();
@@ -103,7 +116,7 @@ Status createIndexFromSpec(OperationContext* txn, StringData ns, const BSONObj& 
     if (!status.isOK()) {
         return status;
     }
-    WriteUnitOfWork wunit(txn);
+    WriteUnitOfWork wunit(opCtx);
     indexer.commit();
     wunit.commit();
     return Status::OK();
@@ -114,15 +127,51 @@ Status createIndexFromSpec(OperationContext* txn, StringData ns, const BSONObj& 
 
 
 int dbtestsMain(int argc, char** argv, char** envp) {
-    static StaticObserver StaticObserver;
-    Command::testCommandsEnabled = true;
+    ::mongo::setTestCommandsEnabled(true);
     ::mongo::setupSynchronousSignalHandlers();
     mongo::dbtests::initWireSpec();
+
     mongo::runGlobalInitializersOrDie(argc, argv, envp);
+    serverGlobalParams.featureCompatibility.setVersion(
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
     repl::ReplSettings replSettings;
     replSettings.setOplogSizeBytes(10 * 1024 * 1024);
-    repl::setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
-    repl::getGlobalReplicationCoordinator()->setFollowerMode(repl::MemberState::RS_PRIMARY);
+    setGlobalServiceContext(ServiceContext::make());
+    ServiceContext* service = getGlobalServiceContext();
+    service->setServiceEntryPoint(std::make_unique<ServiceEntryPointMongod>(service));
+
+    auto logicalClock = stdx::make_unique<LogicalClock>(service);
+    LogicalClock::set(service, std::move(logicalClock));
+
+    auto fastClock = stdx::make_unique<ClockSourceMock>();
+    // Timestamps are split into two 32-bit integers, seconds and "increments". Currently (but
+    // maybe not for eternity), a Timestamp with a value of `0` seconds is always considered
+    // "null" by `Timestamp::isNull`, regardless of its increment value. Ticking the
+    // `ClockSourceMock` only bumps the "increment" counter, thus by default, generating "null"
+    // timestamps. Bumping by one second here avoids any accidental interpretations.
+    fastClock->advance(Seconds(1));
+    service->setFastClockSource(std::move(fastClock));
+
+    auto preciseClock = stdx::make_unique<ClockSourceMock>();
+    // See above.
+    preciseClock->advance(Seconds(1));
+    service->setPreciseClockSource(std::move(preciseClock));
+
+    service->setTransportLayer(
+        transport::TransportLayerManager::makeAndStartDefaultEgressTransportLayer());
+
+    repl::ReplicationCoordinator::set(
+        service,
+        std::unique_ptr<repl::ReplicationCoordinator>(
+            new repl::ReplicationCoordinatorMock(service, replSettings)));
+    repl::ReplicationCoordinator::get(getGlobalServiceContext())
+        ->setFollowerMode(repl::MemberState::RS_PRIMARY)
+        .ignore();
+
+    auto storageMock = stdx::make_unique<repl::StorageInterfaceMock>();
+    repl::DropPendingCollectionReaper::set(
+        service, stdx::make_unique<repl::DropPendingCollectionReaper>(storageMock.get()));
+
     getGlobalAuthorizationManager()->setAuthEnabled(false);
     ScriptEngine::setup();
     StartupTest::runTests();

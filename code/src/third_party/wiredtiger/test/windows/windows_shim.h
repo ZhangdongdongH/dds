@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -25,40 +25,20 @@
  * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
  * OTHER DEALINGS IN THE SOFTWARE.
  */
+#include "wt_internal.h"
 
-#ifdef _WIN32
-
-#define	WIN32_LEAN_AND_MEAN
-#include <windows.h>
-#include <errno.h>
-#include <stdint.h>
-#include <direct.h>
-#include <io.h>
-#include <process.h>
-
-#define	inline __inline
-
-/* Define some POSIX types */
-typedef int u_int;
+#include <direct.h>						/* _mkdir */
 
 /* Windows does not define constants for access() */
-#define	R_OK 04
-#define	X_OK R_OK
-
-/* MSVC Doesn't provide __func__, it has __FUNCTION__ */
-#ifdef _MSC_VER
-#define	__func__ __FUNCTION__
-#endif
+#define	R_OK	04
+#define	X_OK	R_OK
 
 /* snprintf does not exist on <= VS 2013 */
 #if _MSC_VER < 1900
-#define	snprintf _wt_snprintf
-
-_Check_return_opt_ int __cdecl _wt_snprintf(
-    _Out_writes_(_MaxCount) char * _DstBuf,
-    _In_ size_t _MaxCount,
-    _In_z_ _Printf_format_string_ const char * _Format, ...);
+#define	snprintf __wt_snprintf
 #endif
+
+#define	strcasecmp	stricmp
 
 /*
  * Emulate <sys/stat.h>
@@ -80,21 +60,23 @@ int gettimeofday(struct timeval* tp, void* tzp);
  */
 typedef uint32_t useconds_t;
 
-int
-sleep(int seconds);
+int sleep(int seconds);
+int usleep(useconds_t useconds);
 
-int
-usleep(useconds_t useconds);
+#define	lseek(fd, offset, origin)					\
+	_lseek(fd, (long)(offset), origin)
+#define	write(fd, buffer, count)					\
+	_write(fd, buffer, (unsigned int)(count))
 
 /*
- * Emulate the <pthread.h> support we need for the tests
+ * Emulate the <pthread.h> support we need for tests and example code.
  */
 typedef CRITICAL_SECTION  pthread_mutex_t;
 typedef CONDITION_VARIABLE pthread_cond_t;
 
 struct rwlock_wrapper {
 	SRWLOCK rwlock;
-	int exclusive_locked;
+	DWORD exclusive_locked;
 };
 
 struct rwlock_wrapper;
@@ -105,16 +87,13 @@ typedef HANDLE pthread_t;
 typedef int pthread_rwlockattr_t;
 typedef int pthread_attr_t;
 
-int   pthread_rwlock_destroy(pthread_rwlock_t *);
-int   pthread_rwlock_init(pthread_rwlock_t *,
-    const pthread_rwlockattr_t *);
-int   pthread_rwlock_rdlock(pthread_rwlock_t *);
-int   pthread_rwlock_unlock(pthread_rwlock_t *);
-int   pthread_rwlock_trywrlock(pthread_rwlock_t *);
-int   pthread_rwlock_wrlock(pthread_rwlock_t *);
-
-int   pthread_create(pthread_t *, const pthread_attr_t *,
-    void *(*)(void *), void *);
-int   pthread_join(pthread_t, void **);
-
-#endif
+int pthread_create(
+	pthread_t *, const pthread_attr_t *, void *(*)(void *), void *);
+int pthread_join(pthread_t, void **);
+int pthread_rwlock_destroy(pthread_rwlock_t *);
+int pthread_rwlock_init(pthread_rwlock_t *, const pthread_rwlockattr_t *);
+int pthread_rwlock_rdlock(pthread_rwlock_t *);
+int pthread_rwlock_tryrdlock(pthread_rwlock_t *);
+int pthread_rwlock_trywrlock(pthread_rwlock_t *);
+int pthread_rwlock_unlock(pthread_rwlock_t *);
+int pthread_rwlock_wrlock(pthread_rwlock_t *);

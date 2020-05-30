@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -43,10 +43,10 @@ __wt_block_truncate(WT_SESSION_IMPL *session, WT_BLOCK *block, wt_off_t len)
 	 * more targeted solution at some point.
 	 */
 	if (!conn->hot_backup) {
-		__wt_readlock(session, conn->hot_backup_lock);
+		__wt_readlock(session, &conn->hot_backup_lock);
 		if (!conn->hot_backup)
 			ret = __wt_ftruncate(session, block->fh, len);
-		__wt_readunlock(session, conn->hot_backup_lock);
+		__wt_readunlock(session, &conn->hot_backup_lock);
 	}
 
 	/*
@@ -231,8 +231,8 @@ __block_write_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	WT_BLOCK_HEADER *blk;
 	WT_DECL_RET;
 	WT_FH *fh;
-	size_t align_size;
 	wt_off_t offset;
+	size_t align_size;
 	uint32_t checksum;
 	bool local_locked;
 

@@ -34,10 +34,11 @@
 
 #include "mongo/db/client.h"
 #include "mongo/db/repl/bgsync.h"
-#include "mongo/db/repl/replica_set_config.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/reporter.h"
 #include "mongo/executor/task_executor.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/scopeguard.h"
@@ -48,43 +49,47 @@ namespace repl {
 
 namespace {
 
+
+const Milliseconds maximumKeepAliveIntervalMS(30 * 1000);
+
+// The network timeout used for replSetUpdatePosition requests made to a node's sync source.
+const Seconds syncSourceFeedbackNetworkTimeoutSecs(30);
+
 /**
- * Calculates the keep alive interval based on the current configuration in the replication
- * coordinator.
+ * Calculates the keep alive interval based on the given ReplSetConfig.
  */
-Milliseconds calculateKeepAliveInterval(OperationContext* txn, stdx::mutex& mtx) {
-    stdx::lock_guard<stdx::mutex> lock(mtx);
-    auto replCoord = repl::ReplicationCoordinator::get(txn);
-    auto rsConfig = replCoord->getConfig();
-    auto keepAliveInterval = rsConfig.getElectionTimeoutPeriod() / 2;
-    return keepAliveInterval;
+Milliseconds calculateKeepAliveInterval(const ReplSetConfig& rsConfig) {
+    return std::min((rsConfig.getElectionTimeoutPeriod() / 2), maximumKeepAliveIntervalMS);
 }
 
 /**
  * Returns function to prepare update command
  */
 Reporter::PrepareReplSetUpdatePositionCommandFn makePrepareReplSetUpdatePositionCommandFn(
-    OperationContext* txn,
-    stdx::mutex& mtx,
-    const HostAndPort& syncTarget,
-    BackgroundSync* bgsync) {
-    return [&mtx, syncTarget, txn, bgsync](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle
-                                               commandStyle) -> StatusWith<BSONObj> {
+    ReplicationCoordinator* replCoord, const HostAndPort& syncTarget, BackgroundSync* bgsync) {
+    return [syncTarget, replCoord, bgsync]() -> StatusWith<BSONObj> {
         auto currentSyncTarget = bgsync->getSyncTarget();
         if (currentSyncTarget != syncTarget) {
-            // Change in sync target
-            return Status(ErrorCodes::InvalidSyncSource, "Sync target is no longer valid");
+            if (currentSyncTarget.empty()) {
+                // Sync source was cleared.
+                return Status(ErrorCodes::InvalidSyncSource,
+                              str::stream() << "Sync source was cleared. Was " << syncTarget);
+
+            } else {
+                // Sync source changed.
+                return Status(ErrorCodes::InvalidSyncSource,
+                              str::stream() << "Sync source changed from " << syncTarget << " to "
+                                            << currentSyncTarget);
+            }
         }
 
-        stdx::lock_guard<stdx::mutex> lock(mtx);
-        auto replCoord = repl::ReplicationCoordinator::get(txn);
         if (replCoord->getMemberState().primary()) {
             // Primary has no one to send updates to.
             return Status(ErrorCodes::InvalidSyncSource,
                           "Currently primary - no one to send updates to");
         }
 
-        return replCoord->prepareReplSetUpdatePositionCommand(commandStyle);
+        return replCoord->prepareReplSetUpdatePositionCommand();
     };
 }
 
@@ -105,13 +110,7 @@ void SyncSourceFeedback::forwardSlaveProgress() {
     }
 }
 
-Status SyncSourceFeedback::_updateUpstream(OperationContext* txn, BackgroundSync* bgsync) {
-    Reporter* reporter;
-    {
-        stdx::lock_guard<stdx::mutex> lock(_mtx);
-        reporter = _reporter;
-    }
-
+Status SyncSourceFeedback::_updateUpstream(Reporter* reporter) {
     auto syncTarget = reporter->getTarget();
 
     auto triggerStatus = reporter->trigger();
@@ -125,24 +124,9 @@ Status SyncSourceFeedback::_updateUpstream(OperationContext* txn, BackgroundSync
 
     if (!status.isOK()) {
         log() << "SyncSourceFeedback error sending update to " << syncTarget << ": " << status;
-
-        // Some errors should not cause result in blacklisting the sync source.
-        if (status != ErrorCodes::InvalidSyncSource) {
-            // The command could not be created because the node is now primary.
-        } else if (status != ErrorCodes::NodeNotFound) {
-            // The command could not be created, likely because this node was removed from the set.
-        } else {
-            // Blacklist sync target for .5 seconds and find a new one.
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            auto replCoord = repl::ReplicationCoordinator::get(txn);
-            const auto blacklistDuration = Milliseconds{500};
-            const auto until = Date_t::now() + blacklistDuration;
-            log() << "Blacklisting " << syncTarget << " due to error: '" << status << "' for "
-                  << blacklistDuration << " until: " << until;
-            replCoord->blacklistSyncSource(syncTarget, until);
-            bgsync->clearSyncTarget();
-        }
     }
+
+    // Sync source blacklisting will be done in BackgroundSync and SyncSourceResolver.
 
     return status;
 }
@@ -156,7 +140,9 @@ void SyncSourceFeedback::shutdown() {
     _cond.notify_all();
 }
 
-void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* bgsync) {
+void SyncSourceFeedback::run(executor::TaskExecutor* executor,
+                             BackgroundSync* bgsync,
+                             ReplicationCoordinator* replCoord) {
     Client::initThread("SyncSourceFeedback");
 
     HostAndPort syncTarget;
@@ -165,10 +151,9 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
     Milliseconds keepAliveInterval(0);
 
     while (true) {  // breaks once _shutdownSignaled is true
-        auto txn = cc().makeOperationContext();
 
         if (keepAliveInterval == Milliseconds(0)) {
-            keepAliveInterval = calculateKeepAliveInterval(txn.get(), _mtx);
+            keepAliveInterval = calculateKeepAliveInterval(replCoord->getConfig());
         }
 
         {
@@ -177,12 +162,16 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
             // this class.
             stdx::unique_lock<stdx::mutex> lock(_mtx);
             while (!_positionChanged && !_shutdownSignaled) {
-                if (_cond.wait_for(lock, keepAliveInterval.toSystemDuration()) ==
-                    stdx::cv_status::timeout) {
-                    MemberState state = ReplicationCoordinator::get(txn.get())->getMemberState();
-                    if (!(state.primary() || state.startup())) {
-                        break;
+                {
+                    MONGO_IDLE_THREAD_BLOCK;
+                    if (_cond.wait_for(lock, keepAliveInterval.toSystemDuration()) !=
+                        stdx::cv_status::timeout) {
+                        continue;
                     }
+                }
+                MemberState state = replCoord->getMemberState();
+                if (!(state.primary() || state.startup())) {
+                    break;
                 }
             }
 
@@ -195,7 +184,7 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
 
         {
             stdx::lock_guard<stdx::mutex> lock(_mtx);
-            MemberState state = ReplicationCoordinator::get(txn.get())->getMemberState();
+            MemberState state = replCoord->getMemberState();
             if (state.primary() || state.startup()) {
                 continue;
             }
@@ -217,20 +206,23 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
 
             // Update keepalive value from config.
             auto oldKeepAliveInterval = keepAliveInterval;
-            keepAliveInterval = calculateKeepAliveInterval(txn.get(), _mtx);
+            keepAliveInterval = calculateKeepAliveInterval(replCoord->getConfig());
             if (oldKeepAliveInterval != keepAliveInterval) {
                 LOG(1) << "new syncSourceFeedback keep alive duration = " << keepAliveInterval
                        << " (previously " << oldKeepAliveInterval << ")";
             }
         }
 
-        Reporter reporter(
-            executor,
-            makePrepareReplSetUpdatePositionCommandFn(txn.get(), _mtx, syncTarget, bgsync),
-            syncTarget,
-            keepAliveInterval);
+        Reporter reporter(executor,
+                          makePrepareReplSetUpdatePositionCommandFn(replCoord, syncTarget, bgsync),
+                          syncTarget,
+                          keepAliveInterval,
+                          syncSourceFeedbackNetworkTimeoutSecs);
         {
             stdx::lock_guard<stdx::mutex> lock(_mtx);
+            if (_shutdownSignaled) {
+                break;
+            }
             _reporter = &reporter;
         }
         ON_BLOCK_EXIT([this]() {
@@ -238,7 +230,7 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor, BackgroundSync* b
             _reporter = nullptr;
         });
 
-        auto status = _updateUpstream(txn.get(), bgsync);
+        auto status = _updateUpstream(&reporter);
         if (!status.isOK()) {
             LOG(1) << "The replication progress command (replSetUpdatePosition) failed and will be "
                       "retried: "

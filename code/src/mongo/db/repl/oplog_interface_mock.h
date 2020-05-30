@@ -43,10 +43,13 @@ class OplogInterfaceMock : public OplogInterface {
 public:
     using Operation = std::pair<BSONObj, RecordId>;
     using Operations = std::list<Operation>;
+    OplogInterfaceMock() = default;
     explicit OplogInterfaceMock(std::initializer_list<Operation> operations);
     explicit OplogInterfaceMock(const Operations& operations);
+    void setOperations(const Operations& operations);
     std::string toString() const override;
     std::unique_ptr<OplogInterface::Iterator> makeIterator() const override;
+    HostAndPort hostAndPort() const override;
 
 private:
     Operations _operations;

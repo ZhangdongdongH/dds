@@ -55,7 +55,7 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 // kMajority implies JOURNAL if journaling is
                                                 // supported by mongod and
                                                 // writeConcernMajorityJournalDefault is set to true
-                                                // in the ReplicaSetConfig.
+                                                // in the ReplSetConfig.
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 Seconds(15));
 
@@ -65,12 +65,12 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
  *   zone: <string zoneName>
  * }
  */
-class RemoveShardFromZoneCmd : public Command {
+class RemoveShardFromZoneCmd : public BasicCommand {
 public:
-    RemoveShardFromZoneCmd() : Command("removeShardFromZone", false, "removeshardfromzone") {}
+    RemoveShardFromZoneCmd() : BasicCommand("removeShardFromZone", "removeshardfromzone") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -81,33 +81,29 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "removes a shard from the zone";
+    std::string help() const override {
+        return "removes a shard from the zone";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(ShardType::ConfigNS)),
-                ActionType::update)) {
+                ResourcePattern::forExactNamespace(ShardType::ConfigNS), ActionType::update)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
-                ResourcePattern::forExactNamespace(NamespaceString(TagsType::ConfigNS)),
-                ActionType::find)) {
+                ResourcePattern::forExactNamespace(TagsType::ConfigNS), ActionType::find)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
         return Status::OK();
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         auto parsedRequest =
             uassertStatusOK(RemoveShardFromZoneRequest::parseFromMongosCommand(cmdObj));
@@ -116,9 +112,9 @@ public:
         parsedRequest.appendAsConfigCommand(&cmdBuilder);
         cmdBuilder.append("writeConcern", kMajorityWriteConcern.toBSON());
 
-        auto configShard = Grid::get(txn)->shardRegistry()->getConfigShard();
+        auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
         auto cmdResponseStatus = uassertStatusOK(
-            configShard->runCommandWithFixedRetryAttempts(txn,
+            configShard->runCommandWithFixedRetryAttempts(opCtx,
                                                           kPrimaryOnlyReadPreference,
                                                           "admin",
                                                           cmdBuilder.obj(),

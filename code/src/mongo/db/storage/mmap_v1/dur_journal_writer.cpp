@@ -39,6 +39,7 @@
 #include "mongo/db/storage/mmap_v1/dur_stats.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/log.h"
 #include "mongo/util/timer.h"
 
@@ -56,12 +57,14 @@ namespace {
  * (2) TODO should we do this using N threads? Would be quite easy see Hackenberg paper table
  *  5 and 6. 2 threads might be a good balance.
  */
-void WRITETODATAFILES(const JSectHeader& h, const AlignedBuilder& uncompressed) {
+void WRITETODATAFILES(OperationContext* opCtx,
+                      const JSectHeader& h,
+                      const AlignedBuilder& uncompressed) {
     Timer t;
 
     LOG(4) << "WRITETODATAFILES BEGIN";
 
-    RecoveryJob::get().processSection(&h, uncompressed.buf(), uncompressed.len(), NULL);
+    RecoveryJob::get().processSection(opCtx, &h, uncompressed.buf(), uncompressed.len(), NULL);
 
     const long long m = t.micros();
     stats.curr()->_writeToDataFilesMicros += m;
@@ -137,7 +140,7 @@ void JournalWriter::start() {
     }
 
     // Start the thread
-    stdx::thread t(stdx::bind(&JournalWriter::_journalWriterThread, this));
+    stdx::thread t([this] { _journalWriterThread(); });
     _journalWriterThreadHandle.swap(t);
 }
 
@@ -211,7 +214,11 @@ void JournalWriter::_journalWriterThread() {
 
     try {
         while (true) {
-            Buffer* const buffer = _journalQueue.blockingPop();
+            Buffer* const buffer = [&] {
+                MONGO_IDLE_THREAD_BLOCK;
+                return _journalQueue.blockingPop();
+            }();
+
             BufferGuard bufferGuard(buffer, &_readyQueue);
 
             if (buffer->_isShutdown) {
@@ -244,7 +251,7 @@ void JournalWriter::_journalWriterThread() {
 
             // Apply the journal entries on top of the shared view so that when flush is
             // requested it would write the latest.
-            WRITETODATAFILES(buffer->_header, buffer->_builder);
+            WRITETODATAFILES(cc().makeOperationContext().get(), buffer->_header, buffer->_builder);
 
             // Data is now persisted on the shared view, so notify any potential journal file
             // cleanup waiters.
@@ -252,22 +259,22 @@ void JournalWriter::_journalWriterThread() {
         }
     } catch (const DBException& e) {
         severe() << "dbexception in journalWriterThread causing immediate shutdown: " << redact(e);
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (const std::ios_base::failure& e) {
         severe() << "ios_base exception in journalWriterThread causing immediate shutdown: "
                  << e.what();
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (const std::bad_alloc& e) {
         severe() << "bad_alloc exception in journalWriterThread causing immediate shutdown: "
                  << e.what();
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (const std::exception& e) {
         severe() << "exception in journalWriterThread causing immediate shutdown: "
                  << redact(e.what());
-        invariant(false);
+        MONGO_UNREACHABLE;
     } catch (...) {
         severe() << "unhandled exception in journalWriterThread causing immediate shutdown";
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     log() << "Journal writer thread stopped";

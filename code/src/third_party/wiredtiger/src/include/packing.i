@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -104,8 +104,8 @@ __pack_name_next(WT_PACK_NAME *pn, WT_CONFIG_ITEM *name)
 	WT_CONFIG_ITEM ignore;
 
 	if (pn->genname) {
-		(void)snprintf(pn->buf, sizeof(pn->buf),
-		    (pn->iskey ? "key%d" : "value%d"), pn->count);
+		WT_RET(__wt_snprintf(pn->buf, sizeof(pn->buf),
+		    (pn->iskey ? "key%d" : "value%d"), pn->count));
 		WT_CLEAR(*name);
 		name->str = pn->buf;
 		name->len = strlen(pn->buf);
@@ -168,9 +168,14 @@ next:	if (pack->cur == pack->end)
 			    (int)(pack->end - pack->orig), pack->orig);
 		return (0);
 	case 'u':
-	case 'U':
 		/* Special case for items with a size prefix. */
 		pv->type = (!pv->havesize && *pack->cur != '\0') ? 'U' : 'u';
+		return (0);
+	case 'U':
+		/*
+		 * Don't change the type. 'U' is used internally, so this type
+		 * was already changed to explicitly include the size.
+		 */
 		return (0);
 	case 'b':
 	case 'h':
@@ -193,7 +198,7 @@ next:	if (pack->cur == pack->end)
 		return (0);
 	default:
 		WT_RET_MSG(pack->session, EINVAL,
-		   "Invalid type '%c' found in format '%.*s'",
+		    "Invalid type '%c' found in format '%.*s'",
 		    pv->type, (int)(pack->end - pack->orig), pack->orig);
 	}
 
@@ -201,46 +206,46 @@ next:	if (pack->cur == pack->end)
 
 #define	WT_PACK_GET(session, pv, ap) do {				\
 	WT_ITEM *__item;						\
-	switch (pv.type) {						\
+	switch ((pv).type) {						\
 	case 'x':							\
 		break;							\
 	case 's':							\
 	case 'S':							\
-		pv.u.s = va_arg(ap, const char *);			\
+		(pv).u.s = va_arg(ap, const char *);			\
 		break;							\
 	case 'U':							\
 	case 'u':							\
 		__item = va_arg(ap, WT_ITEM *);				\
-		pv.u.item.data = __item->data;				\
-		pv.u.item.size = __item->size;				\
+		(pv).u.item.data = __item->data;			\
+		(pv).u.item.size = __item->size;			\
 		break;							\
 	case 'b':							\
 	case 'h':							\
 	case 'i':							\
-		pv.u.i = va_arg(ap, int);				\
+		(pv).u.i = va_arg(ap, int);				\
 		break;							\
 	case 'B':							\
 	case 'H':							\
 	case 'I':							\
 	case 't':							\
-		pv.u.u = va_arg(ap, unsigned int);			\
+		(pv).u.u = va_arg(ap, unsigned int);			\
 		break;							\
 	case 'l':							\
-		pv.u.i = va_arg(ap, long);				\
+		(pv).u.i = va_arg(ap, long);				\
 		break;							\
 	case 'L':							\
-		pv.u.u = va_arg(ap, unsigned long);			\
+		(pv).u.u = va_arg(ap, unsigned long);			\
 		break;							\
 	case 'q':							\
-		pv.u.i = va_arg(ap, int64_t);				\
+		(pv).u.i = va_arg(ap, int64_t);				\
 		break;							\
 	case 'Q':							\
 	case 'r':							\
 	case 'R':							\
-		pv.u.u = va_arg(ap, uint64_t);				\
+		(pv).u.u = va_arg(ap, uint64_t);			\
 		break;							\
 	/* User format strings have already been validated. */		\
-	WT_ILLEGAL_VALUE(session);					\
+	WT_ILLEGAL_VALUE(session, (pv).type);				\
 	}								\
 } while (0)
 
@@ -248,14 +253,15 @@ next:	if (pack->cur == pack->end)
  * __pack_size --
  *      Get the size of a packed value.
  */
-static inline size_t
-__pack_size(WT_SESSION_IMPL *session, WT_PACK_VALUE *pv)
+static inline int
+__pack_size(WT_SESSION_IMPL *session, WT_PACK_VALUE *pv, size_t *vp)
 {
 	size_t s, pad;
 
 	switch (pv->type) {
 	case 'x':
-		return (pv->size);
+		*vp = pv->size;
+		return (0);
 	case 'j':
 	case 'J':
 	case 'K':
@@ -271,7 +277,8 @@ __pack_size(WT_SESSION_IMPL *session, WT_PACK_VALUE *pv)
 			WT_ASSERT(session, len >= 0);
 			s = (size_t)len + (pv->type == 'K' ? 0 : 1);
 		}
-		return (s);
+		*vp = s;
+		return (0);
 	case 's':
 	case 'S':
 		if (pv->type == 's' || pv->havesize) {
@@ -279,7 +286,8 @@ __pack_size(WT_SESSION_IMPL *session, WT_PACK_VALUE *pv)
 			WT_ASSERT(session, s != 0);
 		} else
 			s = strlen(pv->u.s) + 1;
-		return (s);
+		*vp = s;
+		return (0);
 	case 'U':
 	case 'u':
 		s = pv->u.item.size;
@@ -290,28 +298,33 @@ __pack_size(WT_SESSION_IMPL *session, WT_PACK_VALUE *pv)
 			pad = pv->size - s;
 		if (pv->type == 'U')
 			s += __wt_vsize_uint(s + pad);
-		return (s + pad);
+		*vp = s + pad;
+		return (0);
 	case 'b':
 	case 'B':
 	case 't':
-		return (1);
+		*vp = 1;
+		return (0);
 	case 'h':
 	case 'i':
 	case 'l':
 	case 'q':
-		return (__wt_vsize_int(pv->u.i));
+		*vp = __wt_vsize_int(pv->u.i);
+		return (0);
 	case 'H':
 	case 'I':
 	case 'L':
 	case 'Q':
 	case 'r':
-		return (__wt_vsize_uint(pv->u.u));
+		*vp = __wt_vsize_uint(pv->u.u);
+		return (0);
 	case 'R':
-		return (sizeof(uint64_t));
+		*vp = sizeof(uint64_t);
+		return (0);
 	}
 
-	__wt_err(session, EINVAL, "unknown pack-value type: %c", (int)pv->type);
-	return ((size_t)-1);
+	WT_RET_MSG(
+	    session, EINVAL, "unknown pack-value type: %c", (int)pv->type);
 }
 
 /*
@@ -322,8 +335,8 @@ static inline int
 __pack_write(
     WT_SESSION_IMPL *session, WT_PACK_VALUE *pv, uint8_t **pp, size_t maxlen)
 {
-	uint8_t *oldp;
 	size_t s, pad;
+	uint8_t *oldp;
 
 	switch (pv->type) {
 	case 'x':
@@ -337,15 +350,20 @@ __pack_write(
 		*pp += pv->size;
 		break;
 	case 'S':
-		s = strlen(pv->u.s);
+		/*
+		 * When preceded by a size, that indicates the maximum number
+		 * of bytes the string can store, this does not include the
+		 * terminating NUL character. In a string with characters
+		 * less than the specified size, the remaining bytes are
+		 * NULL padded.
+		 */
 		if (pv->havesize) {
-			if (pv->size < s) {
-				s = pv->size;
-				pad = 0;
-			} else
-				pad = pv->size - s;
-		} else
+			s = __wt_strnlen(pv->u.s, pv->size);
+			pad = (s < pv->size) ? pv->size - s : 0;
+		} else {
+			s = strlen(pv->u.s);
 			pad = 1;
+		}
 		WT_SIZE_CHECK_PACK(s + pad, maxlen);
 		if (s > 0)
 			memcpy(*pp, pv->u.s, s);
@@ -551,50 +569,50 @@ __unpack_read(WT_SESSION_IMPL *session,
 
 #define	WT_UNPACK_PUT(session, pv, ap) do {				\
 	WT_ITEM *__item;						\
-	switch (pv.type) {						\
+	switch ((pv).type) {						\
 	case 'x':							\
 		break;							\
 	case 's':							\
 	case 'S':							\
-		*va_arg(ap, const char **) = pv.u.s;			\
+		*va_arg(ap, const char **) = (pv).u.s;			\
 		break;							\
 	case 'U':							\
 	case 'u':							\
 		__item = va_arg(ap, WT_ITEM *);				\
-		__item->data = pv.u.item.data;				\
-		__item->size = pv.u.item.size;				\
+		__item->data = (pv).u.item.data;			\
+		__item->size = (pv).u.item.size;			\
 		break;							\
 	case 'b':							\
-		*va_arg(ap, int8_t *) = (int8_t)pv.u.i;			\
+		*va_arg(ap, int8_t *) = (int8_t)(pv).u.i;		\
 		break;							\
 	case 'h':							\
-		*va_arg(ap, int16_t *) = (short)pv.u.i;			\
+		*va_arg(ap, int16_t *) = (short)(pv).u.i;		\
 		break;							\
 	case 'i':							\
 	case 'l':							\
-		*va_arg(ap, int32_t *) = (int32_t)pv.u.i;		\
+		*va_arg(ap, int32_t *) = (int32_t)(pv).u.i;		\
 		break;							\
 	case 'q':							\
-		*va_arg(ap, int64_t *) = pv.u.i;			\
+		*va_arg(ap, int64_t *) = (pv).u.i;			\
 		break;							\
 	case 'B':							\
 	case 't':							\
-		*va_arg(ap, uint8_t *) = (uint8_t)pv.u.u;		\
+		*va_arg(ap, uint8_t *) = (uint8_t)(pv).u.u;		\
 		break;							\
 	case 'H':							\
-		*va_arg(ap, uint16_t *) = (uint16_t)pv.u.u;		\
+		*va_arg(ap, uint16_t *) = (uint16_t)(pv).u.u;		\
 		break;							\
 	case 'I':							\
 	case 'L':							\
-		*va_arg(ap, uint32_t *) = (uint32_t)pv.u.u;		\
+		*va_arg(ap, uint32_t *) = (uint32_t)(pv).u.u;		\
 		break;							\
 	case 'Q':							\
 	case 'r':							\
 	case 'R':							\
-		*va_arg(ap, uint64_t *) = pv.u.u;			\
+		*va_arg(ap, uint64_t *) = (pv).u.u;			\
 		break;							\
 	/* User format strings have already been validated. */		\
-	WT_ILLEGAL_VALUE(session);					\
+	WT_ILLEGAL_VALUE(session, (pv).type);				\
 	}								\
 } while (0)
 
@@ -625,12 +643,10 @@ __wt_struct_packv(WT_SESSION_IMPL *session,
 		WT_PACK_GET(session, pv, ap);
 		WT_RET(__pack_write(session, &pv, &p, (size_t)(end - p)));
 	}
+	WT_RET_NOTFOUND_OK(ret);
 
 	/* Be paranoid - __pack_write should never overflow. */
 	WT_ASSERT(session, p <= end);
-
-	if (ret != WT_NOTFOUND)
-		return (ret);
 
 	return (0);
 }
@@ -644,22 +660,26 @@ __wt_struct_sizev(
     WT_SESSION_IMPL *session, size_t *sizep, const char *fmt, va_list ap)
 {
 	WT_DECL_PACK_VALUE(pv);
+	WT_DECL_RET;
 	WT_PACK pack;
-	size_t total;
+	size_t v;
+
+	*sizep = 0;
 
 	if (fmt[0] != '\0' && fmt[1] == '\0') {
 		pv.type = fmt[0];
 		WT_PACK_GET(session, pv, ap);
-		*sizep = __pack_size(session, &pv);
-		return (0);
+		return (__pack_size(session, &pv, sizep));
 	}
 
 	WT_RET(__pack_init(session, &pack, fmt));
-	for (total = 0; __pack_next(&pack, &pv) == 0;) {
+	while ((ret = __pack_next(&pack, &pv)) == 0) {
 		WT_PACK_GET(session, pv, ap);
-		total += __pack_size(session, &pv);
+		WT_RET(__pack_size(session, &pv, &v));
+		*sizep += v;
 	}
-	*sizep = total;
+	WT_RET_NOTFOUND_OK(ret);
+
 	return (0);
 }
 
@@ -691,12 +711,10 @@ __wt_struct_unpackv(WT_SESSION_IMPL *session,
 		WT_RET(__unpack_read(session, &pv, &p, (size_t)(end - p)));
 		WT_UNPACK_PUT(session, pv, ap);
 	}
+	WT_RET_NOTFOUND_OK(ret);
 
 	/* Be paranoid - __pack_write should never overflow. */
 	WT_ASSERT(session, p <= end);
-
-	if (ret != WT_NOTFOUND)
-		return (ret);
 
 	return (0);
 }
@@ -714,8 +732,10 @@ __wt_struct_unpackv(WT_SESSION_IMPL *session,
 static inline void
 __wt_struct_size_adjust(WT_SESSION_IMPL *session, size_t *sizep)
 {
-	size_t curr_size = *sizep;
-	size_t field_size, prev_field_size = 1;
+	size_t curr_size, field_size, prev_field_size;
+
+	curr_size = *sizep;
+	prev_field_size = 1;
 
 	while ((field_size = __wt_vsize_uint(curr_size)) != prev_field_size) {
 		curr_size += field_size - prev_field_size;

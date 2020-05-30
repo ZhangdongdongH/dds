@@ -140,7 +140,7 @@ public:
     //
 
     size_t find(char c, size_t fromPos = 0) const;
-    size_t find(StringData needle) const;
+    size_t find(StringData needle, size_t fromPos = 0) const;
     size_t rfind(char c, size_t fromPos = std::string::npos) const;
 
     /**
@@ -162,30 +162,30 @@ public:
      * null-terminated, so if using this without checking size(), you are likely doing
      * something wrong.
      */
-    const char* rawData() const {
+    constexpr const char* rawData() const {
         return _data;
     }
 
-    size_t size() const {
+    constexpr size_t size() const {
         return _size;
     }
-    bool empty() const {
+    constexpr bool empty() const {
         return size() == 0;
     }
     std::string toString() const {
         return std::string(_data, size());
     }
-    char operator[](unsigned pos) const {
+    constexpr char operator[](unsigned pos) const {
         return _data[pos];
     }
 
     //
     // iterators
     //
-    const_iterator begin() const {
+    constexpr const_iterator begin() const {
         return rawData();
     }
-    const_iterator end() const {
+    constexpr const_iterator end() const {
         return rawData() + size();
     }
 
@@ -278,7 +278,7 @@ inline size_t StringData::find(char c, size_t fromPos) const {
     return static_cast<size_t>(static_cast<const char*>(x) - _data);
 }
 
-inline size_t StringData::find(StringData needle) const {
+inline size_t StringData::find(StringData needle, size_t fromPos) const {
     size_t mx = size();
     size_t needleSize = needle.size();
 
@@ -287,9 +287,12 @@ inline size_t StringData::find(StringData needle) const {
     else if (needleSize > mx)
         return std::string::npos;
 
+    if (fromPos > size())
+        return std::string::npos;
+
     mx -= needleSize;
 
-    for (size_t i = 0; i <= mx; i++) {
+    for (size_t i = fromPos; i <= mx; i++) {
         if (memcmp(_data + i, needle._data, needleSize) == 0)
             return i;
     }

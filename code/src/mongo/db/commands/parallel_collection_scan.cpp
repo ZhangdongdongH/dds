@@ -36,6 +36,7 @@
 #include "mongo/db/curop.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/exec/multi_iterator.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/memory.h"
@@ -48,82 +49,95 @@ using stdx::make_unique;
 
 namespace {
 
-class ParallelCollectionScanCmd : public Command {
+class ParallelCollectionScanCmd : public BasicCommand {
 public:
-    struct ExtentInfo {
-        ExtentInfo(RecordId dl, size_t s) : diskLoc(dl), size(s) {}
-        RecordId diskLoc;
-        size_t size;
-    };
+    ParallelCollectionScanCmd() : BasicCommand("parallelCollectionScan") {}
 
-    ParallelCollectionScanCmd() : Command("parallelCollectionScan") {}
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    bool supportsReadConcern() const final {
-        return true;
+    bool supportsReadConcern(const std::string& dbName,
+                             const BSONObj& cmdObj,
+                             repl::ReadConcernLevel level) const override {
+        return level != repl::ReadConcernLevel::kSnapshotReadConcern;
     }
 
-    ReadWriteType getReadWriteType() const {
+    ReadWriteType getReadWriteType() const override {
         return ReadWriteType::kCommand;
     }
 
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) {
-        ActionSet actions;
-        actions.addAction(ActionType::find);
-        Privilege p(parseResourcePattern(dbname, cmdObj), actions);
-        if (AuthorizationSession::get(client)->isAuthorizedForPrivilege(p))
-            return Status::OK();
-        return Status(ErrorCodes::Unauthorized, "Unauthorized");
-    }
+    Status checkAuthForOperation(OperationContext* opCtx,
+                                 const std::string& dbname,
+                                 const BSONObj& cmdObj) const override {
+        AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
 
-    virtual bool run(OperationContext* txn,
-                     const string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
-        const NamespaceString ns(parseNs(dbname, cmdObj));
-
-        AutoGetCollectionForRead ctx(txn, ns.ns());
-
-        Collection* collection = ctx.getCollection();
-        if (!collection)
-            return appendCommandStatus(result,
-                                       Status(ErrorCodes::NamespaceNotFound,
-                                              str::stream() << "ns does not exist: " << ns.ns()));
-
-        size_t numCursors = static_cast<size_t>(cmdObj["numCursors"].numberInt());
-
-        if (numCursors == 0 || numCursors > 10000)
-            return appendCommandStatus(result,
-                                       Status(ErrorCodes::BadValue,
-                                              str::stream()
-                                                  << "numCursors has to be between 1 and 10000"
-                                                  << " was: "
-                                                  << numCursors));
-
-        auto iterators = collection->getManyCursors(txn);
-        if (iterators.size() < numCursors) {
-            numCursors = iterators.size();
+        if (!authSession->isAuthorizedToParseNamespaceElement(cmdObj.firstElement())) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
         }
 
-        std::vector<std::unique_ptr<PlanExecutor>> execs;
+        const auto hasTerm = false;
+        return authSession->checkAuthForFind(
+            AutoGetCollection::resolveNamespaceStringOrUUID(
+                opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj)),
+            hasTerm);
+    }
+
+    bool run(OperationContext* opCtx,
+             const string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        AutoGetCollectionForReadCommand ctx(opCtx, CommandHelpers::parseNsOrUUID(dbname, cmdObj));
+        const auto nss = ctx.getNss();
+
+        Collection* const collection = ctx.getCollection();
+        uassert(ErrorCodes::NamespaceNotFound,
+                str::stream() << "ns does not exist: " << nss.ns(),
+                collection);
+
+        size_t numCursors = static_cast<size_t>(cmdObj["numCursors"].numberInt());
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "numCursors has to be between 1 and 10000"
+                              << " was: "
+                              << numCursors,
+                numCursors >= 1 && numCursors <= 10000);
+
+        std::vector<std::unique_ptr<RecordCursor>> iterators;
+        // Opening multiple cursors on a capped collection and reading them in parallel can produce
+        // behavior that is not well defined. This can be removed when support for parallel
+        // collection scan on capped collections is officially added. The 'getCursor' function
+        // ensures that the cursor returned iterates the capped collection in proper document
+        // insertion order.
+        if (collection->isCapped()) {
+            iterators.push_back(collection->getCursor(opCtx));
+            numCursors = 1;
+        } else {
+            iterators = collection->getManyCursors(opCtx);
+            if (iterators.size() < numCursors) {
+                numCursors = iterators.size();
+            }
+        }
+
+        std::vector<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> execs;
         for (size_t i = 0; i < numCursors; i++) {
             unique_ptr<WorkingSet> ws = make_unique<WorkingSet>();
             unique_ptr<MultiIteratorStage> mis =
-                make_unique<MultiIteratorStage>(txn, ws.get(), collection);
+                make_unique<MultiIteratorStage>(opCtx, ws.get(), collection);
 
             // Takes ownership of 'ws' and 'mis'.
+            const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
             auto statusWithPlanExecutor = PlanExecutor::make(
-                txn, std::move(ws), std::move(mis), collection, PlanExecutor::YIELD_AUTO);
+                opCtx,
+                std::move(ws),
+                std::move(mis),
+                collection,
+                readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern
+                    ? PlanExecutor::INTERRUPT_ONLY
+                    : PlanExecutor::YIELD_AUTO);
             invariant(statusWithPlanExecutor.isOK());
             execs.push_back(std::move(statusWithPlanExecutor.getValue()));
         }
@@ -136,37 +150,34 @@ public:
             mis->addIterator(std::move(iterators[i]));
         }
 
-        {
-            BSONArrayBuilder bucketsBuilder;
-            for (auto&& exec : execs) {
-                // The PlanExecutor was registered on construction due to the YIELD_AUTO policy.
-                // We have to deregister it, as it will be registered with ClientCursor.
-                exec->deregisterExec();
+        BSONArrayBuilder bucketsBuilder;
+        for (auto&& exec : execs) {
+            // Need to save state while yielding locks between now and getMore().
+            exec->saveState();
+            exec->detachFromOperationContext();
 
-                // Need to save state while yielding locks between now and getMore().
-                exec->saveState();
-                exec->detachFromOperationContext();
+            // Create and register a new ClientCursor.
+            auto pinnedCursor = collection->getCursorManager()->registerCursor(
+                opCtx,
+                {std::move(exec),
+                 nss,
+                 AuthorizationSession::get(opCtx->getClient())->getAuthenticatedUserNames(),
+                 repl::ReadConcernArgs::get(opCtx).getLevel(),
+                 cmdObj});
+            pinnedCursor.getCursor()->setLeftoverMaxTimeMicros(opCtx->getRemainingMaxTimeMicros());
 
-                // transfer ownership of an executor to the ClientCursor (which manages its own
-                // lifetime).
-                ClientCursor* cc =
-                    new ClientCursor(collection->getCursorManager(),
-                                     exec.release(),
-                                     ns.ns(),
-                                     txn->recoveryUnit()->isReadingFromMajorityCommittedSnapshot());
-                cc->setLeftoverMaxTimeMicros(txn->getRemainingMaxTimeMicros());
+            BSONObjBuilder threadResult;
+            appendCursorResponseObject(
+                pinnedCursor.getCursor()->cursorid(), nss.ns(), BSONArray(), &threadResult);
+            threadResult.appendBool("ok", 1);
 
-                BSONObjBuilder threadResult;
-                appendCursorResponseObject(cc->cursorid(), ns.ns(), BSONArray(), &threadResult);
-                threadResult.appendBool("ok", 1);
-
-                bucketsBuilder.append(threadResult.obj());
-            }
-            result.appendArray("cursors", bucketsBuilder.obj());
+            bucketsBuilder.append(threadResult.obj());
         }
+        result.appendArray("cursors", bucketsBuilder.obj());
 
         return true;
     }
+
 } parallelCollectionScanCmd;
 
 }  // namespace

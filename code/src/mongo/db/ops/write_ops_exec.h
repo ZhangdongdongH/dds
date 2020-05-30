@@ -33,6 +33,7 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/ops/single_write_result_gen.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/s/stale_exception.h"
 
@@ -42,26 +43,10 @@ namespace mongo {
  * The result of performing a single write, possibly within a batch.
  */
 struct WriteResult {
-    struct SingleResult {
-        int64_t n;
-        int64_t nModified;
-        BSONObj upsertedId;  // Non-empty if something was upserted.
-    };
-
     /**
      * Maps 1-to-1 to single ops in request. May be shorter than input if there are errors.
-     *
-     * staleConfigException should be considered appended to this if it is non-null.
      */
-    std::vector<StatusWith<SingleResult>> results;
-
-    /**
-     * If non-null, the SendStaleConfigException that was encountered while processing the op after
-     * the last op reported in results. Processing always stops at the first SCE and nothing is
-     * placed in results for the op that triggered it. The whole exception is copied here because it
-     * contains additional data not included in the Status.
-     */
-    std::unique_ptr<SendStaleConfigException> staleConfigException;
+    std::vector<StatusWith<SingleWriteResult>> results;
 };
 
 
@@ -75,9 +60,13 @@ struct WriteResult {
  * LastError is updated for failures of individual writes, but not for batch errors reported by an
  * exception being thrown from these functions. Callers are responsible for managing LastError in
  * that case. This should generally be combined with LastError handling from parse failures.
+ *
+ * 'fromMigrate' indicates whether the operation was induced by a chunk migration
  */
-WriteResult performInserts(OperationContext* txn, const InsertOp& op);
-WriteResult performUpdates(OperationContext* txn, const UpdateOp& op);
-WriteResult performDeletes(OperationContext* txn, const DeleteOp& op);
+WriteResult performInserts(OperationContext* opCtx,
+                           const write_ops::Insert& op,
+                           bool fromMigrate = false);
+WriteResult performUpdates(OperationContext* opCtx, const write_ops::Update& op);
+WriteResult performDeletes(OperationContext* opCtx, const write_ops::Delete& op);
 
 }  // namespace mongo

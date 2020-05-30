@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -13,6 +13,44 @@ static int __btree_get_last_recno(WT_SESSION_IMPL *);
 static int __btree_page_sizes(WT_SESSION_IMPL *);
 static int __btree_preload(WT_SESSION_IMPL *);
 static int __btree_tree_open_empty(WT_SESSION_IMPL *, bool);
+
+/*
+ * __btree_clear --
+ *	Clear a Btree, either on handle discard or re-open.
+ */
+static int
+__btree_clear(WT_SESSION_IMPL *session)
+{
+	WT_BTREE *btree;
+	WT_DECL_RET;
+
+	btree = S2BT(session);
+
+	/*
+	 * If the tree hasn't gone through an open/close cycle, there's no
+	 * cleanup to be done.
+	 */
+	if (!F_ISSET(btree, WT_BTREE_CLOSED))
+		return (0);
+
+	/* Close the Huffman tree. */
+	__wt_btree_huffman_close(session);
+
+	/* Terminate any associated collator. */
+	if (btree->collator_owned && btree->collator->terminate != NULL)
+		WT_TRET(btree->collator->terminate(
+		    btree->collator, &session->iface));
+
+	/* Destroy locks. */
+	__wt_rwlock_destroy(session, &btree->ovfl_lock);
+	__wt_spin_destroy(session, &btree->flush_lock);
+
+	/* Free allocated memory. */
+	__wt_free(session, btree->key_format);
+	__wt_free(session, btree->value_format);
+
+	return (ret);
+}
 
 /*
  * __wt_btree_open --
@@ -30,14 +68,28 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 	size_t root_addr_size;
 	uint8_t root_addr[WT_BTREE_MAX_ADDR_COOKIE];
 	const char *filename;
-	bool creation, forced_salvage, readonly;
+	bool creation, forced_salvage;
 
-	dhandle = session->dhandle;
 	btree = S2BT(session);
+	dhandle = session->dhandle;
 
-	/* Checkpoint files are readonly. */
-	readonly = dhandle->checkpoint != NULL ||
-	    F_ISSET(S2C(session), WT_CONN_READONLY);
+	/*
+	 * This may be a re-open, clean up the btree structure.
+	 * Clear the fields that don't persist across a re-open.
+	 * Clear all flags other than the operation flags (which are set by the
+	 * connection handle software that called us).
+	 */
+	WT_RET(__btree_clear(session));
+	memset(btree, 0, WT_BTREE_CLEAR_SIZE);
+	F_CLR(btree, ~WT_BTREE_SPECIAL_FLAGS);
+
+	/* Set the data handle first, our called functions reasonably use it. */
+	btree->dhandle = dhandle;
+
+	/* Checkpoint and verify files are readonly. */
+	if (dhandle->checkpoint != NULL || F_ISSET(btree, WT_BTREE_VERIFY) ||
+	    F_ISSET(S2C(session), WT_CONN_READONLY))
+		F_SET(btree, WT_BTREE_READONLY);
 
 	/* Get the checkpoint information for this name/checkpoint pair. */
 	WT_CLEAR(ckpt);
@@ -69,7 +121,8 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 		WT_ERR_MSG(session, EINVAL, "expected a 'file:' URI");
 
 	WT_ERR(__wt_block_manager_open(session, filename, dhandle->cfg,
-	    forced_salvage, readonly, btree->allocsize, &btree->bm));
+	    forced_salvage, F_ISSET(btree, WT_BTREE_READONLY),
+	    btree->allocsize, &btree->bm));
 	bm = btree->bm;
 
 	/*
@@ -99,7 +152,8 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 		 */
 		WT_ERR(bm->checkpoint_load(bm, session,
 		    ckpt.raw.data, ckpt.raw.size,
-		    root_addr, &root_addr_size, readonly));
+		    root_addr, &root_addr_size,
+		    F_ISSET(btree, WT_BTREE_READONLY)));
 		if (creation || root_addr_size == 0)
 			WT_ERR(__btree_tree_open_empty(session, creation));
 		else {
@@ -126,6 +180,26 @@ __wt_btree_open(WT_SESSION_IMPL *session, const char *op_cfg[])
 		}
 	}
 
+	/*
+	 * Eviction ignores trees until the handle's open flag is set, configure
+	 * eviction before that happens.
+	 *
+	 * Files that can still be bulk-loaded cannot be evicted.
+	 * Permanently cache-resident files can never be evicted.
+	 * Special operations don't enable eviction. The underlying commands may
+	 * turn on eviction (for example, verify turns on eviction while working
+	 * a file to keep from consuming the cache), but it's their decision. If
+	 * an underlying command reconfigures eviction, it must either clear the
+	 * evict-disabled-open flag or restore the eviction configuration when
+	 * finished so that handle close behaves correctly.
+	 */
+	if (btree->original ||
+	    F_ISSET(btree, WT_BTREE_IN_MEMORY | WT_BTREE_REBALANCE |
+	    WT_BTREE_SALVAGE | WT_BTREE_UPGRADE | WT_BTREE_VERIFY)) {
+		WT_ERR(__wt_evict_file_exclusive_on(session));
+		btree->evict_disabled_open = true;
+	}
+
 	if (0) {
 err:		WT_TRET(__wt_btree_close(session));
 	}
@@ -147,7 +221,33 @@ __wt_btree_close(WT_SESSION_IMPL *session)
 
 	btree = S2BT(session);
 
+	/*
+	 * The close process isn't the same as discarding the handle: we might
+	 * re-open the handle, which isn't a big deal, but the backing blocks
+	 * for the handle may not yet have been discarded from the cache, and
+	 * eviction uses WT_BTREE structure elements. Free backing resources
+	 * but leave the rest alone, and we'll discard the structure when we
+	 * discard the data handle.
+	 *
+	 * Handles can be closed multiple times, ignore all but the first.
+	 */
+	if (F_ISSET(btree, WT_BTREE_CLOSED))
+		return (0);
+	F_SET(btree, WT_BTREE_CLOSED);
+
+	/*
+	 * If we turned eviction off and never turned it back on, do that now,
+	 * otherwise the counter will be off.
+	 */
+	if (btree->evict_disabled_open) {
+		btree->evict_disabled_open = false;
+		__wt_evict_file_exclusive_off(session);
+	}
+
+	/* Discard any underlying block manager resources. */
 	if ((bm = btree->bm) != NULL) {
+		btree->bm = NULL;
+
 		/* Unload the checkpoint, unless it's a special command. */
 		if (!F_ISSET(btree,
 		    WT_BTREE_SALVAGE | WT_BTREE_UPGRADE | WT_BTREE_VERIFY))
@@ -155,33 +255,26 @@ __wt_btree_close(WT_SESSION_IMPL *session)
 
 		/* Close the underlying block manager reference. */
 		WT_TRET(bm->close(bm, session));
-
-		btree->bm = NULL;
 	}
 
-	/* Close the Huffman tree. */
-	__wt_btree_huffman_close(session);
+	return (ret);
+}
 
-	/* Destroy locks. */
-	__wt_rwlock_destroy(session, &btree->ovfl_lock);
-	__wt_spin_destroy(session, &btree->flush_lock);
+/*
+ * __wt_btree_discard --
+ *	Discard a Btree.
+ */
+int
+__wt_btree_discard(WT_SESSION_IMPL *session)
+{
+	WT_BTREE *btree;
+	WT_DECL_RET;
 
-	/* Free allocated memory. */
-	__wt_free(session, btree->key_format);
-	__wt_free(session, btree->value_format);
+	ret = __btree_clear(session);
 
-	if (btree->collator_owned) {
-		if (btree->collator->terminate != NULL)
-			WT_TRET(btree->collator->terminate(
-			    btree->collator, &session->iface));
-		btree->collator_owned = 0;
-	}
-	btree->collator = NULL;
-	btree->kencryptor = NULL;
-
-	btree->bulk_load_ok = false;
-
-	F_CLR(btree, WT_BTREE_SPECIAL_FLAGS);
+	btree = S2BT(session);
+	__wt_overwrite_and_free(session, btree);
+	session->dhandle->handle = NULL;
 
 	return (ret);
 }
@@ -199,8 +292,8 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_DECL_RET;
 	int64_t maj_version, min_version;
 	uint32_t bitcnt;
-	bool fixed;
 	const char **cfg, *enc_cfg[] = { NULL, NULL };
+	bool fixed;
 
 	btree = S2BT(session);
 	cfg = btree->dhandle->cfg;
@@ -213,7 +306,7 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 		WT_RET(__wt_config_gets(session, cfg, "version.minor", &cval));
 		min_version = cval.val;
 		__wt_verbose(session, WT_VERB_VERSION,
-		    "%" PRIu64 ".%" PRIu64, maj_version, min_version);
+		    "%" PRId64 ".%" PRId64, maj_version, min_version);
 	}
 
 	/* Get the file ID. */
@@ -267,9 +360,9 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 
 	WT_RET(__wt_config_gets(session, cfg, "cache_resident", &cval));
 	if (cval.val)
-		F_SET(btree, WT_BTREE_IN_MEMORY | WT_BTREE_NO_EVICTION);
+		F_SET(btree, WT_BTREE_IN_MEMORY);
 	else
-		F_CLR(btree, WT_BTREE_IN_MEMORY | WT_BTREE_NO_EVICTION);
+		F_CLR(btree, WT_BTREE_IN_MEMORY);
 
 	WT_RET(__wt_config_gets(session,
 	    cfg, "ignore_in_memory_cache_size", &cval));
@@ -281,6 +374,14 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 		F_SET(btree, WT_BTREE_IGNORE_CACHE);
 	} else
 		F_CLR(btree, WT_BTREE_IGNORE_CACHE);
+
+	/*
+	 * The metadata isn't blocked by in-memory cache limits because metadata
+	 * "unroll" is performed by updates that are potentially blocked by the
+	 * cache-full checks.
+	 */
+	if (WT_IS_METADATA(btree->dhandle))
+		F_SET(btree, WT_BTREE_IGNORE_CACHE);
 
 	WT_RET(__wt_config_gets(session, cfg, "log.enabled", &cval));
 	if (cval.val)
@@ -296,6 +397,22 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 		btree->checksum = CKSUM_OFF;
 	else
 		btree->checksum = CKSUM_UNCOMPRESSED;
+
+	/* Debugging information */
+	WT_RET(__wt_config_gets(session,
+	    cfg, "assert.commit_timestamp", &cval));
+	btree->assert_flags = 0;
+	if (WT_STRING_MATCH("always", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_ALWAYS);
+	else if (WT_STRING_MATCH("key_consistent", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_KEYS);
+	else if (WT_STRING_MATCH("never", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_COMMIT_TS_NEVER);
+	WT_RET(__wt_config_gets(session, cfg, "assert.read_timestamp", &cval));
+	if (WT_STRING_MATCH("always", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_READ_TS_ALWAYS);
+	else if (WT_STRING_MATCH("never", cval.str, cval.len))
+		FLD_SET(btree->assert_flags, WT_ASSERT_READ_TS_NEVER);
 
 	/* Huffman encoding */
 	WT_RET(__wt_btree_huffman_open(session));
@@ -333,15 +450,55 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	WT_RET(__wt_compressor_config(session, &cval, &btree->compressor));
 
 	/*
-	 * We do not use __wt_config_gets_none here because "none"
-	 * and the empty string have different meanings.  The
-	 * empty string means inherit the system encryption setting
-	 * and "none" means this table is in the clear even if the
-	 * database is encrypted.  If this is the metadata handle
-	 * always inherit from the connection.
+	 * Configure compression adjustment.
+	 * When doing compression, assume compression rates that will result in
+	 * pages larger than the maximum in-memory images allowed. If we're
+	 * wrong, we adjust downward (but we're almost certainly correct, the
+	 * maximum in-memory images allowed are only 4x the maximum page size,
+	 * and compression always gives us more than 4x).
+	 *	Don't do compression adjustment for fixed-size column store, the
+	 * leaf page sizes don't change. (We could adjust internal pages but not
+	 * internal pages, but that seems an unlikely use case.)
+	 *	XXX
+	 *	Don't do compression adjustment of snappy-compressed blocks.
+	 */
+	btree->intlpage_compadjust = false;
+	btree->maxintlpage_precomp = btree->maxintlpage;
+	btree->leafpage_compadjust = false;
+	btree->maxleafpage_precomp = btree->maxleafpage;
+	if (btree->compressor != NULL && btree->compressor->compress != NULL &&
+	    !WT_STRING_MATCH("snappy", cval.str, cval.len) &&
+	    btree->type != BTREE_COL_FIX) {
+		/*
+		 * Don't do compression adjustment when on-disk page sizes are
+		 * less than 16KB. There's not enough compression going on to
+		 * fine-tune the size, all we end up doing is hammering shared
+		 * memory.
+		 *
+		 * Don't do compression adjustment when on-disk page sizes are
+		 * equal to the maximum in-memory page image, the bytes taken
+		 * for compression can't grow past the base value.
+		 */
+		if (btree->maxintlpage >= 16 * 1024 &&
+		    btree->maxmempage_image > btree->maxintlpage) {
+			btree->intlpage_compadjust = true;
+			btree->maxintlpage_precomp = btree->maxmempage_image;
+		}
+		if (btree->maxleafpage >= 16 * 1024 &&
+		    btree->maxmempage_image > btree->maxleafpage) {
+			btree->leafpage_compadjust = true;
+			btree->maxleafpage_precomp = btree->maxmempage_image;
+		}
+	}
+
+	/*
+	 * We do not use __wt_config_gets_none here because "none" and the empty
+	 * string have different meanings. The empty string means inherit the
+	 * system encryption setting and "none" means this table is in the clear
+	 * even if the database is encrypted.
 	 */
 	WT_RET(__wt_config_gets(session, cfg, "encryption.name", &cval));
-	if (WT_IS_METADATA(btree->dhandle) || cval.len == 0)
+	if (cval.len == 0)
 		btree->kencryptor = conn->kencryptor;
 	else if (WT_STRING_MATCH("none", cval.str, cval.len))
 		btree->kencryptor = NULL;
@@ -359,13 +516,14 @@ __btree_conf(WT_SESSION_IMPL *session, WT_CKPT *ckpt)
 	}
 
 	/* Initialize locks. */
-	WT_RET(__wt_rwlock_alloc(
-	    session, &btree->ovfl_lock, "btree overflow lock"));
+	WT_RET(__wt_rwlock_init(session, &btree->ovfl_lock));
 	WT_RET(__wt_spin_init(session, &btree->flush_lock, "btree flush"));
 
-	btree->checkpointing = WT_CKPT_OFF;		/* Not checkpointing */
 	btree->modified = false;			/* Clean */
-	btree->write_gen = ckpt->write_gen;		/* Write generation */
+
+	btree->syncing = WT_BTREE_SYNC_OFF;	/* Not syncing */
+	btree->write_gen = ckpt->write_gen;	/* Write generation */
+	btree->checkpoint_gen = __wt_gen(session, WT_GEN_CHECKPOINT);
 
 	return (0);
 }
@@ -449,7 +607,7 @@ __wt_btree_tree_open(
 	 * the allocated copy of the disk image on return, the in-memory object
 	 * steals it.
 	 */
-	WT_ERR(__wt_page_inmem(session, NULL, dsk.data, dsk.memsize,
+	WT_ERR(__wt_page_inmem(session, NULL, dsk.data,
 	    WT_DATA_IN_ITEM(&dsk) ?
 	    WT_PAGE_DISK_ALLOC : WT_PAGE_DISK_MAPPED, &page));
 	dsk.mem = NULL;
@@ -483,13 +641,10 @@ __btree_tree_open_empty(WT_SESSION_IMPL *session, bool creation)
 	/*
 	 * Newly created objects can be used for cursor inserts or for bulk
 	 * loads; set a flag that's cleared when a row is inserted into the
-	 * tree. Objects being bulk-loaded cannot be evicted, we set it
-	 * globally, there's no point in searching empty trees for eviction.
+	 * tree.
 	 */
-	if (creation) {
-		btree->bulk_load_ok = true;
-		__wt_btree_evictable(session, false);
-	}
+	if (creation)
+		btree->original = 1;
 
 	/*
 	 * A note about empty trees: the initial tree is a single root page.
@@ -582,27 +737,6 @@ __wt_btree_new_leaf_page(WT_SESSION_IMPL *session, WT_PAGE **pagep)
 }
 
 /*
- * __wt_btree_evictable --
- *      Setup or release a cache-resident tree.
- */
-void
-__wt_btree_evictable(WT_SESSION_IMPL *session, bool on)
-{
-	WT_BTREE *btree;
-
-	btree = S2BT(session);
-
-	/* Permanently cache-resident files can never be evicted. */
-	if (F_ISSET(btree, WT_BTREE_IN_MEMORY))
-		return;
-
-	if (on)
-		F_CLR(btree, WT_BTREE_NO_EVICTION);
-	else
-		F_SET(btree, WT_BTREE_NO_EVICTION);
-}
-
-/*
  * __btree_preload --
  *	Pre-load internal pages.
  */
@@ -664,7 +798,7 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	WT_CONFIG_ITEM cval;
 	WT_CONNECTION_IMPL *conn;
 	uint64_t cache_size;
-	uint32_t intl_split_size, leaf_split_size;
+	uint32_t intl_split_size, leaf_split_size, max;
 	const char **cfg;
 
 	btree = S2BT(session);
@@ -698,6 +832,22 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 		    "size (%" PRIu32 "B)", btree->allocsize);
 
 	/*
+	 * Default in-memory page image size for compression is 4x the maximum
+	 * internal or leaf page size, and enforce the on-disk page sizes as a
+	 * lower-limit for the in-memory image size.
+	 */
+	WT_RET(__wt_config_gets(session, cfg, "memory_page_image_max", &cval));
+	btree->maxmempage_image = (uint32_t)cval.val;
+	max = WT_MAX(btree->maxintlpage, btree->maxleafpage);
+	if (btree->maxmempage_image == 0)
+		btree->maxmempage_image = 4 * max;
+	else if (btree->maxmempage_image < max)
+		WT_RET_MSG(session, EINVAL,
+		    "in-memory page image size must be larger than the maximum "
+		    "page size (%" PRIu32 "B < %" PRIu32 "B)",
+		    btree->maxmempage_image, max);
+
+	/*
 	 * Don't let pages grow large compared to the cache size or we can end
 	 * up in a situation where nothing can be evicted.  Make sure at least
 	 * 10 pages fit in cache when it is at the dirty trigger where threads
@@ -711,7 +861,7 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	btree->maxmempage = (uint64_t)cval.val;
 	if (!F_ISSET(conn, WT_CONN_CACHE_POOL) &&
 	    (cache_size = conn->cache_size) > 0)
-		btree->maxmempage = WT_MIN(btree->maxmempage,
+		btree->maxmempage = (uint64_t)WT_MIN(btree->maxmempage,
 		    (conn->cache->eviction_dirty_trigger * cache_size) / 1000);
 
 	/* Enforce a lower bound of a single disk leaf page */
@@ -722,17 +872,26 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	 * size.  This gives multi-threaded append workloads a better chance of
 	 * not stalling.
 	 */
-	btree->splitmempage = 8 * btree->maxmempage / 10;
+	btree->splitmempage = (8 * btree->maxmempage) / 10;
 
 	/*
 	 * Get the split percentage (reconciliation splits pages into smaller
 	 * than the maximum page size chunks so we don't split every time a
 	 * new entry is added). Determine how large newly split pages will be.
+	 * Set to the minimum, if the read value is less than that.
 	 */
 	WT_RET(__wt_config_gets(session, cfg, "split_pct", &cval));
-	btree->split_pct = (int)cval.val;
-	intl_split_size = __wt_split_page_size(btree, btree->maxintlpage);
-	leaf_split_size = __wt_split_page_size(btree, btree->maxleafpage);
+	if (cval.val < WT_BTREE_MIN_SPLIT_PCT) {
+		btree->split_pct = WT_BTREE_MIN_SPLIT_PCT;
+		WT_RET(__wt_msg(session,
+		    "Re-setting split_pct for %s to the minimum allowed of "
+		    "%d%%.", session->dhandle->name, WT_BTREE_MIN_SPLIT_PCT));
+	} else
+		btree->split_pct = (int)cval.val;
+	intl_split_size = __wt_split_page_size(
+	    btree->split_pct, btree->maxintlpage, btree->allocsize);
+	leaf_split_size = __wt_split_page_size(
+	    btree->split_pct, btree->maxleafpage, btree->allocsize);
 
 	/*
 	 * In-memory split configuration.
@@ -797,11 +956,33 @@ __btree_page_sizes(WT_SESSION_IMPL *session)
 	 * reset it to the default.
 	 */
 	if (btree->maxintlkey == 0 || btree->maxintlkey > intl_split_size / 10)
-		    btree->maxintlkey = intl_split_size / 10;
+		btree->maxintlkey = intl_split_size / 10;
 	if (btree->maxleafkey == 0)
-		    btree->maxleafkey = leaf_split_size / 10;
+		btree->maxleafkey = leaf_split_size / 10;
 	if (btree->maxleafvalue == 0)
-		    btree->maxleafvalue = leaf_split_size / 2;
+		btree->maxleafvalue = leaf_split_size / 2;
 
 	return (0);
+}
+
+/*
+ * __wt_btree_immediately_durable --
+ *	Check whether this btree is configured for immediate durability.
+ */
+bool
+__wt_btree_immediately_durable(WT_SESSION_IMPL *session)
+{
+	WT_BTREE *btree;
+
+	btree = S2BT(session);
+
+	/*
+	 * This is used to determine whether timestamp updates should
+	 * be rolled back for this btree. With in-memory, the logging
+	 * setting on tables is still important and when enabled they
+	 * should be considered "durable".
+	 */
+	return ((FLD_ISSET(S2C(session)->log_flags, WT_CONN_LOG_ENABLED) ||
+	    (F_ISSET(S2C(session), WT_CONN_IN_MEMORY))) &&
+	    !F_ISSET(btree, WT_BTREE_NO_LOGGING));
 }

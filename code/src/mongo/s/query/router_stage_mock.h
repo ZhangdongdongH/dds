@@ -42,17 +42,14 @@ namespace mongo {
  */
 class RouterStageMock final : public RouterExecStage {
 public:
+    RouterStageMock(OperationContext* opCtx) : RouterExecStage(opCtx) {}
     ~RouterStageMock() final {}
 
-    StatusWith<ClusterQueryResult> next() final;
+    StatusWith<ClusterQueryResult> next(ExecContext) final;
 
-    void kill() final;
+    void kill(OperationContext* opCtx) final;
 
     bool remotesExhausted() final;
-
-    Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
-
-    void setOperationContext(OperationContext* txn) final;
 
     /**
      * Queues a BSONObj to be returned.
@@ -79,6 +76,9 @@ public:
      * Gets the timeout for awaitData, or an error if none was set.
      */
     StatusWith<Milliseconds> getAwaitDataTimeout();
+
+protected:
+    Status doSetAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
 
 private:
     std::queue<StatusWith<ClusterQueryResult>> _resultsQueue;

@@ -36,8 +36,8 @@
 
 namespace mongo {
 
-ExtensionsCallbackReal::ExtensionsCallbackReal(OperationContext* txn, const NamespaceString* nss)
-    : _txn(txn), _nss(nss) {}
+ExtensionsCallbackReal::ExtensionsCallbackReal(OperationContext* opCtx, const NamespaceString* nss)
+    : _opCtx(opCtx), _nss(nss) {}
 
 StatusWithMatchExpression ExtensionsCallbackReal::parseText(BSONElement text) const {
     auto textParams = extractTextMatchExpressionParams(text);
@@ -45,11 +45,9 @@ StatusWithMatchExpression ExtensionsCallbackReal::parseText(BSONElement text) co
         return textParams.getStatus();
     }
 
-    auto exp = stdx::make_unique<TextMatchExpression>();
-    Status status = exp->init(_txn, *_nss, std::move(textParams.getValue()));
-    if (!status.isOK()) {
-        return status;
-    }
+    auto exp =
+        stdx::make_unique<TextMatchExpression>(_opCtx, *_nss, std::move(textParams.getValue()));
+
     return {std::move(exp)};
 }
 
@@ -59,11 +57,8 @@ StatusWithMatchExpression ExtensionsCallbackReal::parseWhere(BSONElement where) 
         return whereParams.getStatus();
     }
 
-    auto exp = stdx::make_unique<WhereMatchExpression>(_txn, std::move(whereParams.getValue()));
-    Status status = exp->init(_nss->db());
-    if (!status.isOK()) {
-        return status;
-    }
+    auto exp = stdx::make_unique<WhereMatchExpression>(
+        _opCtx, std::move(whereParams.getValue()), _nss->db());
     return {std::move(exp)};
 }
 

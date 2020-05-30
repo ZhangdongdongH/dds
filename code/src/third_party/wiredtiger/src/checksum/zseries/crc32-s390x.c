@@ -6,8 +6,26 @@
  * Author(s): Hendrik Brueckner <brueckner@linux.vnet.ibm.com>
  *
  */
+
 #include <sys/types.h>
 #include <endian.h>
+#include <inttypes.h>
+#include <stddef.h>
+
+/*
+ * The checksum code doesn't include WiredTiger configuration or include files.
+ * This means the HAVE_NO_CRC32_HARDWARE #define isn't configurable as part of
+ * standalone WiredTiger configuration, there's no way to turn off the checksum
+ * hardware.
+ */
+#if defined(__linux__) && !defined(HAVE_NO_CRC32_HARDWARE)
+#include <sys/auxv.h>
+
+/* RHEL 7 has kernel support, but does not define this constant in the lib c headers. */
+#ifndef HWCAP_S390_VX
+#define HWCAP_S390_VX           2048
+#endif
+
 #include "crc32-s390x.h"
 #include "slicing-consts.h"
 
@@ -69,8 +87,6 @@ unsigned int __wt_crc32c_le(unsigned int crc, const unsigned char *buf, size_t l
 /* Main CRC-32 functions */
 DEFINE_CRC32_VX(__wt_crc32c_le_vx, __wt_crc32c_le_vgfm_16, __wt_crc32c_le)
 
-#include "wt_internal.h"
-
 /*
  * __wt_checksum_hw --
  *      WiredTiger: return a checksum for a chunk of memory.
@@ -80,17 +96,30 @@ __wt_checksum_hw(const void *chunk, size_t len)
 {
 	return (~__wt_crc32c_le_vx(0xffffffff, chunk, len));
 }
+#endif
+
+extern uint32_t __wt_checksum_sw(const void *chunk, size_t len);
+#if defined(__GNUC__)
+extern uint32_t (*wiredtiger_crc32c_func(void))(const void *, size_t)
+    __attribute__((visibility("default")));
+#else
+extern uint32_t (*wiredtiger_crc32c_func(void))(const void *, size_t);
+#endif
 
 /*
- * __wt_checksum_init --
- *      WiredTiger: detect CRC hardware and set the checksum function.
+ * wiredtiger_crc32c_func --
+ *	WiredTiger: detect CRC hardware and return the checksum function.
  */
-void
-__wt_checksum_init(void)
+uint32_t (*wiredtiger_crc32c_func(void))(const void *, size_t)
 {
-#if defined(HAVE_CRC32_HARDWARE)
-	__wt_process.checksum = __wt_checksum_hw;
+#if defined(__linux__) && !defined(HAVE_NO_CRC32_HARDWARE)
+	unsigned long caps = getauxval(AT_HWCAP);
+
+	if (caps & HWCAP_S390_VX)
+		return (__wt_checksum_hw);
+	else
+		return (__wt_checksum_sw);
 #else
-	__wt_process.checksum = __wt_checksum_sw;
+	return (__wt_checksum_sw);
 #endif
 }

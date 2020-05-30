@@ -39,8 +39,11 @@
 
 namespace mongo {
 
-ParsedUpdate::ParsedUpdate(OperationContext* txn, const UpdateRequest* request)
-    : _txn(txn), _request(request), _driver(UpdateDriver::Options()), _canonicalQuery() {}
+ParsedUpdate::ParsedUpdate(OperationContext* opCtx, const UpdateRequest* request)
+    : _opCtx(opCtx),
+      _request(request),
+      _driver(new ExpressionContext(opCtx, nullptr)),
+      _canonicalQuery() {}
 
 Status ParsedUpdate::parseRequest() {
     // It is invalid to request that the UpdateStage return the prior or newly-updated version
@@ -52,14 +55,7 @@ Status ParsedUpdate::parseRequest() {
     invariant(_request->getProj().isEmpty() || _request->shouldReturnAnyDocs());
 
     if (!_request->getCollation().isEmpty()) {
-        if (serverGlobalParams.featureCompatibility.version.load() ==
-            ServerGlobalParams::FeatureCompatibility::Version::k32) {
-            return Status(ErrorCodes::InvalidOptions,
-                          "The featureCompatibilityVersion must be 3.4 to use collation. See "
-                          "http://dochub.mongodb.org/core/3.4-feature-compatibility.");
-        }
-
-        auto collator = CollatorFactoryInterface::get(_txn->getServiceContext())
+        auto collator = CollatorFactoryInterface::get(_opCtx->getServiceContext())
                             ->makeFromBSON(_request->getCollation());
         if (!collator.isOK()) {
             return collator.getStatus();
@@ -67,11 +63,16 @@ Status ParsedUpdate::parseRequest() {
         _collator = std::move(collator.getValue());
     }
 
+    Status status = parseArrayFilters();
+    if (!status.isOK()) {
+        return status;
+    }
+
     // We parse the update portion before the query portion because the dispostion of the update
     // may determine whether or not we need to produce a CanonicalQuery at all.  For example, if
     // the update involves the positional-dollar operator, we must have a CanonicalQuery even if
     // it isn't required for query execution.
-    Status status = parseUpdate();
+    status = parseUpdate();
     if (!status.isOK())
         return status;
     status = parseQuery();
@@ -93,7 +94,7 @@ Status ParsedUpdate::parseQuery() {
 Status ParsedUpdate::parseQueryToCQ() {
     dassert(!_canonicalQuery.get());
 
-    const ExtensionsCallbackReal extensionsCallback(_txn, &_request->getNamespaceString());
+    const ExtensionsCallbackReal extensionsCallback(_opCtx, &_request->getNamespaceString());
 
     // The projection needs to be applied after the update operation, so we do not specify a
     // projection during canonicalization.
@@ -113,44 +114,79 @@ Status ParsedUpdate::parseQueryToCQ() {
         qr->setLimit(1);
     }
 
-    auto statusWithCQ = CanonicalQuery::canonicalize(_txn, std::move(qr), extensionsCallback);
+    // $expr is not allowed in the query for an upsert, since it is not clear what the equality
+    // extraction behavior for $expr should be.
+    MatchExpressionParser::AllowedFeatureSet allowedMatcherFeatures =
+        MatchExpressionParser::kAllowAllSpecialFeatures;
+    if (_request->isUpsert()) {
+        allowedMatcherFeatures &= ~MatchExpressionParser::AllowedFeatures::kExpr;
+    }
+
+    boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ = CanonicalQuery::canonicalize(
+        _opCtx, std::move(qr), std::move(expCtx), extensionsCallback, allowedMatcherFeatures);
     if (statusWithCQ.isOK()) {
         _canonicalQuery = std::move(statusWithCQ.getValue());
+    }
+
+    if (statusWithCQ.getStatus().code() == ErrorCodes::QueryFeatureNotAllowed) {
+        // The default error message for disallowed $expr is not descriptive enough, so we rewrite
+        // it here.
+        return {ErrorCodes::QueryFeatureNotAllowed,
+                "$expr is not allowed in the query predicate for an upsert"};
     }
 
     return statusWithCQ.getStatus();
 }
 
 Status ParsedUpdate::parseUpdate() {
-    const NamespaceString& ns(_request->getNamespaceString());
-
-    // Should the modifiers validate their embedded docs via okForStorage
-    // Only user updates should be checked. Any system or replication stuff should pass through.
-    // Config db docs shouldn't get checked for valid field names since the shard key can have
-    // a dot (".") in it.
-    const bool shouldValidate =
-        !(!_txn->writesAreReplicated() || ns.isConfigDB() || _request->isFromMigration());
-
+    _driver.setCollator(_collator.get());
     _driver.setLogOp(true);
-    _driver.setModOptions(
-        ModifierInterface::Options(!_txn->writesAreReplicated(), shouldValidate, _collator.get()));
+    _driver.setFromOplogApplication(_request->isFromOplogApplication());
 
-    return _driver.parse(_request->getUpdates(), _request->isMulti());
+    return _driver.parse(_request->getUpdates(), _arrayFilters, _request->isMulti());
+}
+
+Status ParsedUpdate::parseArrayFilters() {
+    for (auto rawArrayFilter : _request->getArrayFilters()) {
+        boost::intrusive_ptr<ExpressionContext> expCtx(
+            new ExpressionContext(_opCtx, _collator.get()));
+        auto parsedArrayFilter =
+            MatchExpressionParser::parse(rawArrayFilter,
+                                         std::move(expCtx),
+                                         ExtensionsCallbackNoop(),
+                                         MatchExpressionParser::kBanAllSpecialFeatures);
+        if (!parsedArrayFilter.isOK()) {
+            return parsedArrayFilter.getStatus().withContext("Error parsing array filter");
+        }
+        auto parsedArrayFilterWithPlaceholder =
+            ExpressionWithPlaceholder::make(std::move(parsedArrayFilter.getValue()));
+        if (!parsedArrayFilterWithPlaceholder.isOK()) {
+            return parsedArrayFilterWithPlaceholder.getStatus().withContext(
+                "Error parsing array filter");
+        }
+        auto finalArrayFilter = std::move(parsedArrayFilterWithPlaceholder.getValue());
+        auto fieldName = finalArrayFilter->getPlaceholder();
+        if (!fieldName) {
+            return Status(
+                ErrorCodes::FailedToParse,
+                "Cannot use an expression without a top-level field name in arrayFilters");
+        }
+        if (_arrayFilters.find(*fieldName) != _arrayFilters.end()) {
+            return Status(ErrorCodes::FailedToParse,
+                          str::stream()
+                              << "Found multiple array filters with the same top-level field name "
+                              << *fieldName);
+        }
+
+        _arrayFilters[*fieldName] = std::move(finalArrayFilter);
+    }
+
+    return Status::OK();
 }
 
 PlanExecutor::YieldPolicy ParsedUpdate::yieldPolicy() const {
-    if (_request->isGod()) {
-        return PlanExecutor::YIELD_MANUAL;
-    }
-    if (_request->getYieldPolicy() == PlanExecutor::YIELD_AUTO && isIsolated()) {
-        return PlanExecutor::WRITE_CONFLICT_RETRY_ONLY;  // Don't yield locks.
-    }
-    return _request->getYieldPolicy();
-}
-
-bool ParsedUpdate::isIsolated() const {
-    return _canonicalQuery.get() ? _canonicalQuery->isIsolated()
-                                 : QueryRequest::isQueryIsolated(_request->getQuery());
+    return _request->isGod() ? PlanExecutor::NO_YIELD : _request->getYieldPolicy();
 }
 
 bool ParsedUpdate::hasParsedQuery() const {
@@ -174,6 +210,10 @@ void ParsedUpdate::setCollator(std::unique_ptr<CollatorInterface> collator) {
     _collator = std::move(collator);
 
     _driver.setCollator(_collator.get());
+
+    for (auto&& arrayFilter : _arrayFilters) {
+        arrayFilter.second->getFilter()->setCollator(_collator.get());
+    }
 }
 
 }  // namespace mongo

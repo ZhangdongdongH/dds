@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -372,6 +372,7 @@ __config_merge_cmp(const void *a, const void *b)
 int
 __wt_config_merge(WT_SESSION_IMPL *session,
     const char **cfg, const char *cfg_strip, const char **config_ret)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_CONFIG_MERGE merge;
 	WT_DECL_RET;
@@ -398,7 +399,7 @@ __wt_config_merge(WT_SESSION_IMPL *session,
 	 * Sort the array by key and, in the case of identical keys, by
 	 * generation.
 	 */
-	qsort(merge.entries, merge.entries_next,
+	__wt_qsort(merge.entries, merge.entries_next,
 	    sizeof(WT_CONFIG_MERGE_ENTRY), __config_merge_cmp);
 
 	/* Convert the array of entries into a string. */

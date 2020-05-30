@@ -29,7 +29,6 @@
 #include "mongo/db/ops/delete_request.h"
 #include "mongo/db/ops/parsed_delete.h"
 #include "mongo/db/ops/parsed_update.h"
-#include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/parsed_distinct.h"
@@ -37,6 +36,7 @@
 #include "mongo/db/query/query_planner_params.h"
 #include "mongo/db/query/query_settings.h"
 #include "mongo/db/query/query_solution.h"
+#include "mongo/db/update/update_driver.h"
 
 namespace mongo {
 
@@ -58,10 +58,18 @@ void filterAllowedIndexEntries(const AllowedIndicesFilter& allowedIndicesFilter,
  * Fill out the provided 'plannerParams' for the 'canonicalQuery' operating on the collection
  * 'collection'.  Exposed for testing.
  */
-void fillOutPlannerParams(OperationContext* txn,
+void fillOutPlannerParams(OperationContext* opCtx,
                           Collection* collection,
                           CanonicalQuery* canonicalQuery,
                           QueryPlannerParams* plannerParams);
+
+/**
+ * Determines whether or not to wait for oplog visibility for a query. This is only used for
+ * collection scans on the oplog.
+ */
+bool shouldWaitForOplogVisibility(OperationContext* opCtx,
+                                  const Collection* collection,
+                                  bool tailable);
 
 /**
  * Get a plan executor for a query.
@@ -71,8 +79,8 @@ void fillOutPlannerParams(OperationContext* txn,
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutor(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutor(
+    OperationContext* opCtx,
     Collection* collection,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
     PlanExecutor::YieldPolicy yieldPolicy,
@@ -86,12 +94,21 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutor(
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorFind(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
+    OperationContext* opCtx,
     Collection* collection,
     const NamespaceString& nss,
     std::unique_ptr<CanonicalQuery> canonicalQuery,
-    PlanExecutor::YieldPolicy yieldPolicy);
+    size_t plannerOptions = QueryPlannerParams::DEFAULT);
+
+/**
+ * Returns a plan executor for a legacy OP_QUERY find.
+ */
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorLegacyFind(
+    OperationContext* opCtx,
+    Collection* collection,
+    const NamespaceString& nss,
+    std::unique_ptr<CanonicalQuery> canonicalQuery);
 
 /**
  * If possible, turn the provided QuerySolution into a QuerySolution that uses a DistinctNode
@@ -109,12 +126,11 @@ bool turnIxscanIntoDistinctIxscan(QuerySolution* soln, const std::string& field)
  * possible values of a certain field.  As such, we can skip lots of data in certain cases (see
  * body of method for detail).
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDistinct(
-    OperationContext* txn,
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDistinct(
+    OperationContext* opCtx,
     Collection* collection,
     const std::string& ns,
-    ParsedDistinct* parsedDistinct,
-    PlanExecutor::YieldPolicy yieldPolicy);
+    ParsedDistinct* parsedDistinct);
 
 /*
  * Get a PlanExecutor for a query executing as part of a count command.
@@ -123,11 +139,8 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDistinct(
  * As such, with certain covered queries, we can skip the overhead of fetching etc. when
  * executing a count.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn,
-                                                           Collection* collection,
-                                                           const CountRequest& request,
-                                                           bool explain,
-                                                           PlanExecutor::YieldPolicy yieldPolicy);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCount(
+    OperationContext* opCtx, Collection* collection, const CountRequest& request, bool explain);
 
 /**
  * Get a PlanExecutor for a delete operation. 'parsedDelete' describes the query predicate
@@ -145,10 +158,8 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorCount(OperationContext* txn
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* txn,
-                                                            OpDebug* opDebug,
-                                                            Collection* collection,
-                                                            ParsedDelete* parsedDelete);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorDelete(
+    OperationContext* opCtx, OpDebug* opDebug, Collection* collection, ParsedDelete* parsedDelete);
 
 /**
  * Get a PlanExecutor for an update operation. 'parsedUpdate' describes the query predicate
@@ -167,10 +178,8 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorDelete(OperationContext* tx
  *
  * If the query cannot be executed, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorUpdate(OperationContext* txn,
-                                                            OpDebug* opDebug,
-                                                            Collection* collection,
-                                                            ParsedUpdate* parsedUpdate);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorUpdate(
+    OperationContext* opCtx, OpDebug* opDebug, Collection* collection, ParsedUpdate* parsedUpdate);
 
 /**
  * Get a PlanExecutor for a group operation.
@@ -180,9 +189,7 @@ StatusWith<std::unique_ptr<PlanExecutor>> getExecutorUpdate(OperationContext* tx
  *
  * If an executor could not be created, returns a Status indicating why.
  */
-StatusWith<std::unique_ptr<PlanExecutor>> getExecutorGroup(OperationContext* txn,
-                                                           Collection* collection,
-                                                           const GroupRequest& request,
-                                                           PlanExecutor::YieldPolicy yieldPolicy);
+StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorGroup(
+    OperationContext* opCtx, Collection* collection, const GroupRequest& request);
 
 }  // namespace mongo

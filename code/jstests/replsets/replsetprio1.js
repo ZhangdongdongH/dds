@@ -6,7 +6,7 @@
     var nodenames = replTest.nodeList();
 
     var nodes = replTest.startSet();
-    replTest.initiate({
+    replTest.initiateWithAnyNodeAsPrimary({
         "_id": "testSet",
         "members": [
             {"_id": 0, "host": nodenames[0], "priority": 1},
@@ -16,7 +16,8 @@
     });
 
     // 2 should be master (give this a while to happen, as other nodes might first be elected)
-    replTest.waitForState(nodes[2], ReplSetTest.State.PRIMARY);
+    replTest.awaitNodesAgreeOnPrimary(replTest.kDefaultTimeoutMS, nodes, 2);
+
     // wait for 1 to not appear to be master (we are about to make it master and need a clean slate
     // here)
     replTest.waitForState(nodes[1], ReplSetTest.State.SECONDARY);
@@ -28,7 +29,7 @@
     replTest.stop(2);
 
     // 1 should eventually be master
-    replTest.waitForState(nodes[1], ReplSetTest.State.PRIMARY, 60000);
+    replTest.waitForState(nodes[1], ReplSetTest.State.PRIMARY);
 
     // do some writes on 1
     var master = replTest.getPrimary();
@@ -42,7 +43,7 @@
 
     // bring 2 back up, 2 should wait until caught up and then become master
     replTest.restart(2);
-    replTest.waitForState(nodes[2], ReplSetTest.State.PRIMARY);
+    replTest.awaitNodesAgreeOnPrimary(replTest.kDefaultTimeoutMS, nodes, 2);
 
     // make sure nothing was rolled back
     master = replTest.getPrimary();
@@ -50,4 +51,5 @@
         assert(master.getDB("foo").bar.findOne({i: i}) != null, 'checking ' + i);
         assert(master.getDB("bar").baz.findOne({i: i}) != null, 'checking ' + i);
     }
+    replTest.stopSet();
 }());

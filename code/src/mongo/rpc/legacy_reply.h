@@ -30,7 +30,6 @@
 
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/rpc/document_range.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/reply_interface.h"
 
@@ -61,27 +60,10 @@ public:
      */
     const BSONObj& getCommandReply() const final;
 
-    /**
-     * A variable number of BSON documents returned by the command. It is valid for the
-     * returned range to be empty.
-     *
-     * Example usage:
-     *
-     * for (auto&& doc : reply.getOutputDocs()) {
-     *    ... do stuff with doc
-     * }
-     */
-    DocumentRange getOutputDocs() const final;
-
     Protocol getProtocol() const final;
 
 private:
-    const Message* _message;
-
-    BSONObj _commandReply{};  // will hold unowned
-    BSONObj _metadata{};
-    BufBuilder _docBuffer{};
-    DocumentRange _outputDocs{};
+    BSONObj _commandReply;
 };
 
 }  // namespace rpc

@@ -61,7 +61,7 @@ using std::map;
 using std::pair;
 using std::string;
 
-void DurableMappedFile::remapThePrivateView() {
+void DurableMappedFile::remapThePrivateView(OperationContext* opCtx) {
     verify(storageGlobalParams.dur);
 
     _willNeedRemap = false;
@@ -70,7 +70,7 @@ void DurableMappedFile::remapThePrivateView() {
     // so the remove / add isn't necessary and can be removed?
     void* old = _view_private;
     // privateViews.remove(_view_private);
-    _view_private = remapPrivateView(_view_private);
+    _view_private = remapPrivateView(opCtx, _view_private);
     // privateViews.add(_view_private, this);
     fassert(16112, _view_private == old);
 }
@@ -241,21 +241,25 @@ void DurableMappedFile::setPath(const std::string& f) {
     _p = RelativePath::fromFullPath(storageGlobalParams.dbpath, prefix);
 }
 
-bool DurableMappedFile::open(const std::string& fname) {
+bool DurableMappedFile::open(OperationContext* opCtx, const std::string& fname) {
     LOG(3) << "mmf open " << fname;
     invariant(!_view_write);
 
     setPath(fname);
-    _view_write = map(fname.c_str());
+    _view_write = map(opCtx, fname.c_str());
+    fassert(16333, _view_write);
     return finishOpening();
 }
 
-bool DurableMappedFile::create(const std::string& fname, unsigned long long& len) {
+bool DurableMappedFile::create(OperationContext* opCtx,
+                               const std::string& fname,
+                               unsigned long long& len) {
     LOG(3) << "mmf create " << fname;
     invariant(!_view_write);
 
     setPath(fname);
-    _view_write = map(fname.c_str(), len);
+    _view_write = map(opCtx, fname.c_str(), len);
+    fassert(16332, _view_write);
     return finishOpening();
 }
 
@@ -268,11 +272,8 @@ bool DurableMappedFile::finishOpening() {
 
             _view_private = createPrivateMap();
             if (_view_private == 0) {
-                msgasserted(13636,
-                            str::stream() << "file " << filename() << " open/create failed "
-                                                                      "in createPrivateMap "
-                                                                      "(look in log for "
-                                                                      "more information)");
+                severe() << "file " << filename() << " open/create failed in createPrivateMap";
+                fassertFailed(13636);
             }
             // note that testIntent builds use this, even though it points to view_write then...
             privateViews.add_inlock(_view_private, this);
@@ -284,12 +285,7 @@ bool DurableMappedFile::finishOpening() {
     return false;
 }
 
-DurableMappedFile::DurableMappedFile(OptionSet options)
-    : MemoryMappedFile(options), _willNeedRemap(false) {
-    _view_write = _view_private = 0;
-}
-
-DurableMappedFile::~DurableMappedFile() {
+void DurableMappedFile::close(OperationContext* opCtx) {
     try {
         LOG(3) << "mmf close " << filename();
 
@@ -300,12 +296,20 @@ DurableMappedFile::~DurableMappedFile() {
             getDur().closingFileNotification();
         }
 
-        LockMongoFilesExclusive lk;
         privateViews.remove(_view_private, length());
 
-        MemoryMappedFile::close();
+        MemoryMappedFile::close(opCtx);
     } catch (...) {
-        error() << "exception in ~DurableMappedFile";
+        error() << "exception in DurableMappedFile::close";
     }
+}
+
+DurableMappedFile::DurableMappedFile(OperationContext* opCtx, OptionSet options)
+    : MemoryMappedFile(opCtx, options), _willNeedRemap(false) {
+    _view_write = _view_private = 0;
+}
+
+DurableMappedFile::~DurableMappedFile() {
+    invariant(isClosed());
 }
 }

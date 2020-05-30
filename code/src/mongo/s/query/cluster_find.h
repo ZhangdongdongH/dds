@@ -33,7 +33,7 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/cursor_id.h"
 #include "mongo/db/query/cursor_response.h"
-#include "mongo/db/query/explain_common.h"
+#include "mongo/db/query/explain_options.h"
 
 namespace mongo {
 
@@ -44,18 +44,14 @@ class OperationContext;
 struct GetMoreRequest;
 struct ReadPreferenceSetting;
 
-namespace rpc {
-class ServerSelectionMetadata;
-}  // namespace rpc
-
 /**
  * Methods for running find and getMore operations across a sharded cluster.
  */
 class ClusterFind {
 public:
     // The number of times we are willing to re-target and re-run the query after receiving a stale
-    // config message.
-    static const size_t kMaxStaleConfigRetries;
+    // config, snapshot, or shard not found error.
+    static const size_t kMaxRetries;
 
     /**
      * Runs query 'query', targeting remote hosts according to the read preference in 'readPref'.
@@ -63,33 +59,17 @@ public:
      * On success, fills out 'results' with the first batch of query results and returns the cursor
      * id which the caller can use on subsequent getMore operations. If no cursor needed to be saved
      * (e.g. the cursor was exhausted without need for a getMore), returns a cursor id of 0.
-     * If a CommandOnShardedViewNotSupportedOnMongod error is returned, then 'viewDefinition', if
-     * not null, will contain a view definition.
      */
-    static StatusWith<CursorId> runQuery(OperationContext* txn,
-                                         const CanonicalQuery& query,
-                                         const ReadPreferenceSetting& readPref,
-                                         std::vector<BSONObj>* results,
-                                         BSONObj* viewDefinition);
+    static CursorId runQuery(OperationContext* opCtx,
+                             const CanonicalQuery& query,
+                             const ReadPreferenceSetting& readPref,
+                             std::vector<BSONObj>* results);
 
     /**
      * Executes the getMore request 'request', and on success returns a CursorResponse.
      */
-    static StatusWith<CursorResponse> runGetMore(OperationContext* txn,
+    static StatusWith<CursorResponse> runGetMore(OperationContext* opCtx,
                                                  const GetMoreRequest& request);
-
-    /**
-     * Extracts the read preference from 'cmdObj', or determines the read pref based on 'isSlaveOk'
-     * if 'cmdObj' does not contain a read preference.
-     *
-     * Expects a read preference that has already been "unwrapped" by the mongos command handling
-     * code, e.g. { ... , $queryOptions: { $readPreference: { ... } } , ... }.
-     *
-     * Returns a non-OK status if 'cmdObj' has a read preference but the read preference does not
-     * parse correctly.
-     */
-    static StatusWith<ReadPreferenceSetting> extractUnwrappedReadPref(const BSONObj& cmdObj,
-                                                                      bool isSlaveOk);
 };
 
 }  // namespace mongo

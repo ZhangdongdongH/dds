@@ -40,7 +40,7 @@ const StringData kChunkVersion = "chunkVersion"_sd;
 
 }  // namespace
 
-const std::string MigrationType::ConfigNS = "config.migrations";
+const NamespaceString MigrationType::ConfigNS("config.migrations");
 
 const BSONField<std::string> MigrationType::name("_id");
 const BSONField<std::string> MigrationType::ns("ns");
@@ -53,7 +53,7 @@ const BSONField<bool> MigrationType::waitForDelete("waitForDelete");
 MigrationType::MigrationType() = default;
 
 MigrationType::MigrationType(MigrateInfo info, bool waitForDelete)
-    : _nss(NamespaceString(info.ns)),
+    : _nss(info.nss),
       _min(info.minKey),
       _max(info.maxKey),
       _fromShard(info.from),
@@ -99,8 +99,7 @@ StatusWith<MigrationType> MigrationType::fromBSON(const BSONObj& source) {
     }
 
     {
-        auto chunkVersionStatus =
-            ChunkVersion::parseFromBSONWithFieldForCommands(source, kChunkVersion);
+        auto chunkVersionStatus = ChunkVersion::parseWithField(source, kChunkVersion);
         if (!chunkVersionStatus.isOK())
             return chunkVersionStatus.getStatus();
         migrationType._chunkVersion = chunkVersionStatus.getValue();
@@ -130,7 +129,7 @@ BSONObj MigrationType::toBSON() const {
     builder.append(fromShard.name(), _fromShard.toString());
     builder.append(toShard.name(), _toShard.toString());
 
-    _chunkVersion.appendWithFieldForCommands(&builder, kChunkVersion);
+    _chunkVersion.appendWithField(&builder, kChunkVersion);
 
     builder.append(waitForDelete.name(), _waitForDelete);
     return builder.obj();
@@ -138,7 +137,7 @@ BSONObj MigrationType::toBSON() const {
 
 MigrateInfo MigrationType::toMigrateInfo() const {
     ChunkType chunk;
-    chunk.setNS(_nss.ns());
+    chunk.setNS(_nss);
     chunk.setShard(_fromShard);
     chunk.setMin(_min);
     chunk.setMax(_max);
@@ -148,7 +147,7 @@ MigrateInfo MigrationType::toMigrateInfo() const {
 }
 
 std::string MigrationType::getName() const {
-    return ChunkType::genID(_nss.ns(), _min);
+    return ChunkType::genID(_nss, _min);
 }
 
 }  // namespace mongo

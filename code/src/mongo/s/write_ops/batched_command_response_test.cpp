@@ -33,6 +33,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/s/write_ops/batched_command_response.h"
 #include "mongo/s/write_ops/write_error_detail.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -43,38 +44,105 @@ namespace {
 
 TEST(BatchedCommandResponse, Basic) {
     BSONArray writeErrorsArray = BSON_ARRAY(
-        BSON(WriteErrorDetail::index(0) << WriteErrorDetail::errCode(-2)
-                                        << WriteErrorDetail::errInfo(BSON("more info" << 1))
-                                        << WriteErrorDetail::errMessage("index 0 failed"))
-        << BSON(WriteErrorDetail::index(1) << WriteErrorDetail::errCode(-3)
-                                           << WriteErrorDetail::errInfo(BSON("more info" << 1))
-                                           << WriteErrorDetail::errMessage("index 1 failed too")));
+        BSON(WriteErrorDetail::index(0) << WriteErrorDetail::errCode(ErrorCodes::IndexNotFound)
+                                        << WriteErrorDetail::errCodeName("IndexNotFound")
+                                        << WriteErrorDetail::errMessage("index 0 failed")
+                                        << WriteErrorDetail::errInfo(BSON("more info" << 1)))
+        << BSON(WriteErrorDetail::index(1)
+                << WriteErrorDetail::errCode(ErrorCodes::InvalidNamespace)
+                << WriteErrorDetail::errCodeName("InvalidNamespace")
+                << WriteErrorDetail::errMessage("index 1 failed too")
+                << WriteErrorDetail::errInfo(BSON("more info" << 1))));
 
-    BSONObj writeConcernError(BSON(
-        "code" << 8 << "codeName" << ErrorCodes::errorString(ErrorCodes::fromInt(8)) << "errInfo"
-               << BSON("a" << 1)
-               << "errmsg"
-               << "norepl"));
+    BSONObj writeConcernError(
+        BSON("code" << 8 << "codeName" << ErrorCodes::errorString(ErrorCodes::Error(8)) << "errmsg"
+                    << "norepl"
+                    << "errInfo"
+                    << BSON("a" << 1)));
 
-    BSONObj origResponseObj = BSON(BatchedCommandResponse::ok(false)
-                                   << BatchedCommandResponse::errCode(-1)
-                                   << BatchedCommandResponse::errMessage("this batch didn't work")
-                                   << BatchedCommandResponse::n(0)
-                                   << "opTime"
-                                   << mongo::Timestamp(1ULL)
-                                   << BatchedCommandResponse::writeErrors()
-                                   << writeErrorsArray
-                                   << BatchedCommandResponse::writeConcernError()
-                                   << writeConcernError);
+    BSONObj origResponseObj =
+        BSON(BatchedCommandResponse::n(0) << "opTime" << mongo::Timestamp(1ULL)
+                                          << BatchedCommandResponse::writeErrors()
+                                          << writeErrorsArray
+                                          << BatchedCommandResponse::writeConcernError()
+                                          << writeConcernError
+                                          << "ok"
+                                          << 1.0);
 
     string errMsg;
     BatchedCommandResponse response;
     bool ok = response.parseBSON(origResponseObj, &errMsg);
     ASSERT_TRUE(ok);
 
-    BSONObj genResponseObj = response.toBSON();
-    ASSERT_EQUALS(0, genResponseObj.woCompare(origResponseObj)) << "parsed: " << genResponseObj
-                                                                << " original: " << origResponseObj;
+    BSONObj genResponseObj = BSONObjBuilder(response.toBSON()).append("ok", 1.0).obj();
+
+    ASSERT_EQUALS(0, genResponseObj.woCompare(origResponseObj))
+        << "\nparsed:   " << genResponseObj  //
+        << "\noriginal: " << origResponseObj;
+}
+
+TEST(BatchedCommandResponse, TooManySmallErrors) {
+    BatchedCommandResponse response;
+
+    const auto bigstr = std::string(1024, 'x');
+
+    for (int i = 0; i < 100'000; i++) {
+        auto errDetail = stdx::make_unique<WriteErrorDetail>();
+        errDetail->setIndex(i);
+        errDetail->setStatus({ErrorCodes::BadValue, bigstr});
+        response.addToErrDetails(errDetail.release());
+    }
+
+    response.setStatus(Status::OK());
+    const auto bson = response.toBSON();
+    ASSERT_LT(bson.objsize(), BSONObjMaxUserSize);
+    const auto errDetails = bson["writeErrors"].Array();
+    ASSERT_EQ(errDetails.size(), 100'000u);
+
+    for (int i = 0; i < 100'000; i++) {
+        auto errDetail = errDetails[i].Obj();
+        ASSERT_EQ(errDetail["index"].Int(), i);
+        ASSERT_EQ(errDetail["code"].Int(), ErrorCodes::BadValue);
+
+        if (i < 1024) {
+            ASSERT_EQ(errDetail["errmsg"].String(), bigstr) << i;
+        } else {
+            ASSERT_EQ(errDetail["errmsg"].String(), ""_sd) << i;
+        }
+    }
+}
+
+TEST(BatchedCommandResponse, TooManyBigErrors) {
+    BatchedCommandResponse response;
+
+    const auto bigstr = std::string(2'000'000, 'x');
+    const auto smallstr = std::string(10, 'x');
+
+    for (int i = 0; i < 100'000; i++) {
+        auto errDetail = stdx::make_unique<WriteErrorDetail>();
+        errDetail->setIndex(i);
+        errDetail->setStatus({ErrorCodes::BadValue,          //
+                              i < 10 ? bigstr : smallstr});  // Don't waste too much RAM.
+        response.addToErrDetails(errDetail.release());
+    }
+
+    response.setStatus(Status::OK());
+    const auto bson = response.toBSON();
+    ASSERT_LT(bson.objsize(), BSONObjMaxUserSize);
+    const auto errDetails = bson["writeErrors"].Array();
+    ASSERT_EQ(errDetails.size(), 100'000u);
+
+    for (int i = 0; i < 100'000; i++) {
+        auto errDetail = errDetails[i].Obj();
+        ASSERT_EQ(errDetail["index"].Int(), i);
+        ASSERT_EQ(errDetail["code"].Int(), ErrorCodes::BadValue);
+
+        if (i < 2) {
+            ASSERT_EQ(errDetail["errmsg"].String(), bigstr) << i;
+        } else {
+            ASSERT_EQ(errDetail["errmsg"].String(), ""_sd) << i;
+        }
+    }
 }
 
 }  // namespace

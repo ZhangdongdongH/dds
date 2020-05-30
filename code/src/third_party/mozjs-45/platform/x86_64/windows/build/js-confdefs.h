@@ -30,10 +30,10 @@
 #define MALLOC_H <malloc.h>
 #define MALLOC_USABLE_SIZE_CONST_PTR const
 #define MOZILLA_UAVERSION "45.0"
-#define MOZILLA_VERSION "45.4.0"
-#define MOZILLA_VERSION_U 45.4.0
+#define MOZILLA_VERSION "45.9.0"
+#define MOZILLA_VERSION_U 45.9.0
 #define MOZJS_MAJOR_VERSION 45
-#define MOZJS_MINOR_VERSION 4
+#define MOZJS_MINOR_VERSION 9
 #define MOZ_DEBUG_SYMBOLS 1
 #define MOZ_DLL_SUFFIX ".dll"
 #define MOZ_MEMORY 1
@@ -58,6 +58,14 @@
 //#define _WIN32_IE 0x0603
 //#define _WIN32_WINNT 0x502
 #define _WINDOWS 1
+
+// SERVER-20811 - Define manually since ESR 45 configure does not set them on Windows
+#define HAVE_ACOSH 1
+#define HAVE_ASINH 1
+#define HAVE_ATANH 1
+#define HAVE_CBRT 1
+#define HAVE_EXPM1 1
+#define HAVE_LOG1P 1
 
 #include "js/RequiredDefines.h"
 

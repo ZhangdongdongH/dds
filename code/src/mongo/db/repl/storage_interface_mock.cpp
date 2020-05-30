@@ -38,64 +38,69 @@
 
 namespace mongo {
 namespace repl {
-void StorageInterfaceMock::startup() {}
-void StorageInterfaceMock::shutdown() {}
-bool StorageInterfaceMock::getInitialSyncFlag(OperationContext* txn) const {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    return _initialSyncFlag;
+
+StatusWith<int> StorageInterfaceMock::getRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (!_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceNotFound, "Rollback ID not initialized");
+    }
+    return _rbid;
 }
 
-void StorageInterfaceMock::setInitialSyncFlag(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    _initialSyncFlag = true;
+StatusWith<int> StorageInterfaceMock::initializeRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceExists, "Rollback ID already initialized");
+    }
+    _rbidInitialized = true;
+
+    // Start the mock RBID at a very high number to differentiate it from uninitialized RBIDs.
+    _rbid = 100;
+    return _rbid;
 }
 
-void StorageInterfaceMock::clearInitialSyncFlag(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    _initialSyncFlag = false;
+StatusWith<int> StorageInterfaceMock::incrementRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (!_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceNotFound, "Rollback ID not initialized");
+    }
+    _rbid++;
+    return _rbid;
 }
 
-OpTime StorageInterfaceMock::getMinValid(OperationContext* txn) const {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _minValid;
+void StorageInterfaceMock::setStableTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    _stableTimestamp = snapshotName;
 }
 
-void StorageInterfaceMock::setMinValid(OperationContext* txn, const OpTime& minValid) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _minValid = minValid;
+void StorageInterfaceMock::setInitialDataTimestamp(ServiceContext* serviceCtx,
+                                                   Timestamp snapshotName) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    _initialDataTimestamp = snapshotName;
 }
 
-void StorageInterfaceMock::setMinValidToAtLeast(OperationContext* txn, const OpTime& minValid) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _minValid = std::max(_minValid, minValid);
+Timestamp StorageInterfaceMock::getStableTimestamp() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _stableTimestamp;
 }
 
-void StorageInterfaceMock::setOplogDeleteFromPoint(OperationContext* txn,
-                                                   const Timestamp& timestamp) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _oplogDeleteFromPoint = timestamp;
+Timestamp StorageInterfaceMock::getInitialDataTimestamp() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _initialDataTimestamp;
 }
 
-Timestamp StorageInterfaceMock::getOplogDeleteFromPoint(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _oplogDeleteFromPoint;
+Timestamp StorageInterfaceMock::getAllCommittedTimestamp(ServiceContext* serviceCtx) const {
+    return allCommittedTimestamp;
 }
 
-void StorageInterfaceMock::setAppliedThrough(OperationContext* txn, const OpTime& optime) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _appliedThrough = optime;
+bool StorageInterfaceMock::supportsDocLocking(ServiceContext* serviceCtx) const {
+    return supportsDocLockingBool;
 }
 
-OpTime StorageInterfaceMock::getAppliedThrough(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _appliedThrough;
-}
-
-Status CollectionBulkLoaderMock::init(Collection* coll,
-                                      const std::vector<BSONObj>& secondaryIndexSpecs) {
+Status CollectionBulkLoaderMock::init(const std::vector<BSONObj>& secondaryIndexSpecs) {
     LOG(1) << "CollectionBulkLoaderMock::init called";
     stats->initCalled = true;
-    return initFn(coll, secondaryIndexSpecs);
+    return Status::OK();
 };
 
 Status CollectionBulkLoaderMock::insertDocuments(const std::vector<BSONObj>::const_iterator begin,

@@ -49,11 +49,6 @@
 
 namespace mongo {
 
-// Crutch.
-bool isMongos() {
-    return false;
-}
-
 namespace {
 
 using boost::intrusive_ptr;
@@ -100,26 +95,26 @@ private:
 TEST_F(DocumentSourceSortTest, RejectsNonObjectSpec) {
     BSONObj spec = BSON("$sort" << 1);
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsEmptyObjectSpec) {
     BSONObj spec = BSON("$sort" << BSONObj());
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsSpecWithNonNumericValues) {
     BSONObj spec = BSON("$sort" << BSON("a"
                                         << "b"));
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsSpecWithZeroAsValue) {
     BSONObj spec = BSON("$sort" << BSON("a" << 0));
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, SortWithLimit) {
@@ -136,7 +131,7 @@ TEST_F(DocumentSourceSortTest, SortWithLimit) {
         ASSERT_BSONOBJ_EQ(arr[0].getDocument().toBson(), BSON("$sort" << BSON("a" << 1)));
 
         ASSERT(sort()->getShardSource() != nullptr);
-        ASSERT(sort()->getMergeSource() != nullptr);
+        ASSERT(!sort()->getMergeSources().empty());
     }
 
     container.push_back(DocumentSourceLimit::create(expCtx, 10));
@@ -163,7 +158,7 @@ TEST_F(DocumentSourceSortTest, SortWithLimit) {
         DOC_ARRAY(DOC("$sort" << DOC("a" << 1)) << DOC("$limit" << sort()->getLimit())));
 
     ASSERT(sort()->getShardSource() != nullptr);
-    ASSERT(sort()->getMergeSource() != nullptr);
+    ASSERT(!sort()->getMergeSources().empty());
 }
 
 TEST_F(DocumentSourceSortTest, Dependencies) {
@@ -287,7 +282,7 @@ TEST_F(DocumentSourceSortExecutionTest, CompoundSortSpecAlternateOrderSecondFiel
 
 /** Sorting different types is not supported. */
 TEST_F(DocumentSourceSortExecutionTest, InconsistentTypeSort) {
-    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"}}},
+    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"_sd}}},
                  BSON("a" << 1),
                  "[{_id:0,a:1},{_id:1,a:\"foo\"}]");
 }
@@ -353,9 +348,9 @@ TEST_F(DocumentSourceSortExecutionTest, MissingObjectWithinArray) {
 /** Compare nested values from within an array. */
 TEST_F(DocumentSourceSortExecutionTest, ExtractArrayValues) {
     checkResults({Document{{"_id", 0}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 2))}},
-                  Document{{"_id", 1}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 1))}}},
+                  Document{{"_id", 1}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 0))}}},
                  BSON("a.b" << 1),
-                 "[{_id:1,a:[{b:1},{b:1}]},{_id:0,a:[{b:1},{b:2}]}]");
+                 "[{_id:1,a:[{b:1},{b:0}]},{_id:0,a:[{b:1},{b:2}]}]");
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldPauseWhenAskedTo) {
@@ -407,7 +402,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) 
     // Allow the $sort stage to spill to disk.
     unittest::TempDir tempDir("DocumentSourceSortTest");
     expCtx->tempDir = tempDir.path();
-    expCtx->extSortAllowed = true;
+    expCtx->allowDiskUse = true;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -441,7 +436,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) 
 TEST_F(DocumentSourceSortExecutionTest,
        ShouldErrorIfNotAllowedToSpillToDiskAndResultSetIsTooLarge) {
     auto expCtx = getExpCtx();
-    expCtx->extSortAllowed = false;
+    expCtx->allowDiskUse = false;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -451,12 +446,12 @@ TEST_F(DocumentSourceSortExecutionTest,
                                             Document{{"_id", 1}, {"largeStr", largeStr}}});
     sort->setSource(mock.get());
 
-    ASSERT_THROWS_CODE(sort->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(sort->getNext(), AssertionException, 16819);
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPauses) {
     auto expCtx = getExpCtx();
-    expCtx->extSortAllowed = false;
+    expCtx->allowDiskUse = false;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -472,7 +467,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPa
     ASSERT_TRUE(sort->getNext().isPaused());
 
     // The next should realize it's used too much memory.
-    ASSERT_THROWS_CODE(sort->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(sort->getNext(), AssertionException, 16819);
 }
 
 }  // namespace

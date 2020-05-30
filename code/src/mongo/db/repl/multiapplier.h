@@ -28,6 +28,7 @@
 
 #pragma once
 
+#include <iosfwd>
 #include <memory>
 #include <string>
 #include <utility>
@@ -37,6 +38,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/multi_key_path_tracker.h"
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/service_context.h"
 #include "mongo/executor/task_executor.h"
@@ -65,15 +67,8 @@ public:
      */
     using CallbackFn = stdx::function<void(const Status&)>;
 
-    /**
-     * Type of function to to apply a single operation. In production, this function
-     * would have the same outcome as calling SyncTail::syncApply() ('inSteadyStateReplication'
-     * value will be embedded in the function implementation).
-     */
-    using ApplyOperationFn = stdx::function<Status(OperationPtrs*)>;
-
-    using MultiApplyFn = stdx::function<StatusWith<OpTime>(
-        OperationContext*, MultiApplier::Operations, MultiApplier::ApplyOperationFn)>;
+    using MultiApplyFn =
+        stdx::function<StatusWith<OpTime>(OperationContext*, MultiApplier::Operations)>;
 
     /**
      * Creates MultiApplier in inactive state.
@@ -90,7 +85,6 @@ public:
      */
     MultiApplier(executor::TaskExecutor* executor,
                  const Operations& operations,
-                 const ApplyOperationFn& applyOperation,
                  const MultiApplyFn& multiApply,
                  const CallbackFn& onCompletion);
 
@@ -100,16 +94,6 @@ public:
     virtual ~MultiApplier();
 
     /**
-     * Returns diagnostic information.
-     */
-    std::string getDiagnosticString() const;
-
-    /**
-     * Returns an informational string.
-     */
-    std::string toString() const;
-
-    /**
      * Returns true if the applier has been started (but has not completed).
      */
     bool isActive() const;
@@ -117,7 +101,7 @@ public:
     /**
      * Starts applier by scheduling initial db work to be run by the executor.
      */
-    Status startup();
+    Status startup() noexcept;
 
     /**
      * Cancels current db work request.
@@ -133,7 +117,23 @@ public:
      */
     void join();
 
+    // State transitions:
+    // PreStart --> Running --> ShuttingDown --> Complete
+    // It is possible to skip intermediate states. For example,
+    // Calling shutdown() when the cloner has not started will transition from PreStart directly
+    // to Complete.
+    // This enum class is made public for testing.
+    enum class State { kPreStart, kRunning, kShuttingDown, kComplete };
+
+    /**
+     * Returns current MultiApplier state.
+     * For testing only.
+     */
+    State getState_forTest() const;
+
 private:
+    bool _isActive_inlock() const;
+
     /**
      * DB worker callback function - applies all operations.
      */
@@ -144,7 +144,6 @@ private:
     executor::TaskExecutor* _executor;
 
     Operations _operations;
-    ApplyOperationFn _applyOperation;
     MultiApplyFn _multiApply;
     CallbackFn _onCompletion;
 
@@ -153,11 +152,17 @@ private:
 
     stdx::condition_variable _condition;
 
-    // _active is true when MultiApplier is scheduled to be run by the executor.
-    bool _active;
+    // Current multi applier state. See comments for State enum class for details.
+    State _state = State::kPreStart;
 
     executor::TaskExecutor::CallbackHandle _dbWorkCallbackHandle;
 };
+
+/**
+ * Insertion operator for MultiApplier::State. Formats fetcher state for output stream.
+ * For testing only.
+ */
+std::ostream& operator<<(std::ostream& os, const MultiApplier::State& state);
 
 }  // namespace repl
 }  // namespace mongo

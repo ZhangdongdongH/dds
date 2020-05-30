@@ -44,19 +44,22 @@ namespace {
  * corresponding to the cursor id passed from the application. In order to generate these results,
  * may issue getMore commands to remote nodes in one or more shards.
  */
-class ClusterGetMoreCmd final : public Command {
+class ClusterGetMoreCmd final : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterGetMoreCmd);
 
 public:
-    ClusterGetMoreCmd() : Command("getMore") {}
+    ClusterGetMoreCmd() : BasicCommand("getMore") {}
 
+    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const final {
+        return GetMoreRequest::parseNs(dbname, cmdObj).ns();
+    }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool maintenanceOk() const final {
@@ -74,13 +77,17 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const final {
-        help << "retrieve more documents for a cursor id";
+    std::string help() const final {
+        return "retrieve more documents for a cursor id";
+    }
+
+    LogicalOp getLogicalOp() const final {
+        return LogicalOp::opGetMore;
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final {
+                               const BSONObj& cmdObj) const final {
         StatusWith<GetMoreRequest> parseStatus = GetMoreRequest::parseFromBSON(dbname, cmdObj);
         if (!parseStatus.isOK()) {
             return parseStatus.getStatus();
@@ -91,25 +98,19 @@ public:
             request.nss, request.cursorid, request.term.is_initialized());
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
         // Counted as a getMore, not as a command.
         globalOpCounters.gotGetMore();
 
         StatusWith<GetMoreRequest> parseStatus = GetMoreRequest::parseFromBSON(dbname, cmdObj);
-        if (!parseStatus.isOK()) {
-            return appendCommandStatus(result, parseStatus.getStatus());
-        }
+        uassertStatusOK(parseStatus.getStatus());
         const GetMoreRequest& request = parseStatus.getValue();
 
-        auto response = ClusterFind::runGetMore(txn, request);
-        if (!response.isOK()) {
-            return appendCommandStatus(result, response.getStatus());
-        }
+        auto response = ClusterFind::runGetMore(opCtx, request);
+        uassertStatusOK(response.getStatus());
 
         response.getValue().addToBSON(CursorResponse::ResponseType::SubsequentResponse, &result);
         return true;

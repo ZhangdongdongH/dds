@@ -30,6 +30,8 @@
 
 #include <string>
 
+#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/fts/fts_spec.h"
 #include "mongo/db/index/expression_keys_private.h"
@@ -55,13 +57,13 @@ StatusWith<BSONObj> IndexLegacy::adjustIndexSpecObject(const BSONObj& obj) {
 }
 
 // static
-BSONObj IndexLegacy::getMissingField(OperationContext* txn,
+BSONObj IndexLegacy::getMissingField(OperationContext* opCtx,
                                      Collection* collection,
                                      const BSONObj& infoObj) {
     BSONObj keyPattern = infoObj.getObjectField("key");
     std::string accessMethodName;
     if (collection)
-        accessMethodName = collection->getIndexCatalog()->getAccessMethodName(txn, keyPattern);
+        accessMethodName = collection->getIndexCatalog()->getAccessMethodName(opCtx, keyPattern);
     else
         accessMethodName = IndexNames::findPluginName(keyPattern);
 

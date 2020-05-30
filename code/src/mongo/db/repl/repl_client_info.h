@@ -29,9 +29,9 @@
 #pragma once
 
 #include "mongo/bson/oid.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/client.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/storage/snapshot_name.h"
 
 namespace mongo {
 
@@ -45,26 +45,15 @@ class ReplClientInfo {
 public:
     static const Client::Decoration<ReplClientInfo> forClient;
 
-    void setLastOp(const OpTime& op) {
-        _lastOp = op;
-    }
+    void setLastOp(const OpTime& op);
+
     OpTime getLastOp() const {
         return _lastOp;
     }
 
-    void setLastSnapshot(SnapshotName name) {
-        _lastSnapshot = name;
-    }
-    SnapshotName getLastSnapshot() const {
-        return _lastSnapshot;
-    }
-
-    // Only used for master/slave
-    void setRemoteID(OID rid) {
-        _remoteId = rid;
-    }
-    OID getRemoteID() const {
-        return _remoteId;
+    // Resets the last op on this client; should only be used in testing.
+    void clearLastOp_forTest() {
+        _lastOp = OpTime();
     }
 
     /**
@@ -72,14 +61,12 @@ public:
      * This is necessary when doing no-op writes, as we need to set the client's lastOp to a proper
      * value for write concern wait to work.
      */
-    void setLastOpToSystemLastOpTime(OperationContext* txn);
+    void setLastOpToSystemLastOpTime(OperationContext* opCtx);
 
 private:
     static const long long kUninitializedTerm = -1;
 
     OpTime _lastOp = OpTime();
-    SnapshotName _lastSnapshot = SnapshotName::min();
-    OID _remoteId = OID();
 };
 
 }  // namespace repl

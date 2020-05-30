@@ -34,19 +34,21 @@
 #include "mongo/base/init.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_noop.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_kv_engine.h"
-#include "mongo/stdx/memory.h"
+
+#include <memory>
 
 namespace mongo {
+namespace {
 
-// static
-bool WiredTigerKVEngine::initRsOplogBackgroundThread(StringData ns) {
+bool initRsOplogBackgroundThread(StringData ns) {
     return NamespaceString::oplog(ns);
 }
 
-MONGO_INITIALIZER(SetGlobalEnvironment)(InitializerContext* context) {
-    setGlobalServiceContext(stdx::make_unique<ServiceContextNoop>());
+MONGO_INITIALIZER(SetInitRsOplogBackgroundThreadCallback)(InitializerContext* context) {
+    WiredTigerKVEngine::setInitRsOplogBackgroundThreadCallback(initRsOplogBackgroundThread);
     return Status::OK();
 }
+
+}  // namespace
 }  // namespace mongo

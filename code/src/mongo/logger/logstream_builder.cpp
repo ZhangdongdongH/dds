@@ -37,7 +37,6 @@
 #include "mongo/logger/tee.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"  // TODO: remove apple dep for this in threadlocal.h
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -54,44 +53,42 @@ MONGO_INITIALIZER(LogstreamBuilder)(InitializerContext*) {
     return Status::OK();
 }
 
-}  // namespace
+thread_local std::unique_ptr<std::ostringstream> threadOstreamCache;
 
-TSP_DECLARE(std::unique_ptr<std::ostringstream>, threadOstreamCache);
-TSP_DEFINE(std::unique_ptr<std::ostringstream>, threadOstreamCache);
-
-namespace {
 // During unittests, where we don't use quickExit(), static finalization may destroy the
 // cache before its last use, so mark it as not initialized in that case.
-// This must be after the TSP_DEFINE so that it is destroyed first.
+// This must be after the definition of threadOstreamCache so that it is destroyed first.
 struct ThreadOstreamCacheFinalizer {
     ~ThreadOstreamCacheFinalizer() {
         isThreadOstreamCacheInitialized = false;
     }
 } threadOstreamCacheFinalizer;
+
 }  // namespace
 
 namespace logger {
 
 LogstreamBuilder::LogstreamBuilder(MessageLogDomain* domain,
-                                   std::string contextName,
+                                   StringData contextName,
                                    LogSeverity severity)
-    : LogstreamBuilder(
-          domain, std::move(contextName), std::move(severity), LogComponent::kDefault) {}
+    : LogstreamBuilder(domain, contextName, std::move(severity), LogComponent::kDefault) {}
 
 LogstreamBuilder::LogstreamBuilder(MessageLogDomain* domain,
-                                   std::string contextName,
+                                   StringData contextName,
                                    LogSeverity severity,
-                                   LogComponent component)
+                                   LogComponent component,
+                                   bool shouldCache)
     : _domain(domain),
-      _contextName(std::move(contextName)),
+      _contextName(contextName.toString()),
       _severity(std::move(severity)),
       _component(std::move(component)),
-      _tee(nullptr) {}
+      _tee(nullptr),
+      _shouldCache(shouldCache) {}
 
 LogstreamBuilder::LogstreamBuilder(logger::MessageLogDomain* domain,
-                                   const std::string& contextName,
+                                   StringData contextName,
                                    LabeledLevel labeledLevel)
-    : LogstreamBuilder(domain, std::move(contextName), static_cast<LogSeverity>(labeledLevel)) {
+    : LogstreamBuilder(domain, contextName, static_cast<LogSeverity>(labeledLevel)) {
     setBaseMessage(labeledLevel.getLabel());
 }
 
@@ -103,7 +100,7 @@ LogstreamBuilder::~LogstreamBuilder() {
         MessageEventEphemeral message(
             Date_t::now(), _severity, _component, _contextName, _baseMessage);
         message.setIsTruncatable(_isTruncatable);
-        _domain->append(message);
+        _domain->append(message).transitional_ignore();
         if (_tee) {
             _os->str("");
             logger::MessageEventDetailsEncoder teeEncoder;
@@ -111,8 +108,8 @@ LogstreamBuilder::~LogstreamBuilder() {
             _tee->write(_os->str());
         }
         _os->str("");
-        if (isThreadOstreamCacheInitialized && !threadOstreamCache.getMake()->get()) {
-            *threadOstreamCache.get() = std::move(_os);
+        if (_shouldCache && isThreadOstreamCacheInitialized && !threadOstreamCache) {
+            threadOstreamCache = std::move(_os);
         }
     }
 }
@@ -125,8 +122,8 @@ void LogstreamBuilder::operator<<(Tee* tee) {
 
 void LogstreamBuilder::makeStream() {
     if (!_os) {
-        if (isThreadOstreamCacheInitialized && threadOstreamCache.getMake()->get()) {
-            _os = std::move(*threadOstreamCache.get());
+        if (_shouldCache && isThreadOstreamCacheInitialized && threadOstreamCache) {
+            _os = std::move(threadOstreamCache);
         } else {
             _os = stdx::make_unique<std::ostringstream>();
         }

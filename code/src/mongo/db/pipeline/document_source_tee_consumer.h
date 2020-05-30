@@ -38,7 +38,7 @@
 namespace mongo {
 
 class Document;
-struct ExpressionContext;
+class ExpressionContext;
 class Value;
 
 /**
@@ -53,7 +53,15 @@ public:
         size_t facetId,
         const boost::intrusive_ptr<TeeBuffer>& bufferSource);
 
-    void dispose() final;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
+    }
+
     GetNextResult getNext() final;
 
     /**
@@ -63,7 +71,10 @@ public:
         return GetDepsReturn::SEE_NEXT;
     }
 
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+
+protected:
+    void doDispose() final;
 
 private:
     DocumentSourceTeeConsumer(const boost::intrusive_ptr<ExpressionContext>& expCtx,

@@ -35,7 +35,7 @@
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/unittest/unittest.h"
 #include <memory>
@@ -50,9 +50,8 @@ using std::unique_ptr;
  * Utility function to create MatchExpression
  */
 unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj, std::move(expCtx));
     ASSERT_TRUE(status.isOK());
     return std::move(status.getValue());
 }
@@ -85,8 +84,9 @@ void testTransform(const char* specStr,
     BSONObj spec = fromjson(specStr);
     BSONObj query = fromjson(queryStr);
     unique_ptr<MatchExpression> queryExpression = parseMatchExpression(query);
-    ProjectionExec exec(
-        spec, queryExpression.get(), collator, ExtensionsCallbackDisallowExtensions());
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
+    ProjectionExec exec(opCtx.get(), spec, queryExpression.get(), collator);
 
     // Create working set member.
     WorkingSetMember wsm;
@@ -169,8 +169,24 @@ BSONObj transformMetaSortKeyCovered(const BSONObj& sortKey,
     wsm->addComputed(new SortKeyComputedData(sortKey));
     ws.transitionToRecordIdAndIdx(wsid);
 
-    ProjectionExec projExec(
-        fromjson(projSpec), nullptr, nullptr, ExtensionsCallbackDisallowExtensions());
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
+    ProjectionExec projExec(opCtx.get(), fromjson(projSpec), nullptr, nullptr);
+    ASSERT_OK(projExec.transform(wsm));
+
+    return wsm->obj.value();
+}
+
+BSONObj transformCovered(BSONObj projSpec, const IndexKeyDatum& ikd) {
+    WorkingSet ws;
+    WorkingSetID wsid = ws.allocate();
+    WorkingSetMember* wsm = ws.get(wsid);
+    wsm->keyData.push_back(ikd);
+    ws.transitionToRecordIdAndIdx(wsid);
+
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
+    ProjectionExec projExec(opCtx.get(), projSpec, nullptr, nullptr);
     ASSERT_OK(projExec.transform(wsm));
 
     return wsm->obj.value();
@@ -246,6 +262,26 @@ TEST(ProjectionExecTest, TransformSliceSkipLimit) {
     testTransform("{a: {$slice: [1, 1]}}", "{}", "{a: [4, 6, 8]}", true, "{a: [6]}");
     testTransform("{a: {$slice: [3, 5]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
     testTransform("{a: {$slice: [10, 10]}}", "{}", "{a: [4, 6, 8]}", true, "{a: []}");
+}
+
+//
+// Dotted projections.
+//
+
+TEST(ProjectionExecTest, TransformCoveredDottedProjection) {
+    BSONObj projection = fromjson("{'b.c': 1, 'b.d': 1, 'b.f.g': 1, 'b.f.h': 1}");
+    BSONObj keyPattern = fromjson("{a: 1, 'b.c': 1, 'b.d': 1, 'b.f.g': 1, 'b.f.h': 1}");
+    BSONObj keyData = fromjson("{'': 1, '': 2, '': 3, '': 4, '': 5}");
+    BSONObj result = transformCovered(projection, IndexKeyDatum(keyPattern, keyData, nullptr));
+    ASSERT_BSONOBJ_EQ(result, fromjson("{b: {c: 2, d: 3, f: {g: 4, h: 5}}}"));
+}
+
+TEST(ProjectionExecTest, TransformNonCoveredDottedProjection) {
+    testTransform("{'b.c': 1, 'b.d': 1, 'b.f.g': 1, 'b.f.h': 1}",
+                  "{}",
+                  "{a: 1, b: {c: 2, d: 3, f: {g: 4, h: 5}}}",
+                  true,
+                  "{b: {c: 2, d: 3, f: {g: 4, h: 5}}}");
 }
 
 //

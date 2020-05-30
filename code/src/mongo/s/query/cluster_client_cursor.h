@@ -30,8 +30,13 @@
 
 #include <boost/optional.hpp>
 
+#include "mongo/client/read_preference.h"
+#include "mongo/db/auth/user_name.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/logical_session_id.h"
+#include "mongo/s/query/cluster_client_cursor_params.h"
 #include "mongo/s/query/cluster_query_result.h"
+#include "mongo/s/query/router_exec_stage.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -64,7 +69,7 @@ public:
      *
      * A non-ok status is returned in case of any error.
      */
-    virtual StatusWith<ClusterQueryResult> next() = 0;
+    virtual StatusWith<ClusterQueryResult> next(RouterExecStage::ExecContext) = 0;
 
     /**
      * Must be called before destruction to abandon a not-yet-exhausted cursor. If next() has
@@ -72,12 +77,43 @@ public:
      *
      * May block waiting for responses from remote hosts.
      */
-    virtual void kill() = 0;
+    virtual void kill(OperationContext* opCtx) = 0;
 
     /**
-     * Returns whether or not this cursor is tailing a capped collection on a shard.
+     * Sets the operation context for the cursor.
+     */
+    virtual void reattachToOperationContext(OperationContext* opCtx) = 0;
+
+    /**
+     * Detaches the cursor from its current OperationContext. Must be called before the
+     * OperationContext in use is deleted.
+     */
+    virtual void detachFromOperationContext() = 0;
+
+    /**
+     * Return the current context the cursor is attached to, if any.
+     */
+    virtual OperationContext* getCurrentOperationContext() const = 0;
+
+    /**
+     * Returns whether or not this cursor is tailable.
      */
     virtual bool isTailable() const = 0;
+
+    /**
+     * Returns whether or not this cursor is tailable and awaitData.
+     */
+    virtual bool isTailableAndAwaitData() const = 0;
+
+    /**
+     * Returns the original command object which created this cursor.
+     */
+    virtual BSONObj getOriginatingCommand() const = 0;
+
+    /**
+     * Returns a reference to the vector of remote hosts involved in this operation.
+     */
+    virtual std::size_t getNumRemotes() const = 0;
 
     /**
      * Returns the number of result documents returned so far by this cursor via the next() method.
@@ -110,11 +146,47 @@ public:
     virtual Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) = 0;
 
     /**
-     * Update the operation context for remote requests.
-     *
-     * Network requests depend on having a valid operation context for user initiated actions.
+     * Returns the logical session id for this cursor.
      */
-    virtual void setOperationContext(OperationContext* txn) = 0;
+    virtual boost::optional<LogicalSessionId> getLsid() const = 0;
+
+    /**
+     * Returns the transaction number for this cursor.
+     */
+    virtual boost::optional<TxnNumber> getTxnNumber() const = 0;
+
+    /**
+     * Returns the readPreference for this cursor.
+     */
+    virtual boost::optional<ReadPreferenceSetting> getReadPreference() const = 0;
+
+    //
+    // maxTimeMS support.
+    //
+
+    /**
+     * Returns the amount of time execution time available to this cursor. Only valid at the
+     * beginning of a getMore request, and only really for use by the maxTime tracking code.
+     *
+     * Microseconds::max() == infinity, values less than 1 mean no time left.
+     */
+    Microseconds getLeftoverMaxTimeMicros() const {
+        return _leftoverMaxTimeMicros;
+    }
+
+    /**
+     * Sets the amount of execution time available to this cursor. This is only called when an
+     * operation that uses a cursor is finishing, to update its remaining time.
+     *
+     * Microseconds::max() == infinity, values less than 1 mean no time left.
+     */
+    void setLeftoverMaxTimeMicros(Microseconds leftoverMaxTimeMicros) {
+        _leftoverMaxTimeMicros = leftoverMaxTimeMicros;
+    }
+
+private:
+    // Unused maxTime budget for this cursor.
+    Microseconds _leftoverMaxTimeMicros = Microseconds::max();
 };
 
 }  // namespace mongo

@@ -47,7 +47,7 @@ public:
     /**
      * Constructs a LiteParsedPipeline from the raw BSON stages given in 'request'.
      *
-     * May throw a UserException if there is an invalid stage specification, although full
+     * May throw a AssertionException if there is an invalid stage specification, although full
      * validation happens later, during Pipeline construction.
      */
     LiteParsedPipeline(const AggregationRequest& request) {
@@ -72,10 +72,70 @@ public:
     }
 
     /**
+     * Returns a list of the priviliges required for this pipeline.
+     */
+    PrivilegeVector requiredPrivileges(bool isMongos) const {
+        PrivilegeVector requiredPrivileges;
+        for (auto&& spec : _stageSpecs) {
+            Privilege::addPrivilegesToPrivilegeVector(&requiredPrivileges,
+                                                      spec->requiredPrivileges(isMongos));
+        }
+
+        return requiredPrivileges;
+    }
+
+    /**
      * Returns true if the pipeline begins with a $collStats stage.
      */
     bool startsWithCollStats() const {
         return !_stageSpecs.empty() && _stageSpecs.front()->isCollStats();
+    }
+
+    /**
+     * Returns true if the pipeline has a $changeStream stage.
+     */
+    bool hasChangeStream() const {
+        return std::any_of(_stageSpecs.begin(), _stageSpecs.end(), [](auto&& spec) {
+            return spec->isChangeStream();
+        });
+    }
+
+    /**
+     * Returns false if the pipeline has any stage which must be run locally on mongos.
+     */
+    bool allowedToForwardFromMongos() const {
+        return std::all_of(_stageSpecs.cbegin(), _stageSpecs.cend(), [](const auto& spec) {
+            return spec->allowedToForwardFromMongos();
+        });
+    }
+
+    /**
+     * Returns false if the pipeline has any Documet Source which requires rewriting via serialize.
+     */
+    bool allowedToPassthroughFromMongos() const {
+        return std::all_of(_stageSpecs.cbegin(), _stageSpecs.cend(), [](const auto& spec) {
+            return spec->allowedToPassthroughFromMongos();
+        });
+    }
+
+    /**
+     * Verifies that this pipeline is allowed to run with the specified read concern. This ensures
+     * that each stage is compatible, and throws a UserException if not.
+     */
+    void assertSupportsReadConcern(OperationContext* opCtx,
+                                   boost::optional<ExplainOptions::Verbosity> explain) const {
+        auto readConcern = repl::ReadConcernArgs::get(opCtx);
+
+        uassert(ErrorCodes::InvalidOptions,
+                str::stream() << "Explain for the aggregate command cannot run with a readConcern "
+                              << "other than 'local', or in a multi-document transaction. Current "
+                              << "readConcern: "
+                              << readConcern.toString(),
+                !explain || readConcern.getLevel() == repl::ReadConcernLevel::kLocalReadConcern);
+
+        for (auto&& spec : _stageSpecs) {
+            spec->assertSupportsReadConcern(readConcern);
+        }
     }
 
 private:

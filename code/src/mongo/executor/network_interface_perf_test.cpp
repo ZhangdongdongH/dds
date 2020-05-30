@@ -86,8 +86,8 @@ int timeNetworkTestMillis(std::size_t operations, NetworkInterface* net) {
 
     func = [&]() {
         RemoteCommandRequest request{
-            server, "admin", bsonObjPing, bsonObjPing, nullptr, Milliseconds(-1)};
-        net->startCommand(makeCallbackHandle(), request, callback);
+            server, "admin", bsonObjPing, BSONObj(), nullptr, Milliseconds(-1)};
+        net->startCommand(makeCallbackHandle(), request, callback).transitional_ignore();
     };
 
     func();

@@ -86,14 +86,13 @@ public:
         @return true if --dur is on.
         @return false if --dur is off. (in which case there is action)
         */
-    virtual bool commitNow(OperationContext* txn) = 0;
+    virtual bool commitNow(OperationContext* opCtx) = 0;
 
     /** Commit if enough bytes have been modified. Current threshold is 50MB
 
         The idea is that long running write operations that don't yield
-        (like creating an index or update with $atomic) can call this
-        whenever the db is in a sane state and it will prevent commits
-        from growing too large.
+        (like creating an index) can call this whenever the db is in a sane state and it will
+        prevent commits from growing too large.
         @return true if commited
         */
     virtual bool commitIfNeeded() = 0;
@@ -112,7 +111,7 @@ public:
         *
         * Must be called under the global X lock.
         */
-    virtual void commitAndStopDurThread() = 0;
+    virtual void commitAndStopDurThread(OperationContext* opCtx) = 0;
 
     /**
      * Commits pending changes, flushes all changes to main data files, then removes the
@@ -125,7 +124,7 @@ public:
      * through recovery and be applied to files that have had changes made after this call
      * applied.
      */
-    virtual void syncDataAndTruncateJournal(OperationContext* txn) = 0;
+    virtual void syncDataAndTruncateJournal(OperationContext* opCtx) = 0;
 
     virtual bool isDurable() const = 0;
 

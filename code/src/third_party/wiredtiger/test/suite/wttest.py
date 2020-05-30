@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -37,9 +37,8 @@ except ImportError:
     import unittest
 
 from contextlib import contextmanager
-import os, re, shutil, sys, time, traceback
-import wtscenario
-import wiredtiger
+import glob, os, re, shutil, sys, time, traceback
+import wiredtiger, wtscenario
 
 def shortenWithEllipsis(s, maxlen):
     if len(s) > maxlen:
@@ -102,7 +101,7 @@ class CapturedFd(object):
                                      ' unexpected ' + self.desc +
                                      ', contains:\n"' + contents + '"')
             testcase.fail('unexpected ' + self.desc + ', contains: "' +
-                      shortenWithEllipsis(contents,100) + '"')
+                      contents + '"')
         self.expectpos = filesize
 
     def checkAdditional(self, testcase, expect):
@@ -140,9 +139,9 @@ class TestSuiteConnection(object):
         self._conn = conn
         self._connlist = connlist
 
-    def close(self):
+    def close(self, config=''):
         self._connlist.remove(self._conn)
-        return self._conn.close()
+        return self._conn.close(config)
 
     # Proxy everything except what we explicitly define to the
     # wrapped connection
@@ -152,6 +151,14 @@ class TestSuiteConnection(object):
         else:
             return getattr(self._conn, attr)
 
+# Just like a list of strings, but with a convenience function
+class ExtensionList(list):
+    skipIfMissing = False
+    def extension(self, dirname, name, extarg=None):
+        if name != None and name != 'none':
+            ext = '' if extarg == None else '=' + extarg
+            self.append(dirname + '/' + name + ext)
+
 class WiredTigerTestCase(unittest.TestCase):
     _globalSetup = False
     _printOnceSeen = {}
@@ -160,9 +167,20 @@ class WiredTigerTestCase(unittest.TestCase):
     # Can be a string or a callable function or lambda expression.
     conn_config = ''
 
+    # session_config can be overridden to add to basic session configuration.
+    # Can be a string or a callable function or lambda expression.
+    session_config = ''
+
+    # conn_extensions can be overridden to add a list of extensions to load.
+    # Each entry is a string (directory and extension name) and optional config.
+    # Example:
+    #    conn_extensions = ('extractors/csv_extractor',
+    #                       'test/fail_fs={allow_writes=100}')
+    conn_extensions = ()
+
     @staticmethod
     def globalSetup(preserveFiles = False, useTimestamp = False,
-                    gdbSub = False, verbose = 1, dirarg = None,
+                    gdbSub = False, lldbSub = False, verbose = 1, builddir = None, dirarg = None,
                     longtest = False):
         WiredTigerTestCase._preserveFiles = preserveFiles
         d = 'WT_TEST' if dirarg == None else dirarg
@@ -172,9 +190,11 @@ class WiredTigerTestCase(unittest.TestCase):
         os.makedirs(d)
         wtscenario.set_long_run(longtest)
         WiredTigerTestCase._parentTestdir = d
+        WiredTigerTestCase._builddir = builddir
         WiredTigerTestCase._origcwd = os.getcwd()
         WiredTigerTestCase._resultfile = open(os.path.join(d, 'results.txt'), "w", 0)  # unbuffered
         WiredTigerTestCase._gdbSubprocess = gdbSub
+        WiredTigerTestCase._lldbSubprocess = lldbSub
         WiredTigerTestCase._longtest = longtest
         WiredTigerTestCase._verbose = verbose
         WiredTigerTestCase._dupout = os.dup(sys.stdout.fileno())
@@ -224,16 +244,70 @@ class WiredTigerTestCase(unittest.TestCase):
         return "%s.%s.%s" %  (self.__module__,
                               self.className(), self._testMethodName)
 
-    # Can be overridden, but first consider setting self.conn_config .
+    # Return the wiredtiger_open extension argument for
+    # any needed shared library.
+    def extensionsConfig(self):
+        exts = self.conn_extensions
+        if hasattr(exts, '__call__'):
+            exts = ExtensionList()
+            self.conn_extensions(exts)
+        result = ''
+        extfiles = {}
+        skipIfMissing = False
+        if hasattr(exts, 'skip_if_missing'):
+            skipIfMissing = exts.skip_if_missing
+        for ext in exts:
+            extconf = ''
+            if '=' in ext:
+                splits = ext.split('=', 1)
+                ext = splits[0]
+                extconf = '=' + splits[1]
+            splits = ext.split('/')
+            if len(splits) != 2:
+                raise Exception(self.shortid() +
+                    ": " + ext +
+                    ": extension is not named <dir>/<name>")
+            libname = splits[1]
+            dirname = splits[0]
+            pat = os.path.join(WiredTigerTestCase._builddir, 'ext',
+                dirname, libname, '.libs', 'libwiredtiger_*.so')
+            filenames = glob.glob(pat)
+            if len(filenames) == 0:
+                if skipIfMissing:
+                    self.skipTest('extension "' + ext + '" not built')
+                    continue
+                else:
+                    raise Exception(self.shortid() +
+                        ": " + ext +
+                        ": no extensions library found matching: " + pat)
+            elif len(filenames) > 1:
+                raise Exception(self.shortid() +
+                    ": " + ext +
+                    ": multiple extensions libraries found matching: " + pat)
+            complete = '"' + filenames[0] + '"' + extconf
+            if ext in extfiles:
+                if extfiles[ext] != complete:
+                    raise Exception(self.shortid() +
+                        ": non-matching extension arguments in " +
+                        str(exts))
+            else:
+                extfiles[ext] = complete
+        if len(extfiles) != 0:
+            result = ',extensions=[' + ','.join(extfiles.values()) + ']'
+        return result
+
+    # Can be overridden, but first consider setting self.conn_config
+    # or self.conn_extensions
     def setUpConnectionOpen(self, home):
         self.home = home
         config = self.conn_config
         if hasattr(config, '__call__'):
-            config = config(home)
+            config = self.conn_config()
+        config += self.extensionsConfig()
         # In case the open starts additional threads, flush first to
         # avoid confusion.
         sys.stdout.flush()
-        conn_param = 'create,error_prefix="%s: ",%s' % (self.shortid(), config)
+        conn_param = 'create,error_prefix="%s",%s' % (self.shortid(), config)
         try:
             conn = self.wiredtiger_open(home, conn_param)
         except wiredtiger.WiredTigerError as e:
@@ -250,33 +324,41 @@ class WiredTigerTestCase(unittest.TestCase):
         conn = wiredtiger.wiredtiger_open(home, config)
         return TestSuiteConnection(conn, self._connections)
 
-    # Can be overridden
+    # Can be overridden, but first consider setting self.session_config
     def setUpSessionOpen(self, conn):
-        return conn.open_session(None)
+        config = self.session_config
+        if hasattr(config, '__call__'):
+            config = self.session_config()
+        return conn.open_session(config)
 
     # Can be overridden
-    def close_conn(self):
+    def close_conn(self, config=''):
         """
         Close the connection if already open.
         """
         if self.conn != None:
-            self.conn.close()
+            self.conn.close(config)
             self.conn = None
 
-    def open_conn(self, directory="."):
+    def open_conn(self, directory=".", config=None):
         """
         Open the connection if already closed.
         """
         if self.conn == None:
+            if config != None:
+                self._old_config = self.conn_config
+                self.conn_config = config
             self.conn = self.setUpConnectionOpen(directory)
+            if config != None:
+                self.conn_config = self._old_config
             self.session = self.setUpSessionOpen(self.conn)
 
-    def reopen_conn(self, directory="."):
+    def reopen_conn(self, directory=".", config=None):
         """
         Reopen the connection.
         """
         self.close_conn()
-        self.open_conn(directory)
+        self.open_conn(directory, config)
 
     def setUp(self):
         if not hasattr(self.__class__, 'wt_ntests'):
@@ -287,6 +369,7 @@ class WiredTigerTestCase(unittest.TestCase):
             self.testsubdir = self.className() + '.' + str(self.__class__.wt_ntests)
         self.testdir = os.path.join(WiredTigerTestCase._parentTestdir, self.testsubdir)
         self.__class__.wt_ntests += 1
+        self.starttime = time.time()
         if WiredTigerTestCase._verbose > 2:
             self.prhead('started in ' + self.testdir, True)
         # tearDown needs connections list, set it here in case the open fails.
@@ -355,6 +438,9 @@ class WiredTigerTestCase(unittest.TestCase):
         else:
             self.pr('preserving directory ' + self.testdir)
 
+        elapsed = time.time() - self.starttime
+        if elapsed > 0.001 and WiredTigerTestCase._verbose >= 2:
+            print "%s: %.2f seconds" % (str(self), elapsed)
         if not passed and not skipped:
             print "ERROR in " + str(self)
             self.pr('FAIL')
@@ -416,6 +502,45 @@ class WiredTigerTestCase(unittest.TestCase):
         else:
             with self.expectedStderr(message):
                 self.assertRaises(exceptionType, expr)
+
+    def assertRaisesException(self, exceptionType, expr,
+        exceptionString=None, optional=False):
+        """
+        Like TestCase.assertRaises(), with some additional options.
+        If the exceptionString argument is used, the exception's string
+        must match it. If optional is set, then no assertion occurs
+        if the exception doesn't occur.
+        Returns true if the assertion is raised.
+        """
+        raised = False
+        try:
+            expr()
+        except BaseException, err:
+            if not isinstance(err, exceptionType):
+                self.fail('Exception of incorrect type raised, got type: ' + \
+                    str(type(err)))
+            if exceptionString != None and exceptionString != str(err):
+                self.fail('Exception with incorrect string raised, got: "' + \
+                    str(err) + '"')
+            raised = True
+        if not raised and not optional:
+            self.fail('no assertion raised')
+        return raised
+
+    def raisesBusy(self, expr):
+        """
+        Execute the expression, returning true if a 'Resource busy'
+        exception is raised, returning false if no exception is raised.
+        Any other exception raises a test suite failure.
+        """
+        return self.assertRaisesException(wiredtiger.WiredTigerError, \
+            expr, exceptionString='Resource busy', optional=True)
+
+    def assertTimestampsEqual(self, ts1, ts2):
+        """
+        TestCase.assertEqual() for timestamps
+        """
+        self.assertEqual(int(ts1, 16), int(ts2, 16))
 
     def exceptionToStderr(self, expr):
         """

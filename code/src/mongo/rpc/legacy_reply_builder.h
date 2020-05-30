@@ -32,10 +32,9 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
-#include "mongo/rpc/document_range.h"
+#include "mongo/rpc/message.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/reply_builder_interface.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace rpc {
@@ -49,18 +48,13 @@ public:
     LegacyReplyBuilder(Message&&);
     ~LegacyReplyBuilder() final;
 
-    // Override of setCommandReply specifically used to handle SendStaleConfigException.
-    LegacyReplyBuilder& setCommandReply(Status nonOKStatus, const BSONObj& extraErrorInfo) final;
+    // Override of setCommandReply specifically used to handle StaleConfigException.
+    LegacyReplyBuilder& setCommandReply(Status nonOKStatus, BSONObj extraErrorInfo) final;
     LegacyReplyBuilder& setRawCommandReply(const BSONObj& commandReply) final;
 
-    BufBuilder& getInPlaceReplyBuilder(std::size_t) final;
+    BSONObjBuilder getInPlaceReplyBuilder(std::size_t) final;
 
     LegacyReplyBuilder& setMetadata(const BSONObj& metadata) final;
-
-    Status addOutputDocs(DocumentRange outputDocs) final;
-    Status addOutputDoc(const BSONObj& outputDoc) final;
-
-    State getState() const final;
 
     void reset() final;
 
@@ -69,6 +63,8 @@ public:
     Protocol getProtocol() const final;
 
 private:
+    enum class State { kMetadata, kCommandReply, kOutputDocs, kDone };
+
     BufBuilder _builder{};
     Message _message;
     State _state{State::kCommandReply};

@@ -33,6 +33,7 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/s/balancer/balancer.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/grid.h"
@@ -41,17 +42,17 @@
 namespace mongo {
 namespace {
 
-class ConfigSvrBalancerControlCommand : public Command {
+class ConfigSvrBalancerControlCommand : public BasicCommand {
 public:
-    ConfigSvrBalancerControlCommand(StringData name) : Command(name) {}
+    ConfigSvrBalancerControlCommand(StringData name) : BasicCommand(name) {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Controls the balancer state.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Controls the balancer state.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -64,7 +65,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -72,11 +73,9 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) final {
         uassert(ErrorCodes::InternalError,
                 str::stream() << "Expected to find a " << getName() << " command, but found "
@@ -87,13 +86,13 @@ public:
                 str::stream() << getName() << " can only be run on config servers",
                 serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
 
-        _run(txn, &result);
+        _run(opCtx, &result);
 
         return true;
     }
 
 private:
-    virtual void _run(OperationContext* txn, BSONObjBuilder* result) = 0;
+    virtual void _run(OperationContext* opCtx, BSONObjBuilder* result) = 0;
 };
 
 class ConfigSvrBalancerStartCommand : public ConfigSvrBalancerControlCommand {
@@ -101,9 +100,9 @@ public:
     ConfigSvrBalancerStartCommand() : ConfigSvrBalancerControlCommand("_configsvrBalancerStart") {}
 
 private:
-    void _run(OperationContext* txn, BSONObjBuilder* result) override {
-        uassertStatusOK(Grid::get(txn)->getBalancerConfiguration()->setBalancerMode(
-            txn, BalancerSettingsType::kFull));
+    void _run(OperationContext* opCtx, BSONObjBuilder* result) override {
+        uassertStatusOK(Grid::get(opCtx)->getBalancerConfiguration()->setBalancerMode(
+            opCtx, BalancerSettingsType::kFull));
     }
 };
 
@@ -112,10 +111,15 @@ public:
     ConfigSvrBalancerStopCommand() : ConfigSvrBalancerControlCommand("_configsvrBalancerStop") {}
 
 private:
-    void _run(OperationContext* txn, BSONObjBuilder* result) override {
-        uassertStatusOK(Grid::get(txn)->getBalancerConfiguration()->setBalancerMode(
-            txn, BalancerSettingsType::kOff));
-        Balancer::get(txn)->joinCurrentRound(txn);
+    void _run(OperationContext* opCtx, BSONObjBuilder* result) override {
+
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+
+        uassertStatusOK(Grid::get(opCtx)->getBalancerConfiguration()->setBalancerMode(
+            opCtx, BalancerSettingsType::kOff));
+        Balancer::get(opCtx)->joinCurrentRound(opCtx);
     }
 };
 
@@ -125,8 +129,8 @@ public:
         : ConfigSvrBalancerControlCommand("_configsvrBalancerStatus") {}
 
 private:
-    void _run(OperationContext* txn, BSONObjBuilder* result) override {
-        Balancer::get(txn)->report(txn, result);
+    void _run(OperationContext* opCtx, BSONObjBuilder* result) override {
+        Balancer::get(opCtx)->report(opCtx, result);
     }
 };
 

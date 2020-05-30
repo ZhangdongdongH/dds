@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoreplay
 
 import (
@@ -68,21 +74,6 @@ func (m *MsgHeader) WriteTo(w io.Writer) (int64, error) {
 		return n, fmt.Errorf("attempted to write %d but wrote %d", len(b), n)
 	}
 	return n, nil
-}
-
-var goodOpCode = map[int32]bool{
-	1:    true, //OP_REPLY          Reply to a client request. responseTo is set.
-	1000: true, //OP_MSG            Generic msg command followed by a string.
-	2001: true, //OP_UPDATE         Update document.
-	2002: true, //OP_INSERT         Insert new document.
-	2003: true, //RESERVED          Formerly used for OP_GET_BY_OID.
-	2004: true, //OP_QUERY          Query a collection.
-	2005: true, //OP_GET_MORE       Get more data from a query. See Cursors.
-	2006: true, //OP_DELETE         Delete documents.
-	2007: true, //OP_KILL_CURSORS   Notify database that the client has finished with the cursor.
-	2010: true, //OP_COMMAND        A new wire protocol message representing a command request
-	2011: true, //OP_COMMANDREPLY   A new wire protocol message representing a command
-	2012: true, //OP_COMPRESSED     Compressed op
 }
 
 // LooksReal does a best efffort to detect if a MsgHeadr is not invalid

@@ -36,43 +36,40 @@
 namespace mongo {
 namespace {
 
-class NetStatCmd : public Command {
+class NetStatCmd : public BasicCommand {
 public:
-    NetStatCmd() : Command("netstat", false, "netstat") {}
+    NetStatCmd() : BasicCommand("netstat") {}
 
-    virtual bool slaveOk() const {
+    std::string help() const override {
+        return "Shows status/reachability of servers in the cluster";
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool adminOnly() const override {
         return true;
     }
 
-    virtual bool adminOnly() const {
-        return true;
-    }
-
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << " shows status/reachability of servers in the cluster";
-    }
-
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::netstat);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        result.append("configserver",
-                      grid.shardRegistry()->getConfigServerConnectionString().toString());
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
+        result.append("configserver", shardRegistry->getConfigServerConnectionString().toString());
         result.append("isdbgrid", 1);
         return true;
     }

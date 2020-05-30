@@ -28,17 +28,21 @@
 
 #include "mongo/db/exec/projection_exec.h"
 
+#include "mongo/bson/mutable/document.h"
 #include "mongo/db/exec/working_set_computed_data.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/query_request.h"
+#include "mongo/db/update/path_support.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
 using std::max;
 using std::string;
+
+namespace mmb = mongo::mutablebson;
 
 namespace {
 
@@ -73,10 +77,10 @@ ProjectionExec::ProjectionExec()
       _queryExpression(NULL),
       _hasReturnKey(false) {}
 
-ProjectionExec::ProjectionExec(const BSONObj& spec,
+ProjectionExec::ProjectionExec(OperationContext* opCtx,
+                               const BSONObj& spec,
                                const MatchExpression* queryExpression,
-                               const CollatorInterface* collator,
-                               const ExtensionsCallback& extensionsCallback)
+                               const CollatorInterface* collator)
     : _include(true),
       _special(false),
       _source(spec),
@@ -128,8 +132,10 @@ ProjectionExec::ProjectionExec(const BSONObj& spec,
                 BSONObj elemMatchObj = e.wrap();
                 verify(elemMatchObj.isOwned());
                 _elemMatchObjs.push_back(elemMatchObj);
+                boost::intrusive_ptr<ExpressionContext> expCtx(
+                    new ExpressionContext(opCtx, _collator));
                 StatusWithMatchExpression statusWithMatcher =
-                    MatchExpressionParser::parse(elemMatchObj, extensionsCallback, _collator);
+                    MatchExpressionParser::parse(elemMatchObj, std::move(expCtx));
                 verify(statusWithMatcher.isOK());
                 // And store it in _matchers.
                 _matchers[mongoutils::str::before(e.fieldName(), '.').c_str()] =
@@ -284,9 +290,9 @@ Status ProjectionExec::transform(WorkingSetMember* member) const {
             }
         }
 
-        BSONObjIterator it(_source);
-        while (it.more()) {
-            BSONElement specElt = it.next();
+        mmb::Document projectedDoc;
+
+        for (auto&& specElt : _source) {
             if (mongoutils::str::equals("_id", specElt.fieldName())) {
                 continue;
             }
@@ -306,9 +312,16 @@ Status ProjectionExec::transform(WorkingSetMember* member) const {
             BSONElement keyElt;
             // We can project a field that doesn't exist.  We just ignore it.
             if (member->getFieldDotted(specElt.fieldName(), &keyElt) && !keyElt.eoo()) {
-                bob.appendAs(keyElt, specElt.fieldName());
+                FieldRef projectedFieldPath{specElt.fieldNameStringData()};
+                auto setElementStatus =
+                    pathsupport::setElementAtPath(projectedFieldPath, keyElt, &projectedDoc);
+                if (!setElementStatus.isOK()) {
+                    return setElementStatus;
+                }
             }
         }
+
+        bob.appendElements(projectedDoc.getObject());
     }
 
     for (MetaMap::const_iterator it = _meta.begin(); it != _meta.end(); ++it) {
@@ -464,7 +477,7 @@ void ProjectionExec::appendArray(BSONObjBuilder* bob, const BSONObj& array, bool
                 BSONObjBuilder subBob;
                 BSONObjIterator jt(elt.embeddedObject());
                 while (jt.more()) {
-                    append(&subBob, jt.next());
+                    append(&subBob, jt.next()).transitional_ignore();
                 }
                 bob->append(bob->numStr(index++), subBob.obj());
                 break;
@@ -507,7 +520,7 @@ Status ProjectionExec::append(BSONObjBuilder* bob,
         BSONObjBuilder subBob;
         BSONObjIterator it(elt.embeddedObject());
         while (it.more()) {
-            subfm.append(&subBob, it.next(), details, arrayOpType);
+            subfm.append(&subBob, it.next(), details, arrayOpType).transitional_ignore();
         }
         bob->append(elt.fieldName(), subBob.obj());
     } else {

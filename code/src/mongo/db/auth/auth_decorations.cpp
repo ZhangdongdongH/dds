@@ -36,7 +36,6 @@
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/service_context.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -54,9 +53,9 @@ const auto getAuthorizationSession =
 class AuthzClientObserver final : public ServiceContext::ClientObserver {
 public:
     void onCreateClient(Client* client) override {
-        auto service = client->getServiceContext();
-        AuthorizationSession::set(client,
-                                  AuthorizationManager::get(service)->makeAuthorizationSession());
+        if (auto authzManager = AuthorizationManager::get(client->getServiceContext())) {
+            AuthorizationSession::set(client, authzManager->makeAuthorizationSession());
+        }
     }
 
     void onDestroyClient(Client* client) override {}
@@ -64,6 +63,11 @@ public:
     void onCreateOperationContext(OperationContext* opCtx) override {}
     void onDestroyOperationContext(OperationContext* opCtx) override {}
 };
+
+ServiceContext::ConstructorActionRegisterer authzClientObserverRegisterer{
+    "AuthzClientObserver", [](ServiceContext* service) {
+        service->registerClientObserver(std::make_unique<AuthzClientObserver>());
+    }};
 
 }  // namespace
 
@@ -86,11 +90,7 @@ AuthorizationManager* AuthorizationManager::get(ServiceContext& service) {
 
 void AuthorizationManager::set(ServiceContext* service,
                                std::unique_ptr<AuthorizationManager> authzManager) {
-    auto& manager = getAuthorizationManager(service);
-    invariant(authzManager);
-    invariant(!manager);
-    manager = std::move(authzManager);
-    service->registerClientObserver(stdx::make_unique<AuthzClientObserver>());
+    getAuthorizationManager(service) = std::move(authzManager);
 }
 
 AuthorizationSession* AuthorizationSession::get(Client* client) {

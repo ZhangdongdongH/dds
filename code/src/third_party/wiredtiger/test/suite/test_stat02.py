@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -59,7 +59,7 @@ class test_stat_cursor_config(wttest.WiredTigerTestCase):
     scenarios = make_scenarios(uri, data_config, cursor_config)
 
     # Turn on statistics for this test.
-    def conn_config(self, dir):
+    def conn_config(self):
         return 'statistics=(%s)' % self.data_config
 
     # For each database/cursor configuration, confirm the right combinations
@@ -243,7 +243,7 @@ class test_stat_cursor_dsrc_cache_walk(wttest.WiredTigerTestCase):
         self.assertGreater(c[stat.dsrc.btree_entries][2], 0)
         c.close()
 
-        # Verify that cache and tree walk can operate independantly
+        # Verify that cache and tree walk can operate independently
         self.conn.reconfigure('statistics=(all,clear)')
         c = self.session.open_cursor(
             'statistics:' + self.uri, None, 'statistics=(cache_walk,fast)')

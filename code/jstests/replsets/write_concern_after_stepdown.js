@@ -5,6 +5,9 @@
 (function() {
     'use strict';
 
+    load("jstests/replsets/rslib.js");
+    load("jstests/libs/write_concern_util.js");
+
     var name = "writeConcernStepDownAndBackUp";
     var dbName = "wMajorityCheck";
     var collName = "stepdownAndBackUp";
@@ -21,32 +24,15 @@
     var nodes = rst.startSet();
     rst.initiate();
 
-    function waitForState(node, state) {
-        assert.soonNoExcept(function() {
-            assert.commandWorked(node.adminCommand(
-                {replSetTest: 1, waitForMemberState: state, timeoutMillis: rst.kDefaultTimeoutMS}));
-            return true;
-        });
-    }
-
     function waitForPrimary(node) {
         assert.soon(function() {
             return node.adminCommand('ismaster').ismaster;
         });
     }
 
-    function stepUp(node) {
-        var primary = rst.getPrimary();
-        if (primary != node) {
-            assert.throws(function() {
-                primary.adminCommand({replSetStepDown: 60 * 5});
-            });
-        }
-        waitForPrimary(node);
-    }
-
+    // SERVER-20844 ReplSetTest starts up a single node replica set then reconfigures to the correct
+    // size for faster startup, so nodes[0] is always the first primary.
     jsTestLog("Make sure node 0 is primary.");
-    stepUp(nodes[0]);
     var primary = rst.getPrimary();
     var secondaries = rst.getSecondaries();
     assert.eq(nodes[0], primary);
@@ -55,20 +41,23 @@
         {a: 1}, {writeConcern: {w: 3, wtimeout: rst.kDefaultTimeoutMS}}));
 
     // Stop the secondaries from replicating.
-    secondaries.forEach(function(node) {
-        assert.commandWorked(
-            node.adminCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'alwaysOn'}));
-    });
+    stopServerReplication(secondaries);
     // Stop the primary from being able to complete stepping down.
     assert.commandWorked(
         nodes[0].adminCommand({configureFailPoint: 'blockHeartbeatStepdown', mode: 'alwaysOn'}));
 
     jsTestLog("Do w:majority write that will block waiting for replication.");
     var doMajorityWrite = function() {
+        // Run ismaster command with 'hangUpOnStepDown' set to false to mark this connection as
+        // one that shouldn't be closed when the node steps down.  This makes it easier to detect
+        // the error returned by the write concern failure.
+        assert.commandWorked(db.adminCommand({ismaster: 1, hangUpOnStepDown: false}));
+
         var res = db.getSiblingDB('wMajorityCheck').stepdownAndBackUp.insert({a: 2}, {
-            writeConcern: {w: 'majority'}
+            writeConcern: {w: 'majority', wtimeout: 600000}
         });
-        assert.writeErrorWithCode(res, ErrorCodes.PrimarySteppedDown);
+        assert.writeErrorWithCode(
+            res, [ErrorCodes.PrimarySteppedDown, ErrorCodes.InterruptedDueToReplStateChange]);
     };
 
     var joinMajorityWriter = startParallelShell(doMajorityWrite, nodes[0].port);
@@ -79,10 +68,7 @@
 
     jsTest.log("Wait for a new primary to be elected");
     // Allow the secondaries to replicate again.
-    secondaries.forEach(function(node) {
-        assert.commandWorked(
-            node.adminCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'}));
-    });
+    restartServerReplication(secondaries);
 
     waitForPrimary(nodes[1]);
 
@@ -101,8 +87,6 @@
     nodes[1].acceptConnectionsFrom(nodes[0]);
     nodes[2].acceptConnectionsFrom(nodes[0]);
 
-    joinMajorityWriter();
-
     // Allow the old primary to finish stepping down so that shutdown can finish.
     var res = null;
     try {
@@ -115,6 +99,13 @@
     if (res) {
         assert.commandWorked(res);
     }
+
+    joinMajorityWriter();
+
+    // Node 0 will go into rollback after it steps down.  We want to wait for that to happen, and
+    // then complete, in order to get a clean shutdown.
+    jsTestLog("Waiting for node 0 to roll back the failed write.");
+    rst.awaitReplication();
 
     rst.stopSet();
 }());

@@ -38,9 +38,13 @@
 #include <sched.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#ifdef __UCLIBC__
+#ifdef __BIONIC__
+#include <android/api-level.h>
+#elif __UCLIBC__
 #include <features.h>
 #else
 #include <gnu/libc-version.h>
@@ -71,7 +75,7 @@ public:
             stringstream ss;
             ss << "couldn't open [" << name << "] " << errnoWithDescription();
             string s = ss.str();
-            msgassertedNoTrace(13538, s.c_str());
+            msgasserted(13538, s.c_str());
         }
         int found = fscanf(f,
                            "%d %127s %c "
@@ -374,10 +378,13 @@ public:
             if ((nl = name.find('\n', nl)) != string::npos)
                 // stop at first newline
                 name.erase(nl);
-            // no standard format for name and version.  use kernel version
-            version = "Kernel ";
-            version += LinuxSysHelper::readLineFromFile("/proc/sys/kernel/osrelease");
+        } else {
+            name = "unknown";
         }
+
+        // There is no standard format for name and version so use the kernel version.
+        version = "Kernel ";
+        version += LinuxSysHelper::readLineFromFile("/proc/sys/kernel/osrelease");
     }
 
     /**
@@ -417,7 +424,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     cpu_set_t set;
 
     if (sched_getaffinity(0, sizeof(cpu_set_t), &set) == 0) {
@@ -451,11 +458,12 @@ double ProcessInfo::getSystemMemoryPressurePercentage() {
 }
 
 void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
-    LinuxProc p(_pid);
-    if (p._maj_flt <= std::numeric_limits<long long>::max())
-        info.appendNumber("page_faults", static_cast<long long>(p._maj_flt));
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    if (ru.ru_majflt <= std::numeric_limits<long long>::max())
+        info.appendNumber("page_faults", static_cast<long long>(ru.ru_majflt));
     else
-        info.appendNumber("page_faults", static_cast<double>(p._maj_flt));
+        info.appendNumber("page_faults", static_cast<double>(ru.ru_majflt));
 }
 
 /**
@@ -479,7 +487,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osName = distroName;
     osVersion = distroVersion;
     memSize = LinuxSysHelper::getSystemMemorySize();
-    addrSize = (string(unameData.machine).find("x86_64") != string::npos ? 64 : 32);
+    addrSize = sizeof(void*) * CHAR_BIT;
     numCores = cpuCount;
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
     cpuArch = unameData.machine;
@@ -487,7 +495,11 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
 
     BSONObjBuilder bExtra;
     bExtra.append("versionString", LinuxSysHelper::readLineFromFile("/proc/version"));
-#ifdef __UCLIBC__
+#ifdef __BIONIC__
+    stringstream ss;
+    ss << "bionic (android api " << __ANDROID_API__ << ")";
+    bExtra.append("libcVersion", ss.str());
+#elif __UCLIBC__
     stringstream ss;
     ss << "uClibc-" << __UCLIBC_MAJOR__ << "." << __UCLIBC_MINOR__ << "." << __UCLIBC_SUBLEVEL__;
     bExtra.append("libcVersion", ss.str());

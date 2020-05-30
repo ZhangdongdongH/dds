@@ -25,6 +25,8 @@
  *    then also delete it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/dbtests/mock/mock_replica_set.h"
 
 #include "mongo/db/repl/member_state.h"
@@ -45,6 +47,7 @@ MockReplicaSet::MockReplicaSet(const string& setName, size_t nodes) : _setName(s
     BSONObjBuilder configBuilder;
     configBuilder.append("_id", setName);
     configBuilder.append("version", 1);
+    configBuilder.append("protocolVersion", 1);
 
     BSONArrayBuilder membersBuilder(configBuilder.subarrayStart("members"));
     for (size_t n = 0; n < nodes; n++) {
@@ -65,7 +68,7 @@ MockReplicaSet::MockReplicaSet(const string& setName, size_t nodes) : _setName(s
     }
     membersBuilder.done();
 
-    ReplicaSetConfig replConfig;
+    ReplSetConfig replConfig;
     fassert(28566, replConfig.initialize(configBuilder.obj()));
     fassert(28573, replConfig.validate());
     setConfig(replConfig);
@@ -129,7 +132,7 @@ void MockReplicaSet::setPrimary(const string& hostAndPort) {
 vector<string> MockReplicaSet::getSecondaries() const {
     vector<string> secondaries;
 
-    for (ReplicaSetConfig::MemberIterator member = _replConfig.membersBegin();
+    for (ReplSetConfig::MemberIterator member = _replConfig.membersBegin();
          member != _replConfig.membersEnd();
          ++member) {
         if (member->getHostAndPort() != HostAndPort(_primaryHost)) {
@@ -144,11 +147,11 @@ MockRemoteDBServer* MockReplicaSet::getNode(const string& hostAndPort) {
     return mapFindWithDefault(_nodeMap, hostAndPort, static_cast<MockRemoteDBServer*>(NULL));
 }
 
-repl::ReplicaSetConfig MockReplicaSet::getReplConfig() const {
+repl::ReplSetConfig MockReplicaSet::getReplConfig() const {
     return _replConfig;
 }
 
-void MockReplicaSet::setConfig(const repl::ReplicaSetConfig& newConfig) {
+void MockReplicaSet::setConfig(const repl::ReplSetConfig& newConfig) {
     _replConfig = newConfig;
     mockIsMasterCmd();
     mockReplSetGetStatusCmd();
@@ -228,7 +231,7 @@ void MockReplicaSet::mockIsMasterCmd() {
                 builder.append("buildIndexes", false);
             }
 
-            const ReplicaSetTagConfig tagConfig = _replConfig.getTagConfig();
+            const ReplSetTagConfig tagConfig = _replConfig.getTagConfig();
             if (member->hasTags(tagConfig)) {
                 BSONObjBuilder tagBuilder;
                 for (MemberConfig::TagIterator tag = member->tagsBegin(); tag != member->tagsEnd();
@@ -282,7 +285,7 @@ void MockReplicaSet::mockReplSetGetStatusCmd() {
             hostsField.push_back(selfStatBuilder.obj());
         }
 
-        for (ReplicaSetConfig::MemberIterator member = _replConfig.membersBegin();
+        for (ReplSetConfig::MemberIterator member = _replConfig.membersBegin();
              member != _replConfig.membersEnd();
              ++member) {
             MockRemoteDBServer* hostNode = getNode(member->getHostAndPort().toString());

@@ -50,10 +50,11 @@
 #include <io.h>
 #endif
 
-#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
 #include "mongo/platform/posix_fadvise.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/fail_point.h"
 #include "mongo/util/fail_point_service.h"
@@ -81,7 +82,7 @@ using std::stringstream;
 unsigned long long FileAllocator::_uniqueNumber = 0;
 static SimpleMutex _uniqueNumberMutex;
 
-MONGO_FP_DECLARE(allocateDiskFull);
+MONGO_FAIL_POINT_DEFINE(allocateDiskFull);
 
 /**
  * Aliases for Win32 CRT functions
@@ -129,7 +130,7 @@ FileAllocator::FileAllocator() : _failed() {}
 
 
 void FileAllocator::start() {
-    stdx::thread t(stdx::bind(&FileAllocator::run, this));
+    stdx::thread t([this] { run(this); });
     t.detach();
 }
 
@@ -258,8 +259,10 @@ void FileAllocator::ensureLength(int fd, long size) {
 
 #if defined(__linux__)
     int ret = posix_fallocate(fd, 0, size);
-    if (ret == 0)
+    if (ret == 0) {
+        LOG(1) << "used fallocate to create empty file";
         return;
+    }
 
     log() << "FileAllocator: posix_fallocate failed: " << errnoWithDescription(ret)
           << " falling back" << endl;
@@ -301,6 +304,7 @@ void FileAllocator::ensureLength(int fd, long size) {
 
         lseek(fd, 0, SEEK_SET);
 
+        log() << "filling with zeroes...";
         const long z = 256 * 1024;
         const std::unique_ptr<char[]> buf_holder(new char[z]);
         char* buf = buf_holder.get();
@@ -322,7 +326,7 @@ void FileAllocator::checkFailure() {
     if (_failed) {
         // we want to log the problem (diskfull.js expects it) but we do not want to dump a stack
         // trace
-        msgassertedNoTrace(12520, "new file allocation failure");
+        msgasserted(12520, "new file allocation failure");
     }
 }
 
@@ -374,8 +378,10 @@ void FileAllocator::run(FileAllocator* fa) {
     while (1) {
         {
             stdx::unique_lock<stdx::mutex> lk(fa->_pendingMutex);
-            if (fa->_pending.size() == 0)
+            if (fa->_pending.size() == 0) {
+                MONGO_IDLE_THREAD_BLOCK;
                 fa->_pendingUpdated.wait(lk);
+            }
         }
         while (1) {
             string name;
@@ -391,7 +397,7 @@ void FileAllocator::run(FileAllocator* fa) {
             string tmp;
             long fd = 0;
             try {
-                log() << "allocating new datafile " << name << ", filling with zeroes..." << endl;
+                log() << "allocating new datafile " << name;
 
                 boost::filesystem::path parent = ensureParentDirCreated(name);
                 tmp = fa->makeTempFileName(parent);

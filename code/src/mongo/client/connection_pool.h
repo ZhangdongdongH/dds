@@ -32,21 +32,21 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/list.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 namespace executor {
 class NetworkConnectionHook;
-}
+}  // namespace executor
 
 /**
  * Represents a pool of connections to a MongoDB server. The pool is synchronized internally
  * and its methods can be called from multiple threads, however once a connection is obtained
- * it should only be used from one thread in accordance with the rules of DBClientInterface.
+ * it should only be used from one thread in accordance with the rules of DBClientBase.
  */
 class ConnectionPool {
     MONGO_DISALLOW_COPYING(ConnectionPool);
@@ -67,7 +67,7 @@ public:
     };
 
     typedef stdx::list<ConnectionInfo> ConnectionList;
-    typedef unordered_map<HostAndPort, ConnectionList> HostConnectionMap;
+    typedef stdx::unordered_map<HostAndPort, ConnectionList> HostConnectionMap;
     typedef std::map<HostAndPort, Date_t> HostLastUsedMap;
 
     /**

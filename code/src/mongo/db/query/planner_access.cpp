@@ -33,6 +33,7 @@
 #include "mongo/db/query/planner_access.h"
 
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/query/query_planner_common.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace {
 
@@ -108,6 +110,30 @@ bool scansAreEquivalent(const QuerySolutionNode* lhs, const QuerySolutionNode* r
     return *leftIxscan == *rightIxscan;
 }
 
+/**
+ * If all nodes can provide the requested sort, returns a vector expressing which nodes must have
+ * their index scans reversed to provide the sort. Otherwise, returns an empty vector.
+ * 'nodes' must not be empty.
+ */
+std::vector<bool> canProvideSortWithMergeSort(const std::vector<QuerySolutionNode*>& nodes,
+                                              const BSONObj& requestedSort) {
+    invariant(!nodes.empty());
+    std::vector<bool> shouldReverseScan;
+    const auto reverseSort = QueryPlannerCommon::reverseSortObj(requestedSort);
+    for (auto&& node : nodes) {
+        node->computeProperties();
+        auto sorts = node->getSort();
+        if (sorts.find(requestedSort) != sorts.end()) {
+            shouldReverseScan.push_back(false);
+        } else if (sorts.find(reverseSort) != sorts.end()) {
+            shouldReverseScan.push_back(true);
+        } else {
+            return {};
+        }
+    }
+    return shouldReverseScan;
+}
+
 }  // namespace
 
 namespace mongo {
@@ -117,15 +143,18 @@ using std::vector;
 using stdx::make_unique;
 
 // static
-QuerySolutionNode* QueryPlannerAccess::makeCollectionScan(const CanonicalQuery& query,
-                                                          bool tailable,
-                                                          const QueryPlannerParams& params) {
+std::unique_ptr<QuerySolutionNode> QueryPlannerAccess::makeCollectionScan(
+    const CanonicalQuery& query, bool tailable, const QueryPlannerParams& params) {
     // Make the (only) node, a collection scan.
-    CollectionScanNode* csn = new CollectionScanNode();
+    auto csn = stdx::make_unique<CollectionScanNode>();
     csn->name = query.ns();
     csn->filter = query.root()->shallowClone();
     csn->tailable = tailable;
     csn->maxScan = query.getQueryRequest().getMaxScan();
+    csn->shouldTrackLatestOplogTimestamp =
+        params.options & QueryPlannerParams::TRACK_LATEST_OPLOG_TS;
+    csn->shouldWaitForOplogVisibility =
+        params.options & QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE;
 
     // If the hint is {$natural: +-1} this changes the direction of the collection scan.
     if (!query.getQueryRequest().getHint().isEmpty()) {
@@ -146,7 +175,7 @@ QuerySolutionNode* QueryPlannerAccess::makeCollectionScan(const CanonicalQuery& 
         }
     }
 
-    return csn;
+    return std::move(csn);
 }
 
 // static
@@ -200,6 +229,17 @@ QuerySolutionNode* QueryPlannerAccess::makeLeafNode(
         TextMatchExpressionBase* textExpr = static_cast<TextMatchExpressionBase*>(expr);
         TextNode* ret = new TextNode(index);
         ret->ftsQuery = textExpr->getFTSQuery().clone();
+
+        // Count the number of prefix fields before the "text" field.
+        for (auto&& keyPatternElt : ret->index.keyPattern) {
+            // We know that the only key pattern with a type of String is the _fts field
+            // which is immediately after all prefix fields.
+            if (BSONType::String == keyPatternElt.type()) {
+                break;
+            }
+            ++(ret->numPrefixFields);
+        }
+
         return ret;
     } else {
         // Note that indexKeyPattern.firstElement().fieldName() may not equal expr->path()
@@ -311,10 +351,24 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
 
     const StageType type = node->getType();
 
-    // Text data is covered, but not exactly.  Text covering is unlike any other covering
-    // so we deal with it in addFilterToSolutionNode.
     if (STAGE_TEXT == type) {
-        scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
+        auto textNode = static_cast<TextNode*>(node);
+
+        if (pos < textNode->numPrefixFields) {
+            // This predicate is assigned to one of the prefix fields of the text index. Such
+            // predicates must always be equalities and must always be attached to the TEXT node. In
+            // order to ensure this happens, we assign INEXACT_COVERED tightness.
+            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
+        } else {
+            // The predicate is assigned to one of the trailing fields of the text index. We
+            // currently don't generate bounds for predicates assigned to trailing fields of a text
+            // index, but rather attempt to attach a covered filter. However, certain predicates can
+            // never be correctly covered (e.g. $exists), so we assign the tightness accordingly.
+            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
+                ? IndexBoundsBuilder::INEXACT_COVERED
+                : IndexBoundsBuilder::INEXACT_FETCH;
+        }
+
         return;
     }
 
@@ -323,20 +377,23 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
     if (STAGE_GEO_NEAR_2D == type) {
         invariant(INDEX_2D == index.type);
 
-        // 2D indexes are weird - the "2d" field stores a normally-indexed BinData field, but
-        // additional array fields are *not* exploded into multi-keys - they are stored directly
-        // as arrays in the index.  Also, no matter what the index expression, the "2d" field is
-        // always first.
-        // This means that we can only generically accumulate bounds for 2D indexes over the
-        // first "2d" field (pos == 0) - MatchExpressions over other fields in the 2D index may
-        // be covered (can be evaluated using only the 2D index key).  The additional fields
-        // must not affect the index scan bounds, since they are not stored in an
-        // IndexScan-compatible format.
+        // 2D indexes have a special format - the "2d" field stores a normally-indexed BinData
+        // field, but additional array fields are *not* exploded into multi-keys - they are stored
+        // directly as arrays in the index.  Also, no matter what the index expression, the "2d"
+        // field is always first.
+        //
+        // This means that we can only generically accumulate bounds for 2D indexes over the first
+        // "2d" field (pos == 0) - MatchExpressions over other fields in the 2D index may be covered
+        // (can be evaluated using only the 2D index key).  The additional fields must not affect
+        // the index scan bounds, since they are not stored in an IndexScan-compatible format.
 
         if (pos > 0) {
-            // Marking this field as covered allows the planner to accumulate a MatchExpression
-            // over the returned 2D index keys instead of adding to the index bounds.
-            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
+            // The predicate is over a trailing field of the "2d" index. If possible, we assign it
+            // as a covered filter (the INEXACT_COVERED case). Otherwise, the filter must be
+            // evaluated after fetching the full documents.
+            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
+                ? IndexBoundsBuilder::INEXACT_COVERED
+                : IndexBoundsBuilder::INEXACT_FETCH;
             return;
         }
 
@@ -350,10 +407,15 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
         verify(type == STAGE_IXSCAN);
         IndexScanNode* scan = static_cast<IndexScanNode*>(node);
 
-        // See STAGE_GEO_NEAR_2D above - 2D indexes can only accumulate scan bounds over the
-        // first "2d" field (pos == 0)
+        // See STAGE_GEO_NEAR_2D above - 2D indexes can only accumulate scan bounds over the first
+        // "2d" field (pos == 0).
         if (INDEX_2D == index.type && pos > 0) {
-            scanState->tightness = IndexBoundsBuilder::INEXACT_COVERED;
+            // The predicate is over a trailing field of the "2d" index. If possible, we assign it
+            // as a covered filter (the INEXACT_COVERED case). Otherwise, the filter must be
+            // evaluated after fetching the full documents.
+            scanState->tightness = IndexBoundsBuilder::canUseCoveredMatching(expr, index)
+                ? IndexBoundsBuilder::INEXACT_COVERED
+                : IndexBoundsBuilder::INEXACT_FETCH;
             return;
         }
 
@@ -392,25 +454,9 @@ void QueryPlannerAccess::mergeWithLeafNode(MatchExpression* expr, ScanBuildingSt
 void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntry& index) {
     TextNode* tn = static_cast<TextNode*>(node);
 
-    // Figure out what positions are prefix positions.  We build an index key prefix from
-    // the predicates over the text index prefix keys.
-    // For example, say keyPattern = { a: 1, _fts: "text", _ftsx: 1, b: 1 }
-    // prefixEnd should be 1.
-    size_t prefixEnd = 0;
-    BSONObjIterator it(tn->index.keyPattern);
-    // Count how many prefix terms we have.
-    while (it.more()) {
-        // We know that the only key pattern with a type of String is the _fts field
-        // which is immediately after all prefix fields.
-        if (String == it.next().type()) {
-            break;
-        }
-        ++prefixEnd;
-    }
-
     // If there's no prefix, the filter is already on the node and the index prefix is null.
     // We can just return.
-    if (!prefixEnd) {
+    if (!tn->numPrefixFields) {
         return;
     }
 
@@ -424,7 +470,7 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
 
     if (MatchExpression::AND != textFilterMe->matchType()) {
         // Only one prefix term.
-        invariant(1 == prefixEnd);
+        invariant(1u == tn->numPrefixFields);
         // Sanity check: must be an EQ.
         invariant(MatchExpression::EQ == textFilterMe->matchType());
 
@@ -436,10 +482,10 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
 
         // Indexed by the keyPattern position index assignment.  We want to add
         // prefixes in order but we must order them first.
-        vector<MatchExpression*> prefixExprs(prefixEnd, NULL);
+        vector<MatchExpression*> prefixExprs(tn->numPrefixFields, nullptr);
 
         AndMatchExpression* amExpr = static_cast<AndMatchExpression*>(textFilterMe);
-        invariant(amExpr->numChildren() >= prefixEnd);
+        invariant(amExpr->numChildren() >= tn->numPrefixFields);
 
         // Look through the AND children.  The prefix children we want to
         // stash in prefixExprs.
@@ -450,7 +496,7 @@ void QueryPlannerAccess::finishTextNode(QuerySolutionNode* node, const IndexEntr
             invariant(NULL != ixtag);
             // Skip this child if it's not part of a prefix, or if we've already assigned a
             // predicate to this prefix position.
-            if (ixtag->pos >= prefixEnd || prefixExprs[ixtag->pos] != NULL) {
+            if (ixtag->pos >= tn->numPrefixFields || prefixExprs[ixtag->pos] != NULL) {
                 ++curChild;
                 continue;
             }
@@ -623,22 +669,23 @@ void QueryPlannerAccess::findElemMatchChildren(const MatchExpression* node,
 // static
 std::vector<QuerySolutionNode*> QueryPlannerAccess::collapseEquivalentScans(
     const std::vector<QuerySolutionNode*> scans) {
-    OwnedPointerVector<QuerySolutionNode> ownedScans(scans);
+    std::vector<std::unique_ptr<QuerySolutionNode>> ownedScans =
+        transitional_tools_do_not_use::spool_vector(scans);
     invariant(ownedScans.size() > 0);
 
     // Scans that need to be collapsed will be adjacent to each other in the list due to how we
     // sort the query predicate. We step through the list, either merging the current scan into
     // the last scan in 'collapsedScans', or adding a new entry to 'collapsedScans' if it can't
     // be merged.
-    OwnedPointerVector<QuerySolutionNode> collapsedScans;
+    std::vector<std::unique_ptr<QuerySolutionNode>> collapsedScans;
 
-    collapsedScans.push_back(ownedScans.releaseAt(0));
+    collapsedScans.push_back(std::move(ownedScans[0]));
     for (size_t i = 1; i < ownedScans.size(); ++i) {
-        if (scansAreEquivalent(collapsedScans.back(), ownedScans[i])) {
+        if (scansAreEquivalent(collapsedScans.back().get(), ownedScans[i].get())) {
             // We collapse the entry from 'ownedScans' into the back of 'collapsedScans'.
-            std::unique_ptr<QuerySolutionNode> collapseFrom(ownedScans.releaseAt(i));
+            std::unique_ptr<QuerySolutionNode> collapseFrom(std::move(ownedScans[i]));
             FetchNode* collapseFromFetch = getFetchNode(collapseFrom.get());
-            FetchNode* collapseIntoFetch = getFetchNode(collapsedScans.back());
+            FetchNode* collapseIntoFetch = getFetchNode(collapsedScans.back().get());
 
             // If there's no filter associated with a fetch node on 'collapseFrom', all we have to
             // do is clear the filter on the node that we are collapsing into.
@@ -663,16 +710,15 @@ std::vector<QuerySolutionNode*> QueryPlannerAccess::collapseEquivalentScans(
             collapsedFilter->add(collapseIntoFetch->filter.release());
 
             // Normalize the filter and add it to 'into'.
-            collapseIntoFetch->filter.reset(
-                CanonicalQuery::normalizeTree(collapsedFilter.release()));
+            collapseIntoFetch->filter = MatchExpression::optimize(std::move(collapsedFilter));
         } else {
             // Scans are not equivalent and can't be collapsed.
-            collapsedScans.push_back(ownedScans.releaseAt(i));
+            collapsedScans.push_back(std::move(ownedScans[i]));
         }
     }
 
     invariant(collapsedScans.size() > 0);
-    return collapsedScans.release();
+    return transitional_tools_do_not_use::leak_vector(collapsedScans);
 }
 
 // static
@@ -972,7 +1018,7 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedAnd(const CanonicalQuery& que
             AndSortedNode* asn = new AndSortedNode();
             asn->children.swap(ixscanNodes);
             andResult = asn;
-        } else if (internalQueryPlannerEnableHashIntersection) {
+        } else if (internalQueryPlannerEnableHashIntersection.load()) {
             AndHashNode* ahn = new AndHashNode();
             ahn->children.swap(ixscanNodes);
             andResult = ahn;
@@ -1081,40 +1127,25 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedOr(const CanonicalQuery& quer
     if (1 == ixscanNodes.size()) {
         orResult = ixscanNodes[0];
     } else {
-        bool shouldMergeSort = false;
+        std::vector<bool> shouldReverseScan;
 
         if (!query.getQueryRequest().getSort().isEmpty()) {
-            const BSONObj& desiredSort = query.getQueryRequest().getSort();
+            // If all ixscanNodes can provide the sort, shouldReverseScan is populated with which
+            // scans to reverse.
+            shouldReverseScan =
+                canProvideSortWithMergeSort(ixscanNodes, query.getQueryRequest().getSort());
+        }
 
-            // If there exists a sort order that is present in each child, we can merge them and
-            // maintain that sort order / those sort orders.
-            ixscanNodes[0]->computeProperties();
-            BSONObjSet sharedSortOrders = ixscanNodes[0]->getSort();
-
-            if (!sharedSortOrders.empty()) {
-                for (size_t i = 1; i < ixscanNodes.size(); ++i) {
-                    ixscanNodes[i]->computeProperties();
-                    const auto& bsonCmp = SimpleBSONObjComparator::kInstance;
-                    BSONObjSet isect = bsonCmp.makeBSONObjSet();
-                    set_intersection(sharedSortOrders.begin(),
-                                     sharedSortOrders.end(),
-                                     ixscanNodes[i]->getSort().begin(),
-                                     ixscanNodes[i]->getSort().end(),
-                                     std::inserter(isect, isect.end()),
-                                     bsonCmp.makeLessThan());
-                    sharedSortOrders = isect;
-                    if (sharedSortOrders.empty()) {
-                        break;
-                    }
+        if (!shouldReverseScan.empty()) {
+            // Each node can provide either the requested sort, or the reverse of the requested
+            // sort.
+            invariant(ixscanNodes.size() == shouldReverseScan.size());
+            for (size_t i = 0; i < ixscanNodes.size(); ++i) {
+                if (shouldReverseScan[i]) {
+                    QueryPlannerCommon::reverseScans(ixscanNodes[i]);
                 }
             }
 
-            // TODO: If we're looking for the reverse of one of these sort orders we could
-            // possibly reverse the ixscan nodes.
-            shouldMergeSort = (sharedSortOrders.end() != sharedSortOrders.find(desiredSort));
-        }
-
-        if (shouldMergeSort) {
             MergeSortNode* msn = new MergeSortNode();
             msn->sort = query.getQueryRequest().getSort();
             msn->children.swap(ixscanNodes);
@@ -1143,7 +1174,8 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedDataAccess(const CanonicalQue
                                                               bool inArrayOperator,
                                                               const vector<IndexEntry>& indices,
                                                               const QueryPlannerParams& params) {
-    if (root->isLogical() && !Indexability::isBoundsGeneratingNot(root)) {
+    if (root->getCategory() == MatchExpression::MatchCategory::kLogical &&
+        !Indexability::isBoundsGeneratingNot(root)) {
         if (MatchExpression::AND == root->matchType()) {
             // Takes ownership of root.
             return buildIndexedAnd(query, root, inArrayOperator, indices, params);
@@ -1163,8 +1195,6 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedDataAccess(const CanonicalQue
             autoRoot.reset(root);
         }
 
-        // isArray or isLeaf is true.  Either way, it's over one field, and the bounds builder
-        // deals with it.
         if (NULL == root->getTag()) {
             // No index to use here, not in the context of logical operator, so we're SOL.
             return NULL;
@@ -1206,7 +1236,7 @@ QuerySolutionNode* QueryPlannerAccess::buildIndexedDataAccess(const CanonicalQue
         } else if (Indexability::arrayUsesIndexOnChildren(root)) {
             QuerySolutionNode* solution = NULL;
 
-            invariant(MatchExpression::ELEM_MATCH_OBJECT);
+            invariant(root->matchType() == MatchExpression::ELEM_MATCH_OBJECT);
             // The child is an AND.
             invariant(1 == root->numChildren());
             solution = buildIndexedDataAccess(query, root->getChild(0), true, indices, params);
@@ -1308,7 +1338,7 @@ void QueryPlannerAccess::handleFilter(ScanBuildingState* scanState) {
         handleFilterAnd(scanState);
     } else {
         // We must be building leaves for either and AND or an OR.
-        invariant(0);
+        MONGO_UNREACHABLE;
     }
 }
 

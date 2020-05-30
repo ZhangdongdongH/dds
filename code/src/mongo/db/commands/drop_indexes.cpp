@@ -51,8 +51,8 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_builder.h"
+#include "mongo/db/logical_clock.h"
 #include "mongo/db/op_observer.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/log.h"
 
@@ -64,100 +64,101 @@ using std::stringstream;
 using std::vector;
 
 /* "dropIndexes" is now the preferred form - "deleteIndexes" deprecated */
-class CmdDropIndexes : public Command {
+class CmdDropIndexes : public BasicCommand {
 public:
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "drop indexes for a collection";
+    std::string help() const override {
+        return "drop indexes for a collection";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::dropIndex);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
 
-    CmdDropIndexes() : Command("dropIndexes", false, "deleteIndexes") {}
-    bool run(OperationContext* txn,
+    CmdDropIndexes() : BasicCommand("dropIndexes", "deleteIndexes") {}
+    bool run(OperationContext* opCtx,
              const string& dbname,
-             BSONObj& jsobj,
-             int,
-             string& errmsg,
+             const BSONObj& jsobj,
              BSONObjBuilder& result) {
-        const NamespaceString nss = parseNsCollectionRequired(dbname, jsobj);
-        return appendCommandStatus(result, dropIndexes(txn, nss, jsobj, &result));
+        const NamespaceString nss = CommandHelpers::parseNsCollectionRequired(dbname, jsobj);
+        uassertStatusOK(dropIndexes(opCtx, nss, jsobj, &result));
+        return true;
     }
 
 } cmdDropIndexes;
 
-class CmdReIndex : public Command {
+class CmdReIndex : public ErrmsgCommandDeprecated {
 public:
-    virtual bool slaveOk() const {
-        return true;
-    }  // can reindex on a secondary
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;  // can reindex on a secondary
     }
-    virtual void help(stringstream& help) const {
-        help << "re-index a collection";
+    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+        return false;
+    }
+    std::string help() const override {
+        return "re-index a collection";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::reIndex);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
-    CmdReIndex() : Command("reIndex") {}
+    CmdReIndex() : ErrmsgCommandDeprecated("reIndex") {}
 
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& jsobj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        DBDirectClient db(txn);
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& jsobj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
+        DBDirectClient db(opCtx);
 
-        const NamespaceString toReIndexNs = parseNsCollectionRequired(dbname, jsobj);
+        const NamespaceString toReIndexNss =
+            CommandHelpers::parseNsCollectionRequired(dbname, jsobj);
 
-        LOG(0) << "CMD: reIndex " << toReIndexNs;
+        LOG(0) << "CMD: reIndex " << toReIndexNss;
 
-        ScopedTransaction transaction(txn, MODE_IX);
-        Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
-        OldClientContext ctx(txn, toReIndexNs.ns());
+        // This Global write lock is necessary to ensure no other connections establish a snapshot
+        // while the reIndex command is running.  The reIndex command does not write oplog entries
+        // (for the most part) and thus the minimumVisibleSnapshot mechanism doesn't completely
+        // avoid reading at times that may show discrepancies between the in-memory index catalog
+        // and the on-disk index catalog.
+        Lock::GlobalWrite lk(opCtx);
+        AutoGetOrCreateDb autoDb(opCtx, dbname, MODE_X);
 
-        Collection* collection = ctx.db()->getCollection(toReIndexNs.ns());
+        Collection* collection = autoDb.getDb()->getCollection(opCtx, toReIndexNss);
         if (!collection) {
-            if (ctx.db()->getViewCatalog()->lookup(txn, toReIndexNs.ns()))
-                return appendCommandStatus(
-                    result, {ErrorCodes::CommandNotSupportedOnView, "can't re-index a view"});
+            if (autoDb.getDb()->getViewCatalog()->lookup(opCtx, toReIndexNss.ns()))
+                uasserted(ErrorCodes::CommandNotSupportedOnView, "can't re-index a view");
             else
-                return appendCommandStatus(
-                    result, {ErrorCodes::NamespaceNotFound, "collection does not exist"});
+                uasserted(ErrorCodes::NamespaceNotFound, "collection does not exist");
         }
 
-        BackgroundOperation::assertNoBgOpInProgForNs(toReIndexNs.ns());
+        BackgroundOperation::assertNoBgOpInProgForNs(toReIndexNss.ns());
 
-        const auto featureCompatibilityVersion =
-            serverGlobalParams.featureCompatibility.version.load();
-        const auto defaultIndexVersion =
-            IndexDescriptor::getDefaultIndexVersion(featureCompatibilityVersion);
+        // This is necessary to set up CurOp and update the Top stats.
+        OldClientContext ctx(opCtx, toReIndexNss.ns());
+
+        const auto defaultIndexVersion = IndexDescriptor::getDefaultIndexVersion();
 
         vector<BSONObj> all;
         {
             vector<string> indexNames;
-            collection->getCatalogEntry()->getAllIndexes(txn, &indexNames);
+            collection->getCatalogEntry()->getAllIndexes(opCtx, &indexNames);
             all.reserve(indexNames.size());
 
             for (size_t i = 0; i < indexNames.size(); i++) {
                 const string& name = indexNames[i];
-                BSONObj spec = collection->getCatalogEntry()->getIndexSpec(txn, name);
+                BSONObj spec = collection->getCatalogEntry()->getIndexSpec(opCtx, name);
 
                 {
                     BSONObjBuilder bob;
@@ -191,32 +192,27 @@ public:
 
         result.appendNumber("nIndexesWas", all.size());
 
+        std::unique_ptr<MultiIndexBlock> indexer;
+        StatusWith<std::vector<BSONObj>> swIndexesToRebuild(ErrorCodes::UnknownError,
+                                                            "Uninitialized");
+
         {
-            WriteUnitOfWork wunit(txn);
-            Status s = collection->getIndexCatalog()->dropAllIndexes(txn, true);
-            if (!s.isOK()) {
-                errmsg = "dropIndexes failed";
-                return appendCommandStatus(result, s);
-            }
+            WriteUnitOfWork wunit(opCtx);
+            collection->getIndexCatalog()->dropAllIndexes(opCtx, true);
+
+            indexer = stdx::make_unique<MultiIndexBlock>(opCtx, collection);
+
+            swIndexesToRebuild = indexer->init(all);
+            uassertStatusOK(swIndexesToRebuild.getStatus());
             wunit.commit();
         }
 
-        MultiIndexBlock indexer(txn, collection);
-        // do not want interruption as that will leave us without indexes.
-
-        auto indexInfoObjs = indexer.init(all);
-        if (!indexInfoObjs.isOK()) {
-            return appendCommandStatus(result, indexInfoObjs.getStatus());
-        }
-
-        auto status = indexer.insertAllDocumentsInCollection();
-        if (!status.isOK()) {
-            return appendCommandStatus(result, status);
-        }
+        auto status = indexer->insertAllDocumentsInCollection();
+        uassertStatusOK(status);
 
         {
-            WriteUnitOfWork wunit(txn);
-            indexer.commit();
+            WriteUnitOfWork wunit(opCtx);
+            indexer->commit();
             wunit.commit();
         }
 
@@ -224,13 +220,11 @@ public:
         // This was also done when dropAllIndexes() committed, but we need to ensure that no one
         // tries to read in the intermediate state where all indexes are newer than the current
         // snapshot so are unable to be used.
-        auto replCoord = repl::ReplicationCoordinator::get(txn);
-        auto snapshotName = replCoord->reserveSnapshotName(txn);
-        replCoord->forceSnapshotCreation();  // Ensures a newer snapshot gets created even if idle.
-        collection->setMinimumVisibleSnapshot(snapshotName);
+        auto clusterTime = LogicalClock::getClusterTimeForReplicaSet(opCtx).asTimestamp();
+        collection->setMinimumVisibleSnapshot(clusterTime);
 
-        result.append("nIndexes", static_cast<int>(indexInfoObjs.getValue().size()));
-        result.append("indexes", indexInfoObjs.getValue());
+        result.append("nIndexes", static_cast<int>(swIndexesToRebuild.getValue().size()));
+        result.append("indexes", swIndexesToRebuild.getValue());
 
         return true;
     }

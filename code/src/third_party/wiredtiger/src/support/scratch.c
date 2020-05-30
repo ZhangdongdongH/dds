@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -15,6 +15,7 @@
  */
 int
 __wt_buf_grow_worker(WT_SESSION_IMPL *session, WT_ITEM *buf, size_t size)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	size_t offset;
 	bool copy_data;
@@ -68,28 +69,11 @@ __wt_buf_grow_worker(WT_SESSION_IMPL *session, WT_ITEM *buf, size_t size)
 int
 __wt_buf_fmt(WT_SESSION_IMPL *session, WT_ITEM *buf, const char *fmt, ...)
     WT_GCC_FUNC_ATTRIBUTE((format (printf, 3, 4)))
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
-	va_list ap;
-	size_t len;
+	WT_VA_ARGS_BUF_FORMAT(session, buf, fmt, false);
 
-	for (;;) {
-		va_start(ap, fmt);
-		len = (size_t)vsnprintf(buf->mem, buf->memsize, fmt, ap);
-		va_end(ap);
-
-		/* Check if there was enough space. */
-		if (len < buf->memsize) {
-			buf->data = buf->mem;
-			buf->size = len;
-			return (0);
-		}
-
-		/*
-		 * If not, double the size of the buffer: we're dealing with
-		 * strings, and we don't expect these numbers to get huge.
-		 */
-		WT_RET(__wt_buf_extend(session, buf, len + 1));
-	}
+	return (0);
 }
 
 /*
@@ -99,11 +83,8 @@ __wt_buf_fmt(WT_SESSION_IMPL *session, WT_ITEM *buf, const char *fmt, ...)
 int
 __wt_buf_catfmt(WT_SESSION_IMPL *session, WT_ITEM *buf, const char *fmt, ...)
     WT_GCC_FUNC_ATTRIBUTE((format (printf, 3, 4)))
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
-	va_list ap;
-	size_t len, space;
-	char *p;
-
 	/*
 	 * If we're appending data to an existing buffer, any data field should
 	 * point into the allocated memory.  (It wouldn't be insane to copy any
@@ -112,32 +93,15 @@ __wt_buf_catfmt(WT_SESSION_IMPL *session, WT_ITEM *buf, const char *fmt, ...)
 	 */
 	WT_ASSERT(session, buf->data == NULL || WT_DATA_IN_ITEM(buf));
 
-	for (;;) {
-		va_start(ap, fmt);
-		p = (char *)((uint8_t *)buf->mem + buf->size);
-		WT_ASSERT(session, buf->memsize >= buf->size);
-		space = buf->memsize - buf->size;
-		len = (size_t)vsnprintf(p, space, fmt, ap);
-		va_end(ap);
+	WT_VA_ARGS_BUF_FORMAT(session, buf, fmt, true);
 
-		/* Check if there was enough space. */
-		if (len < space) {
-			buf->size += len;
-			return (0);
-		}
-
-		/*
-		 * If not, double the size of the buffer: we're dealing with
-		 * strings, and we don't expect these numbers to get huge.
-		 */
-		WT_RET(__wt_buf_extend(session, buf, buf->size + len + 1));
-	}
+	return (0);
 }
 
 /*
  * __wt_buf_set_printable --
- *	Set the contents of the buffer to a printable representation of a
- * byte string.
+ *	Set the contents of the buffer to a printable representation of a byte
+ * string.
  */
 const char *
 __wt_buf_set_printable(
@@ -148,6 +112,85 @@ __wt_buf_set_printable(
 		buf->size = strlen("[Error]");
 	}
 	return (buf->data);
+}
+
+/*
+ * __wt_buf_set_printable_format --
+ *	Set the contents of the buffer to a printable representation of a byte
+ * string, based on a format.
+ */
+const char *
+__wt_buf_set_printable_format(WT_SESSION_IMPL *session,
+    const void *buffer, size_t size, const char *format, WT_ITEM *buf)
+{
+	WT_DECL_ITEM(tmp);
+	WT_DECL_PACK_VALUE(pv);
+	WT_DECL_RET;
+	WT_PACK pack;
+	const uint8_t *p, *end;
+	const char *retp, *sep;
+
+	p = (const uint8_t *)buffer;
+	end = p + size;
+
+	WT_ERR(__wt_buf_init(session, buf, 0));
+
+	WT_ERR(__pack_init(session, &pack, format));
+	for (sep = ""; (ret = __pack_next(&pack, &pv)) == 0;) {
+		WT_ERR(__unpack_read(session, &pv, &p, (size_t)(end - p)));
+		switch (pv.type) {
+		case 'x':
+			break;
+		case 's':
+		case 'S':
+			WT_ERR(__wt_buf_catfmt(
+			    session, buf, "%s%s", sep,  pv.u.s));
+			sep = ",";
+			break;
+		case 'U':
+		case 'u':
+			if (pv.u.item.size == 0)
+				break;
+
+			if (tmp == NULL)
+				WT_ERR(__wt_scr_alloc(session, 0, &tmp));
+			WT_ERR(__wt_buf_catfmt(session, buf, "%s%s",
+			    sep, __wt_buf_set_printable(
+			    session, pv.u.item.data, pv.u.item.size, tmp)));
+			break;
+		case 'b':
+		case 'h':
+		case 'i':
+		case 'l':
+		case 'q':
+			WT_ERR(__wt_buf_catfmt(
+			    session, buf, "%s%" PRId64, sep, pv.u.i));
+			sep = ",";
+			break;
+		case 'B':
+		case 't':
+		case 'H':
+		case 'I':
+		case 'L':
+		case 'Q':
+		case 'r':
+		case 'R':
+			WT_ERR(__wt_buf_catfmt(
+			    session, buf, "%s%" PRIu64, sep, pv.u.u));
+			sep = ",";
+			break;
+		WT_ILLEGAL_VALUE_ERR(session, pv.type);
+		}
+	}
+	WT_ERR_NOTFOUND_OK(ret);
+
+err:	__wt_scr_free(session, &tmp);
+	if (ret == 0)
+		return ((const char *)buf->data);
+
+	retp = "failed to create printable output";
+	__wt_err(session, ret, "%s", retp);
+	return (retp);
 }
 
 /*
@@ -199,9 +242,10 @@ __wt_buf_set_size(
 int
 __wt_scr_alloc_func(WT_SESSION_IMPL *session, size_t size, WT_ITEM **scratchp
 #ifdef HAVE_DIAGNOSTIC
-    , const char *file, int line
+    , const char *func, int line
 #endif
     )
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_DECL_RET;
 	WT_ITEM *buf, **p, **best, **slot;
@@ -286,15 +330,14 @@ __wt_scr_alloc_func(WT_SESSION_IMPL *session, size_t size, WT_ITEM **scratchp
 	F_SET(*best, WT_ITEM_INUSE);
 
 #ifdef HAVE_DIAGNOSTIC
-	session->scratch_track[best - session->scratch].file = file;
+	session->scratch_track[best - session->scratch].func = func;
 	session->scratch_track[best - session->scratch].line = line;
 #endif
 
 	*scratchp = *best;
 	return (0);
 
-err:	WT_RET_MSG(session, ret,
-	    "session unable to allocate a scratch buffer");
+err:	WT_RET_MSG(session, ret, "session unable to allocate a scratch buffer");
 }
 
 /*
@@ -312,16 +355,19 @@ __wt_scr_discard(WT_SESSION_IMPL *session)
 		if (*bufp == NULL)
 			continue;
 		if (F_ISSET(*bufp, WT_ITEM_INUSE))
+#ifdef HAVE_DIAGNOSTIC
 			__wt_errx(session,
 			    "scratch buffer allocated and never discarded"
-#ifdef HAVE_DIAGNOSTIC
 			    ": %s: %d",
 			    session->
-			    scratch_track[bufp - session->scratch].file,
+			    scratch_track[bufp - session->scratch].func,
 			    session->
 			    scratch_track[bufp - session->scratch].line
-#endif
 			    );
+#else
+			__wt_errx(session,
+			    "scratch buffer allocated and never discarded");
+#endif
 
 		__wt_buf_free(session, *bufp);
 		__wt_free(session, *bufp);

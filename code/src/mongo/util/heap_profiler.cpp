@@ -587,7 +587,6 @@ private:
             shortName << "stack" << stackInfo->stackNum;
             BSONObjBuilder stackBuilder(stacksBuilder.subobjStart(shortName.str()));
             stackBuilder.appendNumber("activeBytes", stackInfo->activeBytes);
-            stackBuilder.append("stack", stackInfo->stackObj);
         }
         stacksBuilder.doneFast();
 
@@ -649,7 +648,7 @@ public:
         return HeapProfiler::enabledParameter;
     }
 
-    BSONObj generateSection(OperationContext* txn,
+    BSONObj generateSection(OperationContext* opCtx,
                             const BSONElement& configElement) const override {
         BSONObjBuilder builder;
         HeapProfiler::generateServerStatusSection(builder);

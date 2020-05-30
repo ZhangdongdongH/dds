@@ -35,7 +35,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/dbclientinterface.h"
-#include "mongo/client/sasl_client_authenticate.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/password_digest.h"
 
@@ -164,11 +164,11 @@ BSONObj MongoURI::_makeAuthObjFromOptions(int maxWireVersion) const {
     return bob.obj();
 }
 
-DBClientBase* MongoURI::connect(StringData applicationName, std::string& errmsg) const {
-    double socketTimeoutSecs = 0.0;
-
+DBClientBase* MongoURI::connect(StringData applicationName,
+                                std::string& errmsg,
+                                boost::optional<double> socketTimeoutSecs) const {
     OptionsMap::const_iterator it = _options.find("socketTimeoutMS");
-    if (it != _options.end()) {
+    if (it != _options.end() && !socketTimeoutSecs) {
         try {
             socketTimeoutSecs = std::stod(it->second) / 1000;
         } catch (const std::exception& e) {
@@ -177,15 +177,16 @@ DBClientBase* MongoURI::connect(StringData applicationName, std::string& errmsg)
         }
     }
 
-    auto ret = _connectString.connect(applicationName, errmsg, socketTimeoutSecs, this);
+    auto ret = std::unique_ptr<DBClientBase>(
+        _connectString.connect(applicationName, errmsg, socketTimeoutSecs.value_or(0.0), this));
     if (!ret) {
-        return ret;
+        return nullptr;
     }
 
     if (!_user.empty()) {
         ret->auth(_makeAuthObjFromOptions(ret->getMaxWireVersion()));
     }
-    return ret;
+    return ret.release();
 }
 
 }  // namespace mongo

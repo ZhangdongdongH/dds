@@ -29,84 +29,84 @@
 #include "mongo/platform/basic.h"
 
 #include <map>
-#include <string>
 #include <vector>
 
+#include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
 #include "mongo/client/remote_command_targeter.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/client/shard.h"
 #include "mongo/s/client/shard_registry.h"
+#include "mongo/s/commands/strategy.h"
 #include "mongo/s/grid.h"
 
 namespace mongo {
-
-using std::unique_ptr;
-using std::map;
-using std::string;
-using std::vector;
-
 namespace {
 
-class ListDatabasesCmd : public Command {
+class ListDatabasesCmd : public BasicCommand {
 public:
-    ListDatabasesCmd() : Command("listDatabases", true, "listdatabases") {}
+    ListDatabasesCmd() : BasicCommand("listDatabases", "listdatabases") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual bool slaveOverrideOk() const {
-        return true;
-    }
-
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "list databases in a cluster";
+    std::string help() const override {
+        return "list databases in a cluster";
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
-        ActionSet actions;
-        actions.addAction(ActionType::listDatabases);
-        out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
+    /* listDatabases is always authorized,
+     * however the results returned will be redacted
+     * based on read privileges if auth is enabled
+     * and the current user does not have listDatabases permisison.
+     */
+    Status checkAuthForCommand(Client* client,
+                               const std::string& dbname,
+                               const BSONObj& cmdObj) const override {
+        return Status::OK();
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname_unused,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        map<string, long long> sizes;
-        map<string, unique_ptr<BSONObjBuilder>> dbShardInfo;
 
-        vector<ShardId> shardIds;
-        grid.shardRegistry()->getAllShardIds(&shardIds);
+    bool run(OperationContext* opCtx,
+             const std::string& dbname_unused,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        const bool nameOnly = cmdObj["nameOnly"].trueValue();
+
+        auto const shardRegistry = Grid::get(opCtx)->shardRegistry();
+
+        std::map<std::string, long long> sizes;
+        std::map<std::string, std::unique_ptr<BSONObjBuilder>> dbShardInfo;
+
+        std::vector<ShardId> shardIds;
+        shardRegistry->getAllShardIdsNoReload(&shardIds);
+        shardIds.emplace_back(ShardRegistry::kConfigServerShardId);
+
+        auto filteredCmd = CommandHelpers::filterCommandRequestForPassthrough(cmdObj);
 
         for (const ShardId& shardId : shardIds) {
-            const auto shardStatus = grid.shardRegistry()->getShard(txn, shardId);
+            const auto shardStatus = shardRegistry->getShard(opCtx, shardId);
             if (!shardStatus.isOK()) {
                 continue;
             }
             const auto s = shardStatus.getValue();
 
-            auto response = uassertStatusOK(s->runCommandWithFixedRetryAttempts(
-                txn,
-                ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
-                "admin",
-                BSON("listDatabases" << 1),
-                Shard::RetryPolicy::kIdempotent));
+            auto response = uassertStatusOK(
+                s->runCommandWithFixedRetryAttempts(opCtx,
+                                                    ReadPreferenceSetting::get(opCtx),
+                                                    "admin",
+                                                    filteredCmd,
+                                                    Shard::RetryPolicy::kIdempotent));
             uassertStatusOK(response.commandStatus);
             BSONObj x = std::move(response.response);
 
@@ -114,20 +114,31 @@ public:
             while (j.more()) {
                 BSONObj dbObj = j.next().Obj();
 
-                const string name = dbObj["name"].String();
-                const long long size = dbObj["sizeOnDisk"].numberLong();
+                const auto name = dbObj["name"].String();
 
-                long long& totalSize = sizes[name];
-                if (size == 1) {
-                    if (totalSize <= 1) {
-                        totalSize = 1;
-                    }
-                } else {
-                    totalSize += size;
+                // If this is the admin db, only collect its stats from the config servers.
+                if (name == "admin" && !s->isConfig()) {
+                    continue;
                 }
 
-                unique_ptr<BSONObjBuilder>& bb = dbShardInfo[name];
-                if (!bb.get()) {
+                // We don't collect config server info for dbs other than "admin" and "config".
+                if (s->isConfig() && name != "config" && name != "admin") {
+                    continue;
+                }
+
+                const long long size = dbObj["sizeOnDisk"].numberLong();
+
+                long long& sizeSumForDbAcrossShards = sizes[name];
+                if (size == 1) {
+                    if (sizeSumForDbAcrossShards <= 1) {
+                        sizeSumForDbAcrossShards = 1;
+                    }
+                } else {
+                    sizeSumForDbAcrossShards += size;
+                }
+
+                auto& bb = dbShardInfo[name];
+                if (!bb) {
                     bb.reset(new BSONObjBuilder());
                 }
 
@@ -135,50 +146,62 @@ public:
             }
         }
 
+        // If we have ActionType::listDatabases,
+        // then we don't need to test each record in the output.
+        // Otherwise, we'll test the database names as we enumerate them.
+        const auto as = AuthorizationSession::get(opCtx->getClient());
+        const bool checkAuth = as &&
+            !as->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                  ActionType::listDatabases);
+
+        // Now that we have aggregated results for all the shards, convert to a response,
+        // and compute total sizes.
         long long totalSize = 0;
 
-        BSONArrayBuilder dbListBuilder(result.subarrayStart("databases"));
-        for (map<string, long long>::iterator i = sizes.begin(); i != sizes.end(); ++i) {
-            const string name = i->first;
+        {
+            BSONArrayBuilder dbListBuilder(result.subarrayStart("databases"));
+            for (const auto& sizeEntry : sizes) {
+                const auto& name = sizeEntry.first;
+                const long long size = sizeEntry.second;
 
-            if (name == "local") {
-                // We don't return local, since all shards have their own independent local
-                continue;
+                // Skip the local database, since all shards have their own independent local
+                if (name == NamespaceString::kLocalDb)
+                    continue;
+
+                if (checkAuth && as &&
+                    !as->isAuthorizedForActionsOnResource(ResourcePattern::forDatabaseName(name),
+                                                          ActionType::find)) {
+                    // We don't have listDatabases on the cluser or find on this database.
+                    continue;
+                }
+
+                BSONObjBuilder temp;
+                temp.append("name", name);
+                if (!nameOnly) {
+                    temp.appendNumber("sizeOnDisk", size);
+                    temp.appendBool("empty", size == 1);
+                    temp.append("shards", dbShardInfo[name]->obj());
+
+                    uassert(ErrorCodes::BadValue,
+                            str::stream() << "Found negative 'sizeOnDisk' in: " << name,
+                            size >= 0);
+
+                    totalSize += size;
+                }
+
+                dbListBuilder.append(temp.obj());
             }
-
-            if (name == "config" || name == "admin") {
-                // Always get this from the config servers
-                continue;
-            }
-
-            long long size = i->second;
-            totalSize += size;
-
-            BSONObjBuilder temp;
-            temp.append("name", name);
-            temp.appendNumber("sizeOnDisk", size);
-            temp.appendBool("empty", size == 1);
-            temp.append("shards", dbShardInfo[name]->obj());
-
-            dbListBuilder.append(temp.obj());
         }
 
-        // Get information for config and admin dbs from the config servers.
-        auto catalogClient = grid.catalogClient(txn);
-        auto appendStatus = catalogClient->appendInfoForConfigServerDatabases(txn, &dbListBuilder);
-        if (!appendStatus.isOK()) {
-            return Command::appendCommandStatus(result, appendStatus);
+        if (!nameOnly) {
+            result.appendNumber("totalSize", totalSize);
+            result.appendNumber("totalSizeMb", totalSize / (1024 * 1024));
         }
-
-        dbListBuilder.done();
-
-        result.appendNumber("totalSize", totalSize);
-        result.appendNumber("totalSizeMb", totalSize / (1024 * 1024));
 
         return true;
     }
 
-} clusterCmdListDatabases;
+} listDatabasesCmd;
 
 }  // namespace
 }  // namespace mongo

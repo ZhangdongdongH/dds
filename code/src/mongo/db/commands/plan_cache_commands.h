@@ -43,7 +43,7 @@ namespace mongo {
  * Defines common attributes for all plan cache related commands
  * such as slaveOk.
  */
-class PlanCacheCommand : public Command {
+class PlanCacheCommand : public BasicCommand {
 public:
     PlanCacheCommand(const std::string& name, const std::string& helpText, ActionType actionType);
 
@@ -57,20 +57,16 @@ public:
      * implement plan cache command functionality.
      */
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result);
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;
 
-    virtual bool slaveOk() const;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override;
 
-    virtual bool slaveOverrideOk() const;
-
-    virtual void help(std::stringstream& ss) const;
+    std::string help() const override;
 
     /**
      * Two action types defined for plan cache commands:
@@ -79,22 +75,22 @@ public:
      */
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj);
+                                       const BSONObj& cmdObj) const;
     /**
      * Subset of command arguments used by plan cache commands
      * Override to provide command functionality.
      * Should contain just enough logic to invoke run*Command() function
      * in plan_cache.h
      */
-    virtual Status runPlanCacheCommand(OperationContext* txn,
+    virtual Status runPlanCacheCommand(OperationContext* opCtx,
                                        const std::string& ns,
-                                       BSONObj& cmdObj,
+                                       const BSONObj& cmdObj,
                                        BSONObjBuilder* bob) = 0;
 
     /**
      * Validatess query shape from command object and returns canonical query.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* txn,
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* opCtx,
                                                                     const std::string& ns,
                                                                     const BSONObj& cmdObj);
 
@@ -112,9 +108,9 @@ private:
 class PlanCacheListQueryShapes : public PlanCacheCommand {
 public:
     PlanCacheListQueryShapes();
-    virtual Status runPlanCacheCommand(OperationContext* txn,
+    virtual Status runPlanCacheCommand(OperationContext* opCtx,
                                        const std::string& ns,
-                                       BSONObj& cmdObj,
+                                       const BSONObj& cmdObj,
                                        BSONObjBuilder* bob);
 
     /**
@@ -138,16 +134,16 @@ public:
 class PlanCacheClear : public PlanCacheCommand {
 public:
     PlanCacheClear();
-    virtual Status runPlanCacheCommand(OperationContext* txn,
+    virtual Status runPlanCacheCommand(OperationContext* opCtx,
                                        const std::string& ns,
-                                       BSONObj& cmdObj,
+                                       const BSONObj& cmdObj,
                                        BSONObjBuilder* bob);
 
     /**
      * Clears collection's plan cache.
      * If query shape is provided, clears plans for that single query shape only.
      */
-    static Status clear(OperationContext* txn,
+    static Status clear(OperationContext* opCtx,
                         PlanCache* planCache,
                         const std::string& ns,
                         const BSONObj& cmdObj);
@@ -167,15 +163,15 @@ public:
 class PlanCacheListPlans : public PlanCacheCommand {
 public:
     PlanCacheListPlans();
-    virtual Status runPlanCacheCommand(OperationContext* txn,
+    virtual Status runPlanCacheCommand(OperationContext* opCtx,
                                        const std::string& ns,
-                                       BSONObj& cmdObj,
+                                       const BSONObj& cmdObj,
                                        BSONObjBuilder* bob);
 
     /**
      * Displays the cached plans for a query shape.
      */
-    static Status list(OperationContext* txn,
+    static Status list(OperationContext* opCtx,
                        const PlanCache& planCache,
                        const std::string& ns,
                        const BSONObj& cmdObj,

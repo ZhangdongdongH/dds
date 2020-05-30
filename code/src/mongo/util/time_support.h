@@ -58,10 +58,17 @@ class Date_t {
 public:
     /**
      * The largest representable Date_t.
-     *
-     * TODO(schwerin): Make constexpr when supported by all compilers.
      */
-    static Date_t max();
+    static constexpr Date_t max() {
+        return fromMillisSinceEpoch(std::numeric_limits<long long>::max());
+    }
+
+    /**
+     * The minimum representable Date_t.
+     */
+    static constexpr Date_t min() {
+        return fromMillisSinceEpoch(0);
+    }
 
     /**
      * Reads the system clock and returns a Date_t representing the present time.
@@ -71,7 +78,7 @@ public:
     /**
      * Returns a Date_t from an integer number of milliseconds since the epoch.
      */
-    static Date_t fromMillisSinceEpoch(long long m) {
+    static constexpr Date_t fromMillisSinceEpoch(long long m) {
         return Date_t(m);
     }
 
@@ -86,7 +93,7 @@ public:
     /**
      * Constructs a Date_t representing the epoch.
      */
-    Date_t() = default;
+    constexpr Date_t() = default;
 
     /**
      * Constructs a Date_t from a system clock time point.
@@ -219,8 +226,13 @@ public:
         return !(*this < other);
     }
 
+    friend std::ostream& operator<<(std::ostream& out, const Date_t& date) {
+        out << date.toString();
+        return out;
+    }
+
 private:
-    explicit Date_t(long long m) : millis(m) {}
+    constexpr explicit Date_t(long long m) : millis(m) {}
 
     long long millis = 0;
 };
@@ -340,5 +352,8 @@ char* asctime(const struct tm* tm);
 char* ctime(const time_t* timep);
 struct tm* gmtime(const time_t* timep);
 struct tm* localtime(const time_t* timep);
+
+// Find minimum system timer resolution of OS
+Nanoseconds getMinimumTimerResolution();
 
 }  // namespace mongo

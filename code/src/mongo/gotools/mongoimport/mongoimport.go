@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Package mongoimport allows importing content from a JSON, CSV, or TSV into a MongoDB instance.
 package mongoimport
 
@@ -288,7 +294,7 @@ type fileSizeProgressor struct {
 }
 
 func (fsp *fileSizeProgressor) Progress() (int64, int64) {
-	return fsp.max, fsp.sizeTracker.Size()
+	return fsp.sizeTracker.Size(), fsp.max
 }
 
 // ImportDocuments is used to write input data to the database. It returns the
@@ -441,7 +447,8 @@ func (imp *MongoImport) ingestDocuments(readDocs chan bson.D) (retErr error) {
 func (imp *MongoImport) configureSession(session *mgo.Session) error {
 	// sockets to the database will never be forcibly closed
 	session.SetSocketTimeout(0)
-	sessionSafety, err := db.BuildWriteConcern(imp.IngestOptions.WriteConcern, imp.nodeType)
+	sessionSafety, err := db.BuildWriteConcern(imp.IngestOptions.WriteConcern, imp.nodeType,
+		imp.ToolOptions.ParsedConnString())
 	if err != nil {
 		return fmt.Errorf("write concern error: %v", err)
 	}

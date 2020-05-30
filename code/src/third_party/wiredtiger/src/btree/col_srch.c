@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -62,7 +62,7 @@ __check_leaf_key_range(WT_SESSION_IMPL *session,
  */
 int
 __wt_col_search(WT_SESSION_IMPL *session,
-    uint64_t search_recno, WT_REF *leaf, WT_CURSOR_BTREE *cbt)
+    uint64_t search_recno, WT_REF *leaf, WT_CURSOR_BTREE *cbt, bool restore)
 {
 	WT_BTREE *btree;
 	WT_COL *cip;
@@ -73,7 +73,7 @@ __wt_col_search(WT_SESSION_IMPL *session,
 	WT_PAGE_INDEX *pindex, *parent_pindex;
 	WT_REF *current, *descent;
 	uint64_t recno;
-	uint32_t base, indx, limit;
+	uint32_t base, indx, limit, read_flags;
 	int depth;
 
 	btree = S2BT(session);
@@ -90,16 +90,15 @@ __wt_col_search(WT_SESSION_IMPL *session,
 
 	/*
 	 * We may be searching only a single leaf page, not the full tree. In
-	 * the normal case where the page links to a parent, check the page's
+	 * the normal case where we are searching a tree, check the page's
 	 * parent keys before doing the full search, it's faster when the
-	 * cursor is being re-positioned. (One case where the page doesn't
-	 * have a parent is if it is being re-instantiated in memory as part
-	 * of a split).
+	 * cursor is being re-positioned.  Skip this if the page is being
+	 * re-instantiated in memory.
 	 */
 	if (leaf != NULL) {
 		WT_ASSERT(session, search_recno != WT_RECNO_OOB);
 
-		if (leaf->home != NULL) {
+		if (!restore) {
 			WT_RET(__check_leaf_key_range(
 			    session, recno, leaf, cbt));
 			if (cbt->compare != 0) {
@@ -180,6 +179,9 @@ descend:	/*
 			descent = pindex->index[base - 1];
 		}
 
+		/* Encourage races. */
+		WT_DIAGNOSTIC_YIELD;
+
 		/*
 		 * Swap the current page for the child page. If the page splits
 		 * while we're retrieving it, restart the search at the root.
@@ -192,8 +194,11 @@ descend:	/*
 		 * On other error, simply return, the swap call ensures we're
 		 * holding nothing on failure.
 		 */
-		if ((ret = __wt_page_swap(
-		    session, current, descent, WT_READ_RESTART_OK)) == 0) {
+		read_flags = WT_READ_RESTART_OK;
+		if (F_ISSET(cbt, WT_CBT_READ_ONCE))
+			FLD_SET(read_flags, WT_READ_WONT_NEED);
+		if ((ret = __wt_page_swap(session,
+		    current, descent, read_flags)) == 0) {
 			current = descent;
 			continue;
 		}
@@ -240,8 +245,8 @@ leaf_only:
 			cbt->compare = 1;
 			return (0);
 		}
-		if (recno >= current->ref_recno + page->pg_fix_entries) {
-			cbt->recno = current->ref_recno + page->pg_fix_entries;
+		if (recno >= current->ref_recno + page->entries) {
+			cbt->recno = current->ref_recno + page->entries;
 			goto past_end;
 		} else {
 			cbt->recno = recno;
@@ -257,8 +262,7 @@ leaf_only:
 		}
 		if ((cip = __col_var_search(current, recno, NULL)) == NULL) {
 			cbt->recno = __col_var_last_recno(current);
-			cbt->slot = page->pg_var_entries == 0 ?
-			    0 : page->pg_var_entries - 1;
+			cbt->slot = page->entries == 0 ? 0 : page->entries - 1;
 			goto past_end;
 		} else {
 			cbt->recno = recno;

@@ -31,13 +31,17 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repl/noop_writer.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -76,17 +80,18 @@ public:
 private:
     void run(Seconds waitTime, NoopWriteFn noopWrite) {
         Client::initThread("NoopWriter");
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
         while (true) {
+            const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+            OperationContext& opCtx = *opCtxPtr;
             {
                 stdx::unique_lock<stdx::mutex> lk(_mutex);
+                MONGO_IDLE_THREAD_BLOCK;
                 _cv.wait_for(lk, waitTime.toSystemDuration(), [&] { return _inShutdown; });
 
                 if (_inShutdown)
                     return;
             }
-            noopWrite(&txn);
+            noopWrite(&opCtx);
         }
     }
 
@@ -126,7 +131,7 @@ Status NoopWriter::startWritingPeriodicNoops(OpTime lastKnownOpTime) {
 
     invariant(!_noopRunner);
     _noopRunner = stdx::make_unique<PeriodicNoopRunner>(
-        _writeInterval, [this](OperationContext* txn) { _writeNoop(txn); });
+        _writeInterval, [this](OperationContext* opCtx) { _writeNoop(opCtx); });
     return Status::OK();
 }
 
@@ -135,20 +140,20 @@ void NoopWriter::stopWritingPeriodicNoops() {
     _noopRunner.reset();
 }
 
-void NoopWriter::_writeNoop(OperationContext* txn) {
-    ScopedTransaction transaction(txn, MODE_IX);
+void NoopWriter::_writeNoop(OperationContext* opCtx) {
     // Use GlobalLock + lockMMAPV1Flush instead of DBLock to allow return when the lock is not
     // available. It may happen when the primary steps down and a shared global lock is acquired.
-    Lock::GlobalLock lock(txn->lockState(), MODE_IX, 1);
+    Lock::GlobalLock lock(
+        opCtx, MODE_IX, Date_t::now() + Milliseconds(1), Lock::InterruptBehavior::kLeaveUnlocked);
     if (!lock.isLocked()) {
         LOG(1) << "Global lock is not available skipping noopWrite";
         return;
     }
-    txn->lockState()->lockMMAPV1Flush();
+    opCtx->lockState()->lockMMAPV1Flush();
 
-    auto replCoord = ReplicationCoordinator::get(txn);
+    auto replCoord = ReplicationCoordinator::get(opCtx);
     // Its a proxy for being a primary
-    if (!replCoord->canAcceptWritesForDatabase("admin")) {
+    if (!replCoord->canAcceptWritesForDatabase(opCtx, "admin")) {
         LOG(1) << "Not a primary, skipping the noop write";
         return;
     }
@@ -160,17 +165,18 @@ void NoopWriter::_writeNoop(OperationContext* txn) {
         LOG(1) << "Not scheduling a noop write. Last known OpTime: " << _lastKnownOpTime
                << " != last primary OpTime: " << lastAppliedOpTime;
     } else {
-        if (writePeriodicNoops) {
-            const auto logLevel = Command::testCommandsEnabled ? 0 : 1;
+        if (writePeriodicNoops.load()) {
+            const auto logLevel = getTestCommandsEnabled() ? 0 : 1;
             LOG(logLevel)
                 << "Writing noop to oplog as there has been no writes to this replica set in over "
                 << _writeInterval;
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                WriteUnitOfWork uow(txn);
-                txn->getClient()->getServiceContext()->getOpObserver()->onOpMessage(txn, kMsgObj);
-                uow.commit();
-            }
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(txn, "writeNoop", rsOplogName);
+            writeConflictRetry(
+                opCtx, "writeNoop", NamespaceString::kRsOplogNamespace.ns(), [&opCtx] {
+                    WriteUnitOfWork uow(opCtx);
+                    opCtx->getClient()->getServiceContext()->getOpObserver()->onOpMessage(opCtx,
+                                                                                          kMsgObj);
+                    uow.commit();
+                });
         }
     }
 

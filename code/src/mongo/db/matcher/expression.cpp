@@ -55,28 +55,35 @@ bool MatchExpression::matchesBSON(const BSONObj& doc, MatchDetails* details) con
     return matches(&mydoc, details);
 }
 
+bool MatchExpression::matchesBSONElement(BSONElement elem, MatchDetails* details) const {
+    BSONElementViewMatchableDocument matchableDoc(elem);
+    return matches(&matchableDoc, details);
+}
+
 void MatchExpression::setCollator(const CollatorInterface* collator) {
-    auto children = getChildVector();
-    if (children) {
-        for (auto child : *children) {
-            child->setCollator(collator);
-        }
+    for (size_t i = 0; i < numChildren(); ++i) {
+        getChild(i)->setCollator(collator);
     }
 
     _doSetCollator(collator);
 }
 
-void FalseMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
-    debug << "$all: []\n";
-}
+void MatchExpression::addDependencies(DepsTracker* deps) const {
+    for (size_t i = 0; i < numChildren(); ++i) {
 
-void FalseMatchExpression::serialize(BSONObjBuilder* out) const {
-    // Our query language has no "always false" operator aside from a $all with no children, so use
-    // that as a proxy here.
-    BSONObjBuilder child(out->subobjStart(_path));
-    BSONArrayBuilder allChild(child.subarrayStart("$all"));
-    allChild.doneFast();
-    child.doneFast();
+        // Don't recurse through MatchExpression nodes which require an entire array or entire
+        // subobject for matching.
+        const auto type = matchType();
+        switch (type) {
+            case MatchExpression::ELEM_MATCH_VALUE:
+            case MatchExpression::ELEM_MATCH_OBJECT:
+            case MatchExpression::INTERNAL_SCHEMA_OBJECT_MATCH:
+                continue;
+            default:
+                getChild(i)->addDependencies(deps);
+        }
+    }
+
+    _doAddDependencies(deps);
 }
 }

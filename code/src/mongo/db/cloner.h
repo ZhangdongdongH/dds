@@ -35,6 +35,7 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/collection_options.h"
 
 namespace mongo {
 
@@ -50,8 +51,8 @@ class Cloner {
 public:
     Cloner();
 
-    void setConnection(DBClientBase* c) {
-        _conn.reset(c);
+    void setConnection(std::unique_ptr<DBClientBase> c) {
+        _conn = std::move(c);
     }
 
     /**
@@ -62,18 +63,25 @@ public:
      *              that are cloned.  When opts.createCollections is true, this parameter is
      *              ignored and the collection list is fetched from the remote via _conn.
      */
-    Status copyDb(OperationContext* txn,
+    Status copyDb(OperationContext* opCtx,
                   const std::string& toDBName,
                   const std::string& masterHost,
                   const CloneOptions& opts,
                   std::set<std::string>* clonedColls,
                   std::vector<BSONObj> collectionsToClone = std::vector<BSONObj>());
 
-    bool copyCollection(OperationContext* txn,
+    /**
+     * Copies a collection. The optionsParser indicates how to parse the collection options. If
+     * 'parseForCommand' is provided, then the UUID is ignored and a new UUID is generated. If
+     * 'parseForStorage' is provided, then the UUID will be preserved and parsed out of the
+     * options.
+     */
+    bool copyCollection(OperationContext* opCtx,
                         const std::string& ns,
                         const BSONObj& query,
                         std::string& errmsg,
-                        bool copyIndexes);
+                        bool copyIndexes,
+                        CollectionOptions::ParseKind optionsParser);
 
     // Filters a database's collection list and removes collections that should not be cloned.
     // CloneOptions should be populated with a fromDB and a list of collections to ignore, which
@@ -85,13 +93,15 @@ public:
         std::string collectionName;
         BSONObj collectionInfo;
         BSONObj idIndexSpec;
+        bool shardedColl = false;
     };
 
     // Executes 'createCollection' for each collection described in 'createCollectionParams', in
     // 'dbName'.
-    Status createCollectionsForDb(OperationContext* txn,
+    Status createCollectionsForDb(OperationContext* opCtx,
                                   const std::vector<CreateCollectionParams>& createCollectionParams,
-                                  const std::string& dbName);
+                                  const std::string& dbName,
+                                  const CloneOptions& opts);
 
     /*
      * Returns the _id index spec from 'indexSpecs', or an empty BSONObj if none is found.
@@ -99,7 +109,7 @@ public:
     static BSONObj getIdIndexSpec(const std::list<BSONObj>& indexSpecs);
 
 private:
-    void copy(OperationContext* txn,
+    void copy(OperationContext* opCtx,
               const std::string& toDBName,
               const NamespaceString& from_ns,
               const BSONObj& from_opts,
@@ -108,7 +118,7 @@ private:
               const CloneOptions& opts,
               Query q);
 
-    void copyIndexes(OperationContext* txn,
+    void copyIndexes(OperationContext* opCtx,
                      const std::string& toDBName,
                      const NamespaceString& from_ns,
                      const BSONObj& from_opts,
@@ -122,19 +132,15 @@ private:
 /**
  *  slaveOk     - if true it is ok if the source of the data is !ismaster.
  *  useReplAuth - use the credentials we normally use as a replication slave for the cloning
- *  snapshot    - use snapshot mode for copying collections.  note this should not be used
- *                when it isn't required, as it will be slower.  for example,
- *                repairDatabase need not use it.
  *  createCollections - When 'true', will fetch a list of collections from the remote and create
  *                them.  When 'false', assumes collections have already been created ahead of time.
  */
 struct CloneOptions {
     std::string fromDB;
-    std::set<std::string> collsToIgnore;
+    std::set<std::string> shardedColls;
 
     bool slaveOk = false;
     bool useReplAuth = false;
-    bool snapshot = true;
 
     bool syncData = true;
     bool syncIndexes = true;

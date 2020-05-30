@@ -33,18 +33,18 @@
 #include "mongo/db/repl/elect_cmd_runner.h"
 
 #include "mongo/base/status.h"
-#include "mongo/db/repl/member_heartbeat_data.h"
-#include "mongo/db/repl/replica_set_config.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace repl {
 
 using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
 
-ElectCmdRunner::Algorithm::Algorithm(const ReplicaSetConfig& rsConfig,
+ElectCmdRunner::Algorithm::Algorithm(const ReplSetConfig& rsConfig,
                                      int selfIndex,
                                      const std::vector<HostAndPort>& targets,
                                      OID round)
@@ -104,7 +104,7 @@ bool ElectCmdRunner::Algorithm::hasReceivedSufficientResponses() const {
 }
 
 void ElectCmdRunner::Algorithm::processResponse(const RemoteCommandRequest& request,
-                                                const ResponseStatus& response) {
+                                                const RemoteCommandResponse& response) {
     ++_actualResponses;
 
     if (response.isOK()) {
@@ -128,13 +128,13 @@ void ElectCmdRunner::Algorithm::processResponse(const RemoteCommandRequest& requ
 ElectCmdRunner::ElectCmdRunner() : _isCanceled(false) {}
 ElectCmdRunner::~ElectCmdRunner() {}
 
-StatusWith<ReplicationExecutor::EventHandle> ElectCmdRunner::start(
-    ReplicationExecutor* executor,
-    const ReplicaSetConfig& currentConfig,
+StatusWith<executor::TaskExecutor::EventHandle> ElectCmdRunner::start(
+    executor::TaskExecutor* executor,
+    const ReplSetConfig& currentConfig,
     int selfIndex,
     const std::vector<HostAndPort>& targets) {
-    _algorithm.reset(new Algorithm(currentConfig, selfIndex, targets, OID::gen()));
-    _runner.reset(new ScatterGatherRunner(_algorithm.get(), executor));
+    _algorithm = std::make_shared<Algorithm>(currentConfig, selfIndex, targets, OID::gen());
+    _runner = stdx::make_unique<ScatterGatherRunner>(_algorithm, executor);
     return _runner->start();
 }
 

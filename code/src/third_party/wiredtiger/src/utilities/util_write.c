@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -17,11 +17,11 @@ util_write(WT_SESSION *session, int argc, char *argv[])
 	WT_DECL_RET;
 	uint64_t recno;
 	int ch;
+	char *uri, config[100];
 	bool append, overwrite, rkey;
-	const char *uri;
-	char config[100];
 
 	append = overwrite = false;
+	uri = NULL;
 	while ((ch = __wt_getopt(progname, argc, argv, "ao")) != EOF)
 		switch (ch) {
 		case 'a':
@@ -47,30 +47,40 @@ util_write(WT_SESSION *session, int argc, char *argv[])
 	} else
 		if (argc < 3 || ((argc - 1) % 2 != 0))
 			return (usage());
-	if ((uri = util_name(session, *argv, "table")) == NULL)
+	if ((uri = util_uri(session, *argv, "table")) == NULL)
 		return (1);
 
-	/* Open the object. */
-	(void)snprintf(config, sizeof(config), "%s,%s",
-	    append ? "append=true" : "", overwrite ? "overwrite=true" : "");
-	if ((ret = session->open_cursor(
-	    session, uri, NULL, config, &cursor)) != 0)
-		return (util_err(session, ret, "%s: session.open", uri));
+	/*
+	 * Open the object; free allocated memory immediately to simplify
+	 * future error handling.
+	 */
+	if ((ret = __wt_snprintf(config, sizeof(config), "%s,%s",
+	    append ? "append=true" : "",
+	    overwrite ? "overwrite=true" : "")) != 0) {
+		free(uri);
+		return (util_err(session, ret, NULL));
+	}
+	if ((ret =
+	    session->open_cursor(session, uri, NULL, config, &cursor)) != 0)
+		(void)util_err(session, ret, "%s: session.open_cursor", uri);
+	free(uri);
+	if (ret != 0)
+		return (ret);
 
 	/*
 	 * A simple search only makes sense if the key format is a string or a
 	 * record number, and the value format is a single string.
 	 */
-	if (strcmp(cursor->key_format, "r") != 0 &&
-	    strcmp(cursor->key_format, "S") != 0) {
+	if (!WT_STREQ(cursor->key_format, "r") &&
+	    !WT_STREQ(cursor->key_format, "S")) {
 		fprintf(stderr,
 		    "%s: write command only possible when the key format is "
 		    "a record number or string\n",
 		    progname);
 		return (1);
 	}
-	rkey = strcmp(cursor->key_format, "r") == 0;
-	if (strcmp(cursor->value_format, "S") != 0) {
+	rkey = WT_STREQ(cursor->key_format, "r");
+	if (!WT_STREQ(cursor->value_format, "S")) {
 		fprintf(stderr,
 		    "%s: write command only possible when the value format is "
 		    "a string\n",
@@ -82,7 +92,7 @@ util_write(WT_SESSION *session, int argc, char *argv[])
 	while (*++argv != NULL) {
 		if (!append) {
 			if (rkey) {
-				if (util_str2recno(session, *argv, &recno))
+				if (util_str2num(session, *argv, true, &recno))
 					return (1);
 				cursor->set_key(cursor, recno);
 			} else

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -29,6 +29,7 @@ int
 __wt_nfilename(
     WT_SESSION_IMPL *session, const char *name, size_t namelen, char **path)
 {
+	WT_DECL_RET;
 	size_t len;
 	char *buf;
 
@@ -39,14 +40,36 @@ __wt_nfilename(
 	 * the exists API which is used by the test utilities.
 	 */
 	if (session == NULL || __wt_absolute_path(name))
-		WT_RET(__wt_strndup(session, name, namelen, path));
-	else {
-		len = strlen(S2C(session)->home) + 1 + namelen + 1;
-		WT_RET(__wt_calloc(session, 1, len, &buf));
-		snprintf(buf, len, "%s%s%.*s", S2C(session)->home,
-		    __wt_path_separator(), (int)namelen, name);
-		*path = buf;
-	}
+		return (__wt_strndup(session, name, namelen, path));
+
+	len = strlen(S2C(session)->home) + 1 + namelen + 1;
+	WT_RET(__wt_calloc(session, 1, len, &buf));
+	WT_ERR(__wt_snprintf(buf, len, "%s%s%.*s",
+	    S2C(session)->home, __wt_path_separator(), (int)namelen, name));
+	*path = buf;
+	return (0);
+
+err:	__wt_free(session, buf);
+	return (ret);
+}
+
+/*
+ * __wt_filename_construct --
+ *	Given unique identifiers, return a WT_ITEM of a generated file name of
+ *	the given prefix type. Any identifier that is 0 will be skipped.
+ */
+int
+__wt_filename_construct(WT_SESSION_IMPL *session, const char *path,
+    const char *file_prefix, uintmax_t id_1, uint32_t id_2, WT_ITEM *buf)
+{
+	if (path != NULL && path[0] != '\0')
+		WT_RET(__wt_buf_catfmt(
+		    session, buf, "%s%s", path, __wt_path_separator()));
+	WT_RET(__wt_buf_catfmt(session, buf, "%s", file_prefix));
+	if (id_1 != UINTMAX_MAX)
+		WT_RET(__wt_buf_catfmt(session, buf, ".%010" PRIuMAX, id_1));
+	if (id_2 != UINT32_MAX)
+		WT_RET(__wt_buf_catfmt(session, buf, ".%010" PRIu32, id_2));
 
 	return (0);
 }
@@ -68,10 +91,11 @@ __wt_remove_if_exists(WT_SESSION_IMPL *session, const char *name, bool durable)
 
 /*
  * __wt_copy_and_sync --
- *	Copy a file safely; here to support the wt utility.
+ *	Copy a file safely.
  */
 int
 __wt_copy_and_sync(WT_SESSION *wt_session, const char *from, const char *to)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;

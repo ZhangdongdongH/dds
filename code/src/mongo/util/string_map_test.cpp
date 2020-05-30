@@ -1,5 +1,3 @@
-// string_map_test.cpp
-
 /*    Copyright 2012 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
@@ -32,7 +30,6 @@
 #include "mongo/unittest/unittest.h"
 
 #include "mongo/platform/random.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/util/log.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/timer.h"
@@ -101,15 +98,20 @@ TEST(StringMapTest, Big1) {
 TEST(StringMapTest, find1) {
     StringMap<int> m;
 
-    ASSERT_TRUE(m.end() == m.find("foo"));
+    ASSERT_EQ(m.count("foo"), 0u);
+    ASSERT(m.find("foo") == m.end());
 
     m["foo"] = 5;
+    ASSERT_EQ(m.count("foo"), 1u);
     StringMap<int>::const_iterator i = m.find("foo");
-    ASSERT_TRUE(i != m.end());
-    ASSERT_EQUALS(5, i->second);
-    ASSERT_EQUALS("foo", i->first);
+    ASSERT(i != m.end());
+    ASSERT_EQ(i->second, 5);
+    ASSERT_EQ(i->first, "foo");
     ++i;
-    ASSERT_TRUE(i == m.end());
+    ASSERT(i == m.end());
+
+    ASSERT_EQ(m.count("bar"), 0u);
+    ASSERT(m.find("bar") == m.end());
 }
 
 

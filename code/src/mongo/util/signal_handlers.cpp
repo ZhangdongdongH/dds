@@ -33,6 +33,7 @@
 #include "mongo/util/signal_handlers.h"
 
 #include <signal.h>
+#include <time.h>
 
 #if !defined(_WIN32)
 #include <unistd.h>
@@ -40,9 +41,11 @@
 
 #include "mongo/db/log_process_details.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/service_context.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/quick_exit.h"
@@ -160,18 +163,33 @@ void eventProcessingThread() {
 // ensure the db and log mutexes aren't held. Because this is run in a different thread, it does
 // not need to be safe to call in signal context.
 sigset_t asyncSignals;
-void signalProcessingThread() {
+void signalProcessingThread(LogFileStatus rotate) {
     setThreadName("signalProcessingThread");
+
+    time_t signalTimeSeconds = -1;
+    time_t lastSignalTimeSeconds = -1;
 
     while (true) {
         int actualSignal = 0;
-        int status = sigwait(&asyncSignals, &actualSignal);
+        int status = [&] {
+            MONGO_IDLE_THREAD_BLOCK;
+            return sigwait(&asyncSignals, &actualSignal);
+        }();
         fassert(16781, status == 0);
         switch (actualSignal) {
             case SIGUSR1:
                 // log rotate signal
+                signalTimeSeconds = time(0);
+                if (signalTimeSeconds <= lastSignalTimeSeconds) {
+                    // ignore multiple signals in the same or earlier second.
+                    break;
+                }
+
+                lastSignalTimeSeconds = signalTimeSeconds;
                 fassert(16782, rotateLogs(serverGlobalParams.logRenameOnRotate));
-                logProcessDetailsForLogRotate();
+                if (rotate == LogFileStatus::kNeedToRotateLogFile) {
+                    logProcessDetailsForLogRotate(getGlobalServiceContext());
+                }
                 break;
             default:
                 // interrupt/terminate signal
@@ -203,14 +221,14 @@ void setupSignalHandlers() {
 #endif
 }
 
-void startSignalProcessingThread() {
+void startSignalProcessingThread(LogFileStatus rotate) {
 #ifdef _WIN32
     stdx::thread(eventProcessingThread).detach();
 #else
     // Mask signals in the current (only) thread. All new threads will inherit this mask.
     invariant(pthread_sigmask(SIG_SETMASK, &asyncSignals, 0) == 0);
     // Spawn a thread to capture the signals we just masked off.
-    stdx::thread(signalProcessingThread).detach();
+    stdx::thread(signalProcessingThread, rotate).detach();
 #endif
 }
 

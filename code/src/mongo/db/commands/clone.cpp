@@ -26,6 +26,7 @@
 *    it in the license file.
 */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/status.h"
@@ -35,8 +36,10 @@
 #include "mongo/db/catalog/document_validation.h"
 #include "mongo/db/cloner.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/s/grid.h"
+#include "mongo/util/log.h"
 
 namespace {
 
@@ -46,32 +49,32 @@ using std::set;
 using std::string;
 using std::stringstream;
 
-/* Usage:
+/* The clone command is deprecated. See http://dochub.mongodb.org/core/copydb-clone-deprecation.
+   Usage:
    mydb.$cmd.findOne( { clone: "fromhost" } );
    Note: doesn't work with authentication enabled, except as internal operation or for
    old-style users for backwards compatibility.
 */
-class CmdClone : public Command {
+class CmdClone : public BasicCommand {
 public:
-    CmdClone() : Command("clone") {}
+    CmdClone() : BasicCommand("clone") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
-
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "clone this database from an instance of the db on another host\n";
-        help << "{clone: \"host13\"[, slaveOk: <bool>]}";
+    std::string help() const override {
+        return "clone this database from an instance of the db on another host\n"
+               "{clone: \"host13\"[, slaveOk: <bool>]}";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         ActionSet actions;
         actions.addAction(ActionType::insert);
         actions.addAction(ActionType::createIndex);
@@ -86,15 +89,18 @@ public:
         return Status::OK();
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const string& dbname,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
+        const char* deprecationWarning =
+            "Support for the clone command has been deprecated. See "
+            "http://dochub.mongodb.org/core/copydb-clone-deprecation";
+        warning() << deprecationWarning;
+        result.append("note", deprecationWarning);
         boost::optional<DisableDocumentValidation> maybeDisableValidation;
         if (shouldBypassDocumentValidationForCommand(cmdObj)) {
-            maybeDisableValidation.emplace(txn);
+            maybeDisableValidation.emplace(opCtx);
         }
 
         string from = cmdObj.getStringField("clone");
@@ -105,32 +111,32 @@ public:
         opts.fromDB = dbname;
         opts.slaveOk = cmdObj["slaveOk"].trueValue();
 
-        // See if there's any collections we should ignore
+        // collsToIgnore is only used by movePrimary and contains a list of the
+        // sharded collections.
         if (cmdObj["collsToIgnore"].type() == Array) {
             BSONObjIterator it(cmdObj["collsToIgnore"].Obj());
 
             while (it.more()) {
                 BSONElement e = it.next();
                 if (e.type() == String) {
-                    opts.collsToIgnore.insert(e.String());
+                    opts.shardedColls.insert(e.String());
                 }
             }
         }
 
+        // Clone the non-ignored collections.
         set<string> clonedColls;
-
-        ScopedTransaction transaction(txn, MODE_IX);
-        Lock::DBLock dbXLock(txn->lockState(), dbname, MODE_X);
+        Lock::DBLock dbXLock(opCtx, dbname, MODE_X);
 
         Cloner cloner;
-        Status status = cloner.copyDb(txn, dbname, from, opts, &clonedColls);
+        Status status = cloner.copyDb(opCtx, dbname, from, opts, &clonedColls);
 
         BSONArrayBuilder barr;
         barr.append(clonedColls);
-
         result.append("clonedColls", barr.arr());
 
-        return appendCommandStatus(result, status);
+        uassertStatusOK(status);
+        return true;
     }
 
 } cmdClone;

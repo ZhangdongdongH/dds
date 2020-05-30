@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -15,6 +15,102 @@ static inline void
 __cursor_set_recno(WT_CURSOR_BTREE *cbt, uint64_t v)
 {
 	cbt->iface.recno = cbt->recno = v;
+}
+
+/*
+ * __cursor_novalue --
+ *	Release any cached value before an operation that could update the
+ * transaction context and free data a value is pointing to.
+ */
+static inline void
+__cursor_novalue(WT_CURSOR *cursor)
+{
+	F_CLR(cursor, WT_CURSTD_VALUE_INT);
+}
+
+/*
+ * __cursor_checkkey --
+ *	Check if a key is set without making a copy.
+ */
+static inline int
+__cursor_checkkey(WT_CURSOR *cursor)
+{
+	return (F_ISSET(cursor, WT_CURSTD_KEY_SET) ?
+	    0 : __wt_cursor_kv_not_set(cursor, true));
+}
+
+/*
+ * __cursor_checkvalue --
+ *	Check if a value is set without making a copy.
+ */
+static inline int
+__cursor_checkvalue(WT_CURSOR *cursor)
+{
+	return (F_ISSET(cursor, WT_CURSTD_VALUE_SET) ?
+	    0 : __wt_cursor_kv_not_set(cursor, false));
+}
+
+/*
+ * __cursor_localkey --
+ *	If the key points into the tree, get a local copy.
+ */
+static inline int
+__cursor_localkey(WT_CURSOR *cursor)
+{
+	if (F_ISSET(cursor, WT_CURSTD_KEY_INT)) {
+		if (!WT_DATA_IN_ITEM(&cursor->key))
+			WT_RET(__wt_buf_set((WT_SESSION_IMPL *)cursor->session,
+			    &cursor->key, cursor->key.data, cursor->key.size));
+		F_CLR(cursor, WT_CURSTD_KEY_INT);
+		F_SET(cursor, WT_CURSTD_KEY_EXT);
+	}
+	return (0);
+}
+
+/*
+ * __cursor_localvalue --
+ *	If the value points into the tree, get a local copy.
+ */
+static inline int
+__cursor_localvalue(WT_CURSOR *cursor)
+{
+	if (F_ISSET(cursor, WT_CURSTD_VALUE_INT)) {
+		if (!WT_DATA_IN_ITEM(&cursor->value))
+			WT_RET(__wt_buf_set((WT_SESSION_IMPL *)cursor->session,
+			    &cursor->value,
+			    cursor->value.data, cursor->value.size));
+		F_CLR(cursor, WT_CURSTD_VALUE_INT);
+		F_SET(cursor, WT_CURSTD_VALUE_EXT);
+	}
+	return (0);
+}
+
+/*
+ * __cursor_needkey --
+ *
+ * Check if we have a key set. There's an additional semantic here: if we're
+ * pointing into the tree, get a local copy of whatever we're referencing in
+ * the tree, there's an obvious race with the cursor moving and the reference.
+ */
+static inline int
+__cursor_needkey(WT_CURSOR *cursor)
+{
+	WT_RET(__cursor_localkey(cursor));
+	return (__cursor_checkkey(cursor));
+}
+
+/*
+ * __cursor_needvalue --
+ *
+ * Check if we have a value set. There's an additional semantic here: if we're
+ * pointing into the tree, get a local copy of whatever we're referencing in
+ * the tree, there's an obvious race with the cursor moving and the reference.
+ */
+static inline int
+__cursor_needvalue(WT_CURSOR *cursor)
+{
+	WT_RET(__cursor_localvalue(cursor));
+	return (__cursor_checkvalue(cursor));
 }
 
 /*
@@ -53,7 +149,7 @@ __cursor_enter(WT_SESSION_IMPL *session)
 	 * whether the cache is full.
 	 */
 	if (session->ncursors == 0)
-		WT_RET(__wt_cache_eviction_check(session, false, NULL));
+		WT_RET(__wt_cache_eviction_check(session, false, false, NULL));
 	++session->ncursors;
 	return (0);
 }
@@ -76,33 +172,18 @@ __cursor_leave(WT_SESSION_IMPL *session)
 }
 
 /*
- * __curfile_enter --
- *	Activate a file cursor.
+ * __cursor_reset --
+ *	Reset the cursor, it no longer holds any position.
  */
 static inline int
-__curfile_enter(WT_CURSOR_BTREE *cbt)
-{
-	WT_SESSION_IMPL *session;
-
-	session = (WT_SESSION_IMPL *)cbt->iface.session;
-
-	if (!F_ISSET(cbt, WT_CBT_NO_TXN))
-		WT_RET(__cursor_enter(session));
-	F_SET(cbt, WT_CBT_ACTIVE);
-	return (0);
-}
-
-/*
- * __curfile_leave --
- *	Clear a file cursor's position.
- */
-static inline int
-__curfile_leave(WT_CURSOR_BTREE *cbt)
+__cursor_reset(WT_CURSOR_BTREE *cbt)
 {
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
 
 	session = (WT_SESSION_IMPL *)cbt->iface.session;
+
+	__cursor_pos_clear(cbt);
 
 	/* If the cursor was active, deactivate it. */
 	if (F_ISSET(cbt, WT_CBT_ACTIVE)) {
@@ -111,12 +192,15 @@ __curfile_leave(WT_CURSOR_BTREE *cbt)
 		F_CLR(cbt, WT_CBT_ACTIVE);
 	}
 
+	/* If we're not holding a cursor reference, we're done. */
+	if (cbt->ref == NULL)
+		return (0);
+
 	/*
 	 * If we were scanning and saw a lot of deleted records on this page,
 	 * try to evict the page when we release it.
 	 */
-	if (cbt->ref != NULL &&
-	    cbt->page_deleted_count > WT_BTREE_DELETE_THRESHOLD)
+	if (cbt->page_deleted_count > WT_BTREE_DELETE_THRESHOLD)
 		__wt_page_evict_soon(session, cbt->ref);
 	cbt->page_deleted_count = 0;
 
@@ -141,27 +225,24 @@ static inline int
 __wt_curindex_get_valuev(WT_CURSOR *cursor, va_list ap)
 {
 	WT_CURSOR_INDEX *cindex;
-	WT_DECL_RET;
 	WT_ITEM *item;
 	WT_SESSION_IMPL *session;
 
 	cindex = (WT_CURSOR_INDEX *)cursor;
 	session = (WT_SESSION_IMPL *)cursor->session;
-	WT_CURSOR_NEEDVALUE(cursor);
+	WT_RET(__cursor_checkvalue(cursor));
 
 	if (F_ISSET(cursor, WT_CURSOR_RAW_OK)) {
-		ret = __wt_schema_project_merge(session,
+		WT_RET(__wt_schema_project_merge(session,
 		    cindex->cg_cursors, cindex->value_plan,
-		    cursor->value_format, &cursor->value);
-		if (ret == 0) {
-			item = va_arg(ap, WT_ITEM *);
-			item->data = cursor->value.data;
-			item->size = cursor->value.size;
-		}
+		    cursor->value_format, &cursor->value));
+		item = va_arg(ap, WT_ITEM *);
+		item->data = cursor->value.data;
+		item->size = cursor->value.size;
 	} else
-		ret = __wt_schema_project_out(session,
-		    cindex->cg_cursors, cindex->value_plan, ap);
-err:	return (ret);
+		WT_RET(__wt_schema_project_out(session,
+		    cindex->cg_cursors, cindex->value_plan, ap));
+	return (0);
 }
 
 /*
@@ -173,28 +254,25 @@ __wt_curtable_get_valuev(WT_CURSOR *cursor, va_list ap)
 {
 	WT_CURSOR *primary;
 	WT_CURSOR_TABLE *ctable;
-	WT_DECL_RET;
 	WT_ITEM *item;
 	WT_SESSION_IMPL *session;
 
 	ctable = (WT_CURSOR_TABLE *)cursor;
 	session = (WT_SESSION_IMPL *)cursor->session;
 	primary = *ctable->cg_cursors;
-	WT_CURSOR_NEEDVALUE(primary);
+	WT_RET(__cursor_checkvalue(primary));
 
 	if (F_ISSET(cursor, WT_CURSOR_RAW_OK)) {
-		ret = __wt_schema_project_merge(session,
+		WT_RET(__wt_schema_project_merge(session,
 		    ctable->cg_cursors, ctable->plan,
-		    cursor->value_format, &cursor->value);
-		if (ret == 0) {
-			item = va_arg(ap, WT_ITEM *);
-			item->data = cursor->value.data;
-			item->size = cursor->value.size;
-		}
+		    cursor->value_format, &cursor->value));
+		item = va_arg(ap, WT_ITEM *);
+		item->data = cursor->value.data;
+		item->size = cursor->value.size;
 	} else
-		ret = __wt_schema_project_out(session,
-		    ctable->cg_cursors, ctable->plan, ap);
-err:	return (ret);
+		WT_RET(__wt_schema_project_out(session,
+		    ctable->cg_cursors, ctable->plan, ap));
+	return (0);
 }
 
 /*
@@ -233,6 +311,20 @@ __wt_cursor_dhandle_decr_use(WT_SESSION_IMPL *session)
 }
 
 /*
+ * __cursor_kv_return --
+ *      Return a page referenced key/value pair to the application.
+ */
+static inline int
+__cursor_kv_return(
+    WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, WT_UPDATE *upd)
+{
+	WT_RET(__wt_key_return(session, cbt));
+	WT_RET(__wt_value_return(session, cbt, upd));
+
+	return (0);
+}
+
+/*
  * __cursor_func_init --
  *	Cursor call setup.
  */
@@ -247,7 +339,7 @@ __cursor_func_init(WT_CURSOR_BTREE *cbt, bool reenter)
 #ifdef HAVE_DIAGNOSTIC
 		__wt_cursor_key_order_reset(cbt);
 #endif
-		WT_RET(__curfile_leave(cbt));
+		WT_RET(__cursor_reset(cbt));
 	}
 
 	/*
@@ -259,8 +351,12 @@ __cursor_func_init(WT_CURSOR_BTREE *cbt, bool reenter)
 	/* If the transaction is idle, check that the cache isn't full. */
 	WT_RET(__wt_txn_idle_cache_check(session));
 
-	if (!F_ISSET(cbt, WT_CBT_ACTIVE))
-		WT_RET(__curfile_enter(cbt));
+	/* Activate the file cursor. */
+	if (!F_ISSET(cbt, WT_CBT_ACTIVE)) {
+		if (!F_ISSET(cbt, WT_CBT_NO_TXN))
+			WT_RET(__cursor_enter(session));
+		F_SET(cbt, WT_CBT_ACTIVE);
+	}
 
 	/*
 	 * If this is an ordinary transactional cursor, make sure we are set up
@@ -272,24 +368,6 @@ __cursor_func_init(WT_CURSOR_BTREE *cbt, bool reenter)
 }
 
 /*
- * __cursor_reset --
- *	Reset the cursor.
- */
-static inline int
-__cursor_reset(WT_CURSOR_BTREE *cbt)
-{
-	WT_DECL_RET;
-
-	/*
-	 * The cursor is leaving the API, and no longer holds any position,
-	 * generally called to clean up the cursor after an error.
-	 */
-	ret = __curfile_leave(cbt);
-	__cursor_pos_clear(cbt);
-	return (ret);
-}
-
-/*
  * __cursor_row_slot_return --
  *	Return a row-store leaf page slot's K/V pair.
  */
@@ -297,9 +375,9 @@ static inline int
 __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 {
 	WT_BTREE *btree;
-	WT_ITEM *kb, *vb;
 	WT_CELL *cell;
-	WT_CELL_UNPACK *unpack, _unpack;
+	WT_CELL_UNPACK *kpack, _kpack, *vpack, _vpack;
+	WT_ITEM *kb, *vb;
 	WT_PAGE *page;
 	WT_SESSION_IMPL *session;
 	void *copy;
@@ -308,7 +386,8 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 	btree = S2BT(session);
 	page = cbt->ref->page;
 
-	unpack = NULL;
+	kpack = NULL;
+	vpack = &_vpack;
 
 	kb = &cbt->iface.key;
 	vb = &cbt->iface.value;
@@ -339,11 +418,11 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 	 * Inline building simple prefix-compressed keys from a previous key,
 	 * otherwise build from scratch.
 	 */
-	unpack = &_unpack;
-	__wt_cell_unpack(cell, unpack);
-	if (unpack->type == WT_CELL_KEY &&
+	kpack = &_kpack;
+	__wt_cell_unpack(cell, kpack);
+	if (kpack->type == WT_CELL_KEY &&
 	    cbt->rip_saved != NULL && cbt->rip_saved == rip - 1) {
-		WT_ASSERT(session, cbt->row_key->size >= unpack->prefix);
+		WT_ASSERT(session, cbt->row_key->size >= kpack->prefix);
 
 		/*
 		 * Grow the buffer as necessary as well as ensure data has been
@@ -353,12 +432,12 @@ __cursor_row_slot_return(WT_CURSOR_BTREE *cbt, WT_ROW *rip, WT_UPDATE *upd)
 		 * Don't grow the buffer unnecessarily or copy data we don't
 		 * need, truncate the item's data length to the prefix bytes.
 		 */
-		cbt->row_key->size = unpack->prefix;
+		cbt->row_key->size = kpack->prefix;
 		WT_RET(__wt_buf_grow(
-		    session, cbt->row_key, cbt->row_key->size + unpack->size));
+		    session, cbt->row_key, cbt->row_key->size + kpack->size));
 		memcpy((uint8_t *)cbt->row_key->data + cbt->row_key->size,
-		    unpack->data, unpack->size);
-		cbt->row_key->size += unpack->size;
+		    kpack->data, kpack->size);
+		cbt->row_key->size += kpack->size;
 	} else {
 		/*
 		 * Call __wt_row_leaf_key_work instead of __wt_row_leaf_key: we
@@ -377,27 +456,14 @@ value:
 	 * caller passes us the update: it has already resolved which one
 	 * (if any) is visible.
 	 */
-	if (upd != NULL) {
-		vb->data = WT_UPDATE_DATA(upd);
-		vb->size = upd->size;
-		return (0);
-	}
+	if (upd != NULL)
+		return (__wt_value_return(session, cbt, upd));
 
 	/* Else, simple values have their location encoded in the WT_ROW. */
 	if (__wt_row_leaf_value(page, rip, vb))
 		return (0);
 
-	/*
-	 * Else, take the value from the original page cell (which may be
-	 * empty).
-	 */
-	if ((cell = __wt_row_leaf_value_cell(page, rip, unpack)) == NULL) {
-		vb->data = "";
-		vb->size = 0;
-		return (0);
-	}
-
-	unpack = &_unpack;
-	__wt_cell_unpack(cell, unpack);
-	return (__wt_page_cell_data_ref(session, cbt->ref->page, unpack, vb));
+	/* Else, take the value from the original page cell. */
+	__wt_row_leaf_value_cell(page, rip, kpack, vpack);
+	return (__wt_page_cell_data_ref(session, cbt->ref->page, vpack, vb));
 }

@@ -41,11 +41,11 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/config.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_options_helpers.h"
+#include "mongo/db/server_options_server_helpers.h"
 #include "mongo/s/version_mongos.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/sock.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/startup_test.h"
@@ -98,28 +98,37 @@ Status addMongosOptions(moe::OptionSection* options) {
     sharding_options.addOptionChaining("test", "test", moe::Switch, "just run unit tests")
         .setSources(moe::SourceAllLegacy);
 
-    sharding_options
-        .addOptionChaining("net.http.JSONPEnabled",
-                           "jsonp",
-                           moe::Switch,
-                           "allow JSONP access via http (has security implications)")
-        .setSources(moe::SourceAllLegacy);
-
+    /** Javascript Options
+     *  As a general rule, js enable/disable options are ignored for mongos.
+     *  However, we define and hide these options so that if someone
+     *  were to use these args in a set of options meant for both
+     *  mongos and mongod runs, the mongos won't fail on an unknown argument.
+     *
+     *  These options have no affect on how the mongos runs.
+     *  Setting either or both to *any* value will provoke a warning message
+     *  and nothing more.
+     */
     sharding_options
         .addOptionChaining("noscripting", "noscripting", moe::Switch, "disable scripting engine")
+        .hidden()
         .setSources(moe::SourceAllLegacy);
 
+    general_options
+        .addOptionChaining(
+            "security.javascriptEnabled", "", moe::Bool, "Enable javascript execution")
+        .hidden()
+        .setSources(moe::SourceYAMLConfig);
 
-    options->addSection(general_options);
+    options->addSection(general_options).transitional_ignore();
 
 #if defined(_WIN32)
-    options->addSection(windows_scm_options);
+    options->addSection(windows_scm_options).transitional_ignore();
 #endif
 
-    options->addSection(sharding_options);
+    options->addSection(sharding_options).transitional_ignore();
 
 #ifdef MONGO_CONFIG_SSL
-    options->addSection(ssl_options);
+    options->addSection(ssl_options).transitional_ignore();
 #endif
 
     return Status::OK();
@@ -192,12 +201,9 @@ Status storeMongosOptions(const moe::Environment& params) {
             params["replication.localPingThresholdMs"].as<int>();
     }
 
-    if (params.count("net.http.JSONPEnabled")) {
-        serverGlobalParams.jsonp = params["net.http.JSONPEnabled"].as<bool>();
-    }
-
-    if (params.count("noscripting")) {
-        // This option currently has no effect for mongos
+    if (params.count("noscripting") || params.count("security.javascriptEnabled")) {
+        warning() << "The Javascript enabled/disabled options are not supported for mongos. "
+                     "(\"noscripting\" and/or \"security.javascriptEnabled\" are set.)";
     }
 
     if (!params.count("sharding.configDB")) {

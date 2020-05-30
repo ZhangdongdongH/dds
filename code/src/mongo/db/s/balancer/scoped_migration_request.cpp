@@ -32,31 +32,30 @@
 
 #include "mongo/db/s/balancer/scoped_migration_request.h"
 
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/s/balancer/type_migration.h"
 #include "mongo/db/write_concern_options.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-
 namespace {
+
 const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 Seconds(15));
 const int kDuplicateKeyErrorMaxRetries = 2;
-}
 
-ScopedMigrationRequest::ScopedMigrationRequest(OperationContext* txn,
+}  // namespace
+
+ScopedMigrationRequest::ScopedMigrationRequest(OperationContext* opCtx,
                                                const NamespaceString& nss,
                                                const BSONObj& minKey)
-    : _txn(txn), _nss(nss), _minKey(minKey) {}
+    : _opCtx(opCtx), _nss(nss), _minKey(minKey) {}
 
 ScopedMigrationRequest::~ScopedMigrationRequest() {
-    if (!_txn) {
-        // If the txn object was cleared, nothing should happen in the destructor.
+    if (!_opCtx) {
+        // If the opCtx object was cleared, nothing should happen in the destructor.
         return;
     }
 
@@ -64,8 +63,8 @@ ScopedMigrationRequest::~ScopedMigrationRequest() {
     // okay.
     BSONObj migrationDocumentIdentifier =
         BSON(MigrationType::ns(_nss.ns()) << MigrationType::min(_minKey));
-    Status result = grid.catalogClient(_txn)->removeConfigDocuments(
-        _txn, MigrationType::ConfigNS, migrationDocumentIdentifier, kMajorityWriteConcern);
+    Status result = Grid::get(_opCtx)->catalogClient()->removeConfigDocuments(
+        _opCtx, MigrationType::ConfigNS, migrationDocumentIdentifier, kMajorityWriteConcern);
 
     if (!result.isOK()) {
         LOG(0) << "Failed to remove config.migrations document for migration '"
@@ -75,53 +74,52 @@ ScopedMigrationRequest::~ScopedMigrationRequest() {
 
 ScopedMigrationRequest::ScopedMigrationRequest(ScopedMigrationRequest&& other) {
     *this = std::move(other);
-    // Set txn to null so that the destructor will do nothing.
-    other._txn = nullptr;
+    // Set opCtx to null so that the destructor will do nothing.
+    other._opCtx = nullptr;
 }
 
 ScopedMigrationRequest& ScopedMigrationRequest::operator=(ScopedMigrationRequest&& other) {
     if (this != &other) {
-        _txn = other._txn;
+        _opCtx = other._opCtx;
         _nss = other._nss;
         _minKey = other._minKey;
-        // Set txn to null so that the destructor will do nothing.
-        other._txn = nullptr;
+        // Set opCtx to null so that the destructor will do nothing.
+        other._opCtx = nullptr;
     }
 
     return *this;
 }
 
 StatusWith<ScopedMigrationRequest> ScopedMigrationRequest::writeMigration(
-    OperationContext* txn, const MigrateInfo& migrateInfo, bool waitForDelete) {
+    OperationContext* opCtx, const MigrateInfo& migrateInfo, bool waitForDelete) {
+    auto const grid = Grid::get(opCtx);
 
     // Try to write a unique migration document to config.migrations.
     const MigrationType migrationType(migrateInfo, waitForDelete);
 
     for (int retry = 0; retry < kDuplicateKeyErrorMaxRetries; ++retry) {
-        Status result = grid.catalogClient(txn)->insertConfigDocument(
-            txn, MigrationType::ConfigNS, migrationType.toBSON(), kMajorityWriteConcern);
+        Status result = grid->catalogClient()->insertConfigDocument(
+            opCtx, MigrationType::ConfigNS, migrationType.toBSON(), kMajorityWriteConcern);
 
         if (result == ErrorCodes::DuplicateKey) {
             // If the exact migration described by "migrateInfo" is active, return a scoped object
             // for the request because this migration request will join the active one once
             // scheduled.
             auto statusWithMigrationQueryResult =
-                grid.shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
-                    txn,
+                grid->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
+                    opCtx,
                     ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                     repl::ReadConcernLevel::kLocalReadConcern,
-                    NamespaceString(MigrationType::ConfigNS),
+                    MigrationType::ConfigNS,
                     BSON(MigrationType::name(migrateInfo.getName())),
                     BSONObj(),
                     boost::none);
             if (!statusWithMigrationQueryResult.isOK()) {
-                return {statusWithMigrationQueryResult.getStatus().code(),
-                        str::stream()
-                            << "Failed to verify whether conflicting migration is in "
-                            << "progress for migration '"
-                            << redact(migrateInfo.toString())
-                            << "' while trying to query config.migrations."
-                            << causedBy(redact(statusWithMigrationQueryResult.getStatus()))};
+                return statusWithMigrationQueryResult.getStatus().withContext(
+                    str::stream() << "Failed to verify whether conflicting migration is in "
+                                  << "progress for migration '"
+                                  << redact(migrateInfo.toString())
+                                  << "' while trying to query config.migrations.");
             }
             if (statusWithMigrationQueryResult.getValue().docs.empty()) {
                 // The document that caused the DuplicateKey error is no longer in the collection,
@@ -133,14 +131,13 @@ StatusWith<ScopedMigrationRequest> ScopedMigrationRequest::writeMigration(
             BSONObj activeMigrationBSON = statusWithMigrationQueryResult.getValue().docs.front();
             auto statusWithActiveMigration = MigrationType::fromBSON(activeMigrationBSON);
             if (!statusWithActiveMigration.isOK()) {
-                return {statusWithActiveMigration.getStatus().code(),
-                        str::stream() << "Failed to verify whether conflicting migration is in "
-                                      << "progress for migration '"
-                                      << redact(migrateInfo.toString())
-                                      << "' while trying to parse active migration document '"
-                                      << redact(activeMigrationBSON.toString())
-                                      << "'."
-                                      << causedBy(redact(statusWithActiveMigration.getStatus()))};
+                return statusWithActiveMigration.getStatus().withContext(
+                    str::stream() << "Failed to verify whether conflicting migration is in "
+                                  << "progress for migration '"
+                                  << redact(migrateInfo.toString())
+                                  << "' while trying to parse active migration document '"
+                                  << redact(activeMigrationBSON.toString())
+                                  << "'.");
             }
 
             MigrateInfo activeMigrateInfo = statusWithActiveMigration.getValue().toMigrateInfo();
@@ -159,8 +156,7 @@ StatusWith<ScopedMigrationRequest> ScopedMigrationRequest::writeMigration(
         // As long as there isn't a DuplicateKey error, the document may have been written, and it's
         // safe (won't delete another migration's document) and necessary to try to clean up the
         // document via the destructor.
-        ScopedMigrationRequest scopedMigrationRequest(
-            txn, NamespaceString(migrateInfo.ns), migrateInfo.minKey);
+        ScopedMigrationRequest scopedMigrationRequest(opCtx, migrateInfo.nss, migrateInfo.minKey);
 
         // If there was a write error, let the object go out of scope and clean up in the
         // destructor.
@@ -171,31 +167,37 @@ StatusWith<ScopedMigrationRequest> ScopedMigrationRequest::writeMigration(
         return std::move(scopedMigrationRequest);
     }
 
-    MONGO_UNREACHABLE;
+    return Status(ErrorCodes::OperationFailed,
+                  str::stream() << "Failed to insert the config.migrations document after max "
+                                << "number of retries. Chunk '"
+                                << ChunkRange(migrateInfo.minKey, migrateInfo.maxKey).toString()
+                                << "' in collection '"
+                                << migrateInfo.nss.ns()
+                                << "' was being moved (somewhere) by another operation.");
 }
 
-ScopedMigrationRequest ScopedMigrationRequest::createForRecovery(OperationContext* txn,
+ScopedMigrationRequest ScopedMigrationRequest::createForRecovery(OperationContext* opCtx,
                                                                  const NamespaceString& nss,
                                                                  const BSONObj& minKey) {
-    return ScopedMigrationRequest(txn, nss, minKey);
+    return ScopedMigrationRequest(opCtx, nss, minKey);
 }
 
 Status ScopedMigrationRequest::tryToRemoveMigration() {
-    invariant(_txn);
+    invariant(_opCtx);
     BSONObj migrationDocumentIdentifier =
         BSON(MigrationType::ns(_nss.ns()) << MigrationType::min(_minKey));
-    Status status = grid.catalogClient(_txn)->removeConfigDocuments(
-        _txn, MigrationType::ConfigNS, migrationDocumentIdentifier, kMajorityWriteConcern);
+    Status status = Grid::get(_opCtx)->catalogClient()->removeConfigDocuments(
+        _opCtx, MigrationType::ConfigNS, migrationDocumentIdentifier, kMajorityWriteConcern);
     if (status.isOK()) {
         // Don't try to do a no-op remove in the destructor.
-        _txn = nullptr;
+        _opCtx = nullptr;
     }
     return status;
 }
 
 void ScopedMigrationRequest::keepDocumentOnDestruct() {
-    invariant(_txn);
-    _txn = nullptr;
+    invariant(_opCtx);
+    _opCtx = nullptr;
     LOG(1) << "Keeping config.migrations document with namespace '" << _nss << "' and minKey '"
            << _minKey << "' for balancer recovery";
 }

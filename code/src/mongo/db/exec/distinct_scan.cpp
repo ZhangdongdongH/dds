@@ -28,6 +28,7 @@
 
 #include "mongo/db/exec/distinct_scan.h"
 
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/filter.h"
 #include "mongo/db/exec/scoped_timer.h"
@@ -45,10 +46,10 @@ using stdx::make_unique;
 // static
 const char* DistinctScan::kStageType = "DISTINCT_SCAN";
 
-DistinctScan::DistinctScan(OperationContext* txn,
+DistinctScan::DistinctScan(OperationContext* opCtx,
                            const DistinctParams& params,
                            WorkingSet* workingSet)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _workingSet(workingSet),
       _descriptor(params.descriptor),
       _iam(params.descriptor->getIndexCatalog()->getIndex(params.descriptor)),
@@ -81,7 +82,7 @@ PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
         if (!_cursor)
             _cursor = _iam->newCursor(getOpCtx(), _params.direction == 1);
         kv = _cursor->seek(_seekPoint);
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         *out = WorkingSet::INVALID_ID;
         return PlanStage::NEED_YIELD;
     }
@@ -124,7 +125,7 @@ PlanStage::StageState DistinctScan::doWork(WorkingSetID* out) {
             *out = id;
             return PlanStage::ADVANCED;
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 bool DistinctScan::isEOF() {

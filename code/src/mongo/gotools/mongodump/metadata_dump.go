@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongodump
 
 import (
@@ -16,6 +22,7 @@ import (
 type Metadata struct {
 	Options interface{}   `json:"options,omitempty"`
 	Indexes []interface{} `json:"indexes"`
+	UUID    string        `json:"uuid,omitempty"`
 }
 
 // IndexDocumentFromDB is used internally to preserve key ordering.
@@ -45,6 +52,10 @@ func (dump *MongoDump) dumpMetadata(intent *intents.Intent, buffer resettableOut
 		meta.Options = nil
 	}
 
+	// If a collection has a UUID, it was gathered while building the list of
+	// intents.  Otherwise, it will be the empty string.
+	meta.UUID = intent.UUID
+
 	// Second, we read the collection's index information by either calling
 	// listIndexes (pre-2.7 systems) or querying system.indexes.
 	// We keep a running list of all the indexes
@@ -52,7 +63,7 @@ func (dump *MongoDump) dumpMetadata(intent *intents.Intent, buffer resettableOut
 	// that list as the "indexes" field of the metadata document.
 	log.Logvf(log.DebugHigh, "\treading indexes for `%v`", intent.Namespace())
 
-	session, err := dump.sessionProvider.GetSession()
+	session, err := dump.SessionProvider.GetSession()
 	if err != nil {
 		return err
 	}

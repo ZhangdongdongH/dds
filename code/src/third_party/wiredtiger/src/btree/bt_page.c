@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -57,7 +57,7 @@ __wt_page_alloc(WT_SESSION_IMPL *session,
 		 */
 		size += alloc_entries * sizeof(WT_ROW);
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, type);
 	}
 
 	WT_RET(__wt_calloc(session, 1, size, &page));
@@ -67,10 +67,11 @@ __wt_page_alloc(WT_SESSION_IMPL *session,
 
 	switch (type) {
 	case WT_PAGE_COL_FIX:
-		page->pg_fix_entries = alloc_entries;
+		page->entries = alloc_entries;
 		break;
 	case WT_PAGE_COL_INT:
 	case WT_PAGE_ROW_INT:
+		WT_ASSERT(session, alloc_entries != 0);
 		/*
 		 * Internal pages have an array of references to objects so they
 		 * can split.  Allocate the array of references and optionally,
@@ -102,20 +103,22 @@ err:			if ((pindex = WT_INTL_INDEX_GET_SAFE(page)) != NULL) {
 		}
 		break;
 	case WT_PAGE_COL_VAR:
-		page->pg_var_d = (WT_COL *)((uint8_t *)page + sizeof(WT_PAGE));
-		page->pg_var_entries = alloc_entries;
+		page->pg_var = alloc_entries == 0 ?
+		    NULL : (WT_COL *)((uint8_t *)page + sizeof(WT_PAGE));
+		page->entries = alloc_entries;
 		break;
 	case WT_PAGE_ROW_LEAF:
-		page->pg_row_d = (WT_ROW *)((uint8_t *)page + sizeof(WT_PAGE));
-		page->pg_row_entries = alloc_entries;
+		page->pg_row = alloc_entries == 0 ?
+		    NULL : (WT_ROW *)((uint8_t *)page + sizeof(WT_PAGE));
+		page->entries = alloc_entries;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, type);
 	}
 
 	/* Increment the cache statistics. */
 	__wt_cache_page_inmem_incr(session, page, size);
-	(void)__wt_atomic_add64(&cache->bytes_read, size);
 	(void)__wt_atomic_add64(&cache->pages_inmem, 1);
+	page->cache_create_gen = cache->evict_pass_gen;
 
 	*pagep = page;
 	return (0);
@@ -126,14 +129,14 @@ err:			if ((pindex = WT_INTL_INDEX_GET_SAFE(page)) != NULL) {
  *	Build in-memory page information.
  */
 int
-__wt_page_inmem(WT_SESSION_IMPL *session, WT_REF *ref,
-    const void *image, size_t memsize, uint32_t flags, WT_PAGE **pagep)
+__wt_page_inmem(WT_SESSION_IMPL *session,
+    WT_REF *ref, const void *image, uint32_t flags, WT_PAGE **pagep)
 {
 	WT_DECL_RET;
 	WT_PAGE *page;
 	const WT_PAGE_HEADER *dsk;
-	uint32_t alloc_entries;
 	size_t size;
+	uint32_t alloc_entries;
 
 	*pagep = NULL;
 
@@ -183,7 +186,7 @@ __wt_page_inmem(WT_SESSION_IMPL *session, WT_REF *ref,
 			WT_RET(__inmem_row_leaf_entries(
 			    session, dsk, &alloc_entries));
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, dsk->type);
 	}
 
 	/* Allocate and initialize a new WT_PAGE. */
@@ -195,8 +198,13 @@ __wt_page_inmem(WT_SESSION_IMPL *session, WT_REF *ref,
 	 * Track the memory allocated to build this page so we can update the
 	 * cache statistics in a single call. If the disk image is in allocated
 	 * memory, start with that.
+	 *
+	 * Accounting is based on the page-header's in-memory disk size instead
+	 * of the buffer memory used to instantiate the page image even though
+	 * the values might not match exactly, because that's the only value we
+	 * have when discarding the page image and accounting needs to match.
 	 */
-	size = LF_ISSET(WT_PAGE_DISK_ALLOC) ? memsize : 0;
+	size = LF_ISSET(WT_PAGE_DISK_ALLOC) ? dsk->mem_size : 0;
 
 	switch (page->type) {
 	case WT_PAGE_COL_FIX:
@@ -214,12 +222,13 @@ __wt_page_inmem(WT_SESSION_IMPL *session, WT_REF *ref,
 	case WT_PAGE_ROW_LEAF:
 		WT_ERR(__inmem_row_leaf(session, page));
 		break;
-	WT_ILLEGAL_VALUE_ERR(session);
+	WT_ILLEGAL_VALUE_ERR(session, page->type);
 	}
 
-	/* Update the page's in-memory size and the cache statistics. */
+	/* Update the page's cache statistics. */
 	__wt_cache_page_inmem_incr(session, page, size);
-	__wt_cache_page_image_incr(session, dsk->mem_size);
+	if (LF_ISSET(WT_PAGE_DISK_ALLOC))
+		__wt_cache_page_image_incr(session, dsk->mem_size);
 
 	/* Link the new internal page to the parent. */
 	if (ref != NULL) {
@@ -305,12 +314,13 @@ __inmem_col_var_repeats(WT_SESSION_IMPL *session, WT_PAGE *page, uint32_t *np)
 	const WT_PAGE_HEADER *dsk;
 	uint32_t i;
 
+	*np = 0;
+
 	btree = S2BT(session);
 	dsk = page->dsk;
 	unpack = &_unpack;
 
 	/* Walk the page, counting entries for the repeats array. */
-	*np = 0;
 	WT_CELL_FOREACH(btree, dsk, cell, unpack, i) {
 		__wt_cell_unpack(cell, unpack);
 		if (__wt_cell_rle(unpack) > 1)
@@ -328,14 +338,15 @@ __inmem_col_var(
     WT_SESSION_IMPL *session, WT_PAGE *page, uint64_t recno, size_t *sizep)
 {
 	WT_BTREE *btree;
-	WT_COL *cip;
-	WT_COL_RLE *repeats;
 	WT_CELL *cell;
 	WT_CELL_UNPACK *unpack, _unpack;
+	WT_COL *cip;
+	WT_COL_RLE *repeats;
 	const WT_PAGE_HEADER *dsk;
+	size_t size;
 	uint64_t rle;
-	size_t bytes_allocated;
 	uint32_t i, indx, n, repeat_off;
+	void *p;
 
 	btree = S2BT(session);
 	dsk = page->dsk;
@@ -343,7 +354,6 @@ __inmem_col_var(
 	repeats = NULL;
 	repeat_off = 0;
 	unpack = &_unpack;
-	bytes_allocated = 0;
 
 	/*
 	 * Walk the page, building references: the page contains unsorted value
@@ -351,7 +361,7 @@ __inmem_col_var(
 	 * (WT_CELL_VALUE_OVFL) or deleted items (WT_CELL_DEL).
 	 */
 	indx = 0;
-	cip = page->pg_var_d;
+	cip = page->pg_var;
 	WT_CELL_FOREACH(btree, dsk, cell, unpack, i) {
 		__wt_cell_unpack(cell, unpack);
 		WT_COL_PTR_SET(cip, WT_PAGE_DISK_OFFSET(page, cell));
@@ -367,12 +377,14 @@ __inmem_col_var(
 		if (rle > 1) {
 			if (repeats == NULL) {
 				__inmem_col_var_repeats(session, page, &n);
-				WT_RET(__wt_realloc_def(session,
-				    &bytes_allocated, n + 1, &repeats));
+				size = sizeof(WT_COL_VAR_REPEAT) +
+				    (n + 1) * sizeof(WT_COL_RLE);
+				WT_RET(__wt_calloc(session, 1, size, &p));
+				*sizep += size;
 
-				page->pg_var_repeats = repeats;
+				page->u.col_var.repeats = p;
 				page->pg_var_nrepeats = n;
-				*sizep += bytes_allocated;
+				repeats = page->pg_var_repeats;
 			}
 			repeats[repeat_off].indx = indx;
 			repeats[repeat_off].recno = recno;
@@ -456,14 +468,16 @@ __inmem_row_int(WT_SESSION_IMPL *session, WT_PAGE *page, size_t *sizep)
 			 * and the deletion committed, but older transactions
 			 * in the system required the previous version of the
 			 * page to remain available, a special deleted-address
-			 * type cell is written.  The only reason we'd ever see
-			 * that cell on a page we're reading is if we crashed
-			 * and recovered (otherwise a version of the page w/o
-			 * that cell would have eventually been written).  If we
-			 * crash and recover to a page with a deleted-address
-			 * cell, we want to discard the page from the backing
-			 * store (it was never discarded), and, of course, by
-			 * definition no earlier transaction will ever need it.
+			 * type cell is written. We'll see that cell on a page
+			 * if we read from a checkpoint including a deleted
+			 * cell or if we crash/recover and start off from such
+			 * a checkpoint (absent running recovery, a version of
+			 * the page without the deleted cell would eventually
+			 * have been written). If we crash and recover to a
+			 * page with a deleted-address cell, we want to discard
+			 * the page from the backing store (it was never
+			 * discarded), and, of course, by definition no earlier
+			 * transaction will ever need it.
 			 *
 			 * Re-create the state of a deleted page.
 			 */
@@ -489,7 +503,7 @@ __inmem_row_int(WT_SESSION_IMPL *session, WT_PAGE *page, size_t *sizep)
 			ref->addr = cell;
 			++refp;
 			break;
-		WT_ILLEGAL_VALUE_ERR(session);
+		WT_ILLEGAL_VALUE_ERR(session, unpack->type);
 		}
 	}
 
@@ -542,7 +556,7 @@ __inmem_row_leaf_entries(
 		case WT_CELL_VALUE:
 		case WT_CELL_VALUE_OVFL:
 			break;
-		WT_ILLEGAL_VALUE(session);
+		WT_ILLEGAL_VALUE(session, unpack->type);
 		}
 	}
 
@@ -569,7 +583,7 @@ __inmem_row_leaf(WT_SESSION_IMPL *session, WT_PAGE *page)
 	unpack = &_unpack;
 
 	/* Walk the page, building indices. */
-	rip = page->pg_row_d;
+	rip = page->pg_row;
 	WT_CELL_FOREACH(btree, dsk, cell, unpack, i) {
 		__wt_cell_unpack(cell, unpack);
 		switch (unpack->type) {
@@ -600,7 +614,7 @@ __inmem_row_leaf(WT_SESSION_IMPL *session, WT_PAGE *page)
 			break;
 		case WT_CELL_VALUE_OVFL:
 			break;
-		WT_ILLEGAL_VALUE(session);
+		WT_ILLEGAL_VALUE(session, unpack->type);
 		}
 	}
 

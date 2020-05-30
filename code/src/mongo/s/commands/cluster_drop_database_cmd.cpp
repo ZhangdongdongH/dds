@@ -30,90 +30,69 @@
 
 #include "mongo/platform/basic.h"
 
-
 #include "mongo/base/status.h"
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/catalog_cache.h"
-#include "mongo/s/config.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
-
-using std::shared_ptr;
-
 namespace {
 
-class DropDatabaseCmd : public Command {
+class DropDatabaseCmd : public BasicCommand {
 public:
-    DropDatabaseCmd() : Command("dropDatabase") {}
+    DropDatabaseCmd() : BasicCommand("dropDatabase") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return false;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::dropDatabase);
         out->push_back(Privilege(ResourcePattern::forDatabaseName(dbname), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        // Disallow dropping the config database from mongos
-        if (dbname == "config") {
-            return appendCommandStatus(
-                result, Status(ErrorCodes::IllegalOperation, "Cannot drop the config database"));
-        }
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        uassert(ErrorCodes::IllegalOperation,
+                "Cannot drop the config database",
+                dbname != NamespaceString::kConfigDb);
 
-        BSONElement e = cmdObj.firstElement();
+        uassert(ErrorCodes::BadValue,
+                "have to pass 1 as db parameter",
+                cmdObj.firstElement().isNumber() && cmdObj.firstElement().number() == 1);
 
-        if (!e.isNumber() || e.number() != 1) {
-            errmsg = "invalid params";
-            return 0;
-        }
+        // Invalidate the database metadata so the next access kicks off a full reload, even if
+        // sending the command to the config server fails due to e.g. a NetworkError.
+        ON_BLOCK_EXIT([opCtx, dbname] { Grid::get(opCtx)->catalogCache()->purgeDatabase(dbname); });
 
-        // Refresh the database metadata
-        grid.catalogCache()->invalidate(dbname);
+        // Send _configsvrDropDatabase to the config server.
+        auto configShard = Grid::get(opCtx)->shardRegistry()->getConfigShard();
+        auto cmdResponse = uassertStatusOK(configShard->runCommandWithFixedRetryAttempts(
+            opCtx,
+            ReadPreferenceSetting(ReadPreference::PrimaryOnly),
+            "admin",
+            CommandHelpers::appendMajorityWriteConcern(CommandHelpers::appendPassthroughFields(
+                cmdObj, BSON("_configsvrDropDatabase" << dbname))),
+            Shard::RetryPolicy::kIdempotent));
 
-        auto status = grid.catalogCache()->getDatabase(txn, dbname);
-        if (!status.isOK()) {
-            if (status == ErrorCodes::NamespaceNotFound) {
-                result.append("info", "database does not exist");
-                return true;
-            }
-
-            return appendCommandStatus(result, status.getStatus());
-        }
-
-        log() << "DROP DATABASE: " << dbname;
-
-        shared_ptr<DBConfig> conf = status.getValue();
-
-        // TODO: Make dropping logic saner and more tolerant of partial drops.  This is
-        // particularly important since a database drop can be aborted by *any* collection
-        // with a distributed namespace lock taken (migrates/splits)
-
-        if (!conf->dropDatabase(txn, errmsg)) {
-            return false;
-        }
-
-        result.append("dropped", dbname);
+        CommandHelpers::filterCommandReplyForPassthrough(cmdResponse.response, &result);
         return true;
     }
 

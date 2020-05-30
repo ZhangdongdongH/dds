@@ -32,20 +32,27 @@
 
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_yield.h"
 #include "mongo/db/service_context.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
+namespace {
+MONGO_FAIL_POINT_DEFINE(setInterruptOnlyPlansCheckForInterruptHang);
+}  // namespace
+
 PlanYieldPolicy::PlanYieldPolicy(PlanExecutor* exec, PlanExecutor::YieldPolicy policy)
-    : _policy(policy),
+    : _policy(exec->getOpCtx()->lockState()->isGlobalLockedRecursively() ? PlanExecutor::NO_YIELD
+                                                                         : policy),
       _forceYield(false),
       _elapsedTracker(exec->getOpCtx()->getServiceContext()->getFastClockSource(),
-                      internalQueryExecYieldIterations,
+                      internalQueryExecYieldIterations.load(),
                       Milliseconds(internalQueryExecYieldPeriodMS.load())),
       _planYielding(exec) {}
 
@@ -54,12 +61,19 @@ PlanYieldPolicy::PlanYieldPolicy(PlanExecutor::YieldPolicy policy, ClockSource* 
     : _policy(policy),
       _forceYield(false),
       _elapsedTracker(cs,
-                      internalQueryExecYieldIterations,
+                      internalQueryExecYieldIterations.load(),
                       Milliseconds(internalQueryExecYieldPeriodMS.load())),
       _planYielding(nullptr) {}
 
+bool PlanYieldPolicy::shouldYieldOrInterrupt() {
+    if (_policy == PlanExecutor::INTERRUPT_ONLY) {
+        return _elapsedTracker.intervalHasElapsed();
+    }
+    return shouldYield();
+}
+
 bool PlanYieldPolicy::shouldYield() {
-    if (!allowedToYield())
+    if (!canAutoYield())
         return false;
     invariant(!_planYielding->getOpCtx()->lockState()->inAWriteUnitOfWork());
     if (_forceYield)
@@ -71,9 +85,42 @@ void PlanYieldPolicy::resetTimer() {
     _elapsedTracker.resetLastTime();
 }
 
-bool PlanYieldPolicy::yield(RecordFetcher* fetcher) {
+Status PlanYieldPolicy::yieldOrInterrupt(RecordFetcher* recordFetcher) {
     invariant(_planYielding);
-    invariant(allowedToYield());
+    if (recordFetcher) {
+        OperationContext* opCtx = _planYielding->getOpCtx();
+        return yieldOrInterrupt([recordFetcher, opCtx] { recordFetcher->setup(opCtx); },
+                                [recordFetcher] { recordFetcher->fetch(); });
+    } else {
+        return yieldOrInterrupt(nullptr, nullptr);
+    }
+}
+
+Status PlanYieldPolicy::yieldOrInterrupt(stdx::function<void()> beforeYieldingFn,
+                                         stdx::function<void()> whileYieldingFn) {
+    if (_policy == PlanExecutor::INTERRUPT_ONLY) {
+        ON_BLOCK_EXIT([this]() { resetTimer(); });
+        OperationContext* opCtx = _planYielding->getOpCtx();
+        invariant(opCtx);
+        // If the 'setInterruptOnlyPlansCheckForInterruptHang' fail point is enabled, set the 'msg'
+        // field of this operation's CurOp to signal that we've hit this point.
+        if (MONGO_FAIL_POINT(setInterruptOnlyPlansCheckForInterruptHang)) {
+            CurOpFailpointHelpers::waitWhileFailPointEnabled(
+                &setInterruptOnlyPlansCheckForInterruptHang,
+                opCtx,
+                "setInterruptOnlyPlansCheckForInterruptHang");
+        }
+
+        return opCtx->checkForInterruptNoAssert();
+    }
+
+    return yield(beforeYieldingFn, whileYieldingFn);
+}
+
+Status PlanYieldPolicy::yield(stdx::function<void()> beforeYieldingFn,
+                              stdx::function<void()> whileYieldingFn) {
+    invariant(_planYielding);
+    invariant(canAutoYield());
 
     // After we finish yielding (or in any early return), call resetTimer() to prevent yielding
     // again right away. We delay the resetTimer() call so that the clock doesn't start ticking
@@ -86,20 +133,22 @@ bool PlanYieldPolicy::yield(RecordFetcher* fetcher) {
     invariant(opCtx);
     invariant(!opCtx->lockState()->inAWriteUnitOfWork());
 
-    // Can't use MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN/END since we need to call saveState
-    // before reseting the transaction.
+    // Can't use writeConflictRetry since we need to call saveState before reseting the transaction.
     for (int attempt = 1; true; attempt++) {
         try {
             // All YIELD_AUTO plans will get here eventually when the elapsed tracker triggers
             // that it's time to yield. Whether or not we will actually yield, we need to check
-            // if this operation has been interrupted. Throws if the interrupt flag is set.
+            // if this operation has been interrupted.
             if (_policy == PlanExecutor::YIELD_AUTO) {
-                opCtx->checkForInterrupt();
+                auto interruptStatus = opCtx->checkForInterruptNoAssert();
+                if (!interruptStatus.isOK()) {
+                    return interruptStatus;
+                }
             }
 
             try {
                 _planYielding->saveState();
-            } catch (const WriteConflictException& wce) {
+            } catch (const WriteConflictException&) {
                 invariant(!"WriteConflictException not allowed in saveState");
             }
 
@@ -108,14 +157,16 @@ bool PlanYieldPolicy::yield(RecordFetcher* fetcher) {
                 opCtx->recoveryUnit()->abandonSnapshot();
             } else {
                 // Release and reacquire locks.
-                QueryYield::yieldAllLocks(opCtx, fetcher, _planYielding->ns());
+                if (beforeYieldingFn)
+                    beforeYieldingFn();
+                QueryYield::yieldAllLocks(opCtx, whileYieldingFn, _planYielding->nss());
             }
 
             return _planYielding->restoreStateWithoutRetrying();
-        } catch (const WriteConflictException& wce) {
-            CurOp::get(opCtx)->debug().writeConflicts++;
+        } catch (const WriteConflictException&) {
+            CurOp::get(opCtx)->debug().additiveMetrics.incrementWriteConflicts(1);
             WriteConflictException::logAndBackoff(
-                attempt, "plan execution restoreState", _planYielding->ns());
+                attempt, "plan execution restoreState", _planYielding->nss().ns());
             // retry
         }
     }

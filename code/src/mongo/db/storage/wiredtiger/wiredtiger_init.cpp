@@ -39,8 +39,8 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
+#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/db/storage/storage_options.h"
@@ -52,6 +52,7 @@
 #include "mongo/db/storage/wiredtiger/wiredtiger_server_status.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/util/log.h"
+#include "mongo/util/processinfo.h"
 
 namespace mongo {
 
@@ -76,14 +77,29 @@ public:
             if (ret == 0 && fs_stats.f_type == EXT4_SUPER_MAGIC) {
                 log() << startupWarningsLog;
                 log() << "** WARNING: Using the XFS filesystem is strongly recommended with the "
-                         "WiredTiger storage engine";
-                log() << "See "
-                         "http://dochub.mongodb.org/core/prodnotes-filesystem";
+                         "WiredTiger storage engine"
+                      << startupWarningsLog;
+                log() << "**          See "
+                         "http://dochub.mongodb.org/core/prodnotes-filesystem"
+                      << startupWarningsLog;
             }
         }
 #endif
 
         size_t cacheMB = WiredTigerUtil::getCacheSizeMB(wiredTigerGlobalOptions.cacheSizeGB);
+        const double memoryThresholdPercentage = 0.8;
+        ProcessInfo p;
+        if (p.supported()) {
+            if (cacheMB > memoryThresholdPercentage * p.getMemSizeMB()) {
+                log() << startupWarningsLog;
+                log() << "** WARNING: The configured WiredTiger cache size is more than "
+                      << memoryThresholdPercentage * 100 << "% of available RAM."
+                      << startupWarningsLog;
+                log() << "**          See "
+                         "http://dochub.mongodb.org/core/faq-memory-diagnostics-wt"
+                      << startupWarningsLog;
+            }
+        }
         const bool ephemeral = false;
         WiredTigerKVEngine* kv =
             new WiredTigerKVEngine(getCanonicalName().toString(),
@@ -134,6 +150,19 @@ public:
             return status;
         }
 
+        // If the 'groupCollections' field does not exist in the 'storage.bson' file, the
+        // data-format of existing tables is as if 'groupCollections' is false. Passing this in
+        // prevents validation from accepting 'params.groupCollections' being true when a "group
+        // collections" aware mongod is launched on an 3.4- dbpath.
+        const bool kDefaultGroupCollections = false;
+        status =
+            metadata.validateStorageEngineOption("groupCollections",
+                                                 params.groupCollections,
+                                                 boost::optional<bool>(kDefaultGroupCollections));
+        if (!status.isOK()) {
+            return status;
+        }
+
         return Status::OK();
     }
 
@@ -141,6 +170,7 @@ public:
         BSONObjBuilder builder;
         builder.appendBool("directoryPerDB", params.directoryperdb);
         builder.appendBool("directoryForIndexes", wiredTigerGlobalOptions.directoryForIndexes);
+        builder.appendBool("groupCollections", params.groupCollections);
         return builder.obj();
     }
 
@@ -148,13 +178,10 @@ public:
         return true;
     }
 };
+
+ServiceContext::ConstructorActionRegisterer registerWiredTiger(
+    "WiredTigerEngineInit", [](ServiceContext* service) {
+        registerStorageEngine(service, std::make_unique<WiredTigerFactory>());
+    });
 }  // namespace
-
-MONGO_INITIALIZER_WITH_PREREQUISITES(WiredTigerEngineInit, ("SetGlobalEnvironment"))
-(InitializerContext* context) {
-    getGlobalServiceContext()->registerStorageEngine(kWiredTigerEngineName,
-                                                     new WiredTigerFactory());
-
-    return Status::OK();
-}
-}
+}  // namespace

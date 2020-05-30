@@ -46,12 +46,6 @@ TEST(RedactStatusTest, BasicStatus) {
     ASSERT_EQ(redact(status), "InternalError: " + kRedactionDefaultMask);
 }
 
-TEST(RedactStatusTest, StatusWithLocation) {
-    logger::globalLogDomain()->setShouldRedactLogs(true);
-    Status status(ErrorCodes::InternalError, kMsg, 777);
-    ASSERT_EQ(redact(status), "InternalError: " + kRedactionDefaultMask + " @ 777");
-}
-
 TEST(RedactStatusTest, StatusOK) {
     logger::globalLogDomain()->setShouldRedactLogs(true);
     ASSERT_EQ(redact(Status::OK()), "OK");
@@ -59,14 +53,17 @@ TEST(RedactStatusTest, StatusOK) {
 
 TEST(RedactExceptionTest, NoRedact) {
     logger::globalLogDomain()->setShouldRedactLogs(false);
-    DBException ex(kMsg, ErrorCodes::InternalError);
-    ASSERT_EQ(redact(ex), ex.toString());
+    ASSERT_THROWS_WITH_CHECK(uasserted(ErrorCodes::InternalError, kMsg),
+                             DBException,
+                             [](const DBException& ex) { ASSERT_EQ(redact(ex), ex.toString()); });
 }
 
 TEST(RedactExceptionTest, BasicException) {
     logger::globalLogDomain()->setShouldRedactLogs(true);
-    DBException ex(kMsg, ErrorCodes::InternalError);
-    ASSERT_EQ(redact(ex), "1 ###");
+    ASSERT_THROWS_WITH_CHECK(
+        uasserted(ErrorCodes::InternalError, kMsg), DBException, [](const DBException& ex) {
+            ASSERT_EQ(redact(ex), "InternalError ###");
+        });
 }
 
 TEST(RedactBSONTest, NoRedact) {

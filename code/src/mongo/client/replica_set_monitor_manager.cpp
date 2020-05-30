@@ -34,12 +34,15 @@
 
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/client/connection_string.h"
+#include "mongo/client/mongo_uri.h"
 #include "mongo/client/replica_set_monitor.h"
+#include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/log.h"
@@ -74,24 +77,30 @@ shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getMonitor(StringData se
     }
 }
 
-shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(
-    const ConnectionString& connStr) {
-    invariant(connStr.type() == ConnectionString::SET);
+void ReplicaSetMonitorManager::_setupTaskExecutorInLock(const std::string& name) {
+    auto hookList = stdx::make_unique<rpc::EgressMetadataHookList>();
 
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
     // do not restart taskExecutor if is in shutdown
     if (!_taskExecutor && !_isShutdown) {
         // construct task executor
-        auto net = executor::makeNetworkInterface("ReplicaSetMonitor-TaskExecutor");
+        auto net = executor::makeNetworkInterface(
+            "ReplicaSetMonitor-TaskExecutor", nullptr, std::move(hookList));
         auto netPtr = net.get();
         _taskExecutor = stdx::make_unique<ThreadPoolTaskExecutor>(
             stdx::make_unique<NetworkInterfaceThreadPool>(netPtr), std::move(net));
         LOG(1) << "Starting up task executor for monitoring replica sets in response to request to "
                   "monitor set: "
-               << connStr.toString();
+               << redact(name);
         _taskExecutor->startup();
     }
+}
 
+shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(
+    const ConnectionString& connStr) {
+    invariant(connStr.type() == ConnectionString::SET);
+
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _setupTaskExecutorInLock(connStr.toString());
     auto setName = connStr.getSetName();
     auto monitor = _monitors[setName].lock();
     if (monitor) {
@@ -103,6 +112,25 @@ shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(
     log() << "Starting new replica set monitor for " << connStr.toString();
 
     auto newMonitor = std::make_shared<ReplicaSetMonitor>(setName, servers);
+    _monitors[setName] = newMonitor;
+    newMonitor->init();
+    return newMonitor;
+}
+
+shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(const MongoURI& uri) {
+    invariant(uri.type() == ConnectionString::SET);
+
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _setupTaskExecutorInLock(uri.toString());
+    const auto& setName = uri.getSetName();
+    auto monitor = _monitors[setName].lock();
+    if (monitor) {
+        return monitor;
+    }
+
+    log() << "Starting new replica set monitor for " << uri.toString();
+
+    auto newMonitor = std::make_shared<ReplicaSetMonitor>(uri);
     _monitors[setName] = newMonitor;
     newMonitor->init();
     return newMonitor;
@@ -132,26 +160,39 @@ void ReplicaSetMonitorManager::removeMonitor(StringData setName) {
     }
 }
 
-
 void ReplicaSetMonitorManager::shutdown() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    if (_taskExecutor && !_isShutdown) {
-        LOG(1) << "Shutting down task executor used for monitoring replica sets";
-        _taskExecutor->shutdown();
-        _taskExecutor->join();
+
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        if (!_taskExecutor || _isShutdown) {
+            return;
+        }
         _isShutdown = true;
     }
+
+    LOG(1) << "Shutting down task executor used for monitoring replica sets";
+    _taskExecutor->shutdown();
+    _taskExecutor->join();
 }
 
 void ReplicaSetMonitorManager::removeAllMonitors() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    _monitors = ReplicaSetMonitorsMap();
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        _monitors = ReplicaSetMonitorsMap();
+        if (!_taskExecutor || _isShutdown) {
+            return;
+        }
+        _isShutdown = true;
+    }
 
-    if (_taskExecutor) {
-        LOG(1) << "Shutting down task executor used for monitoring replica sets";
-        _taskExecutor->shutdown();
-        _taskExecutor->join();
-        _taskExecutor.reset();
+    LOG(1) << "Shutting down task executor used for monitoring replica sets";
+    _taskExecutor->shutdown();
+    _taskExecutor->join();
+    _taskExecutor.reset();
+
+    {
+        stdx::lock_guard<stdx::mutex> lk(_mutex);
+        _isShutdown = false;
     }
 }
 

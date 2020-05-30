@@ -65,17 +65,31 @@ const boost::optional<ClientMetadata>& ClientMetadataIsMasterState::getClientMet
     return _clientMetadata;
 }
 
-void ClientMetadataIsMasterState::setClientMetadata(
-    Client* client, boost::optional<ClientMetadata> clientMetadata) {
+void ClientMetadataIsMasterState::setClientMetadata(Client* client,
+                                                    boost::optional<ClientMetadata> clientMetadata,
+                                                    bool setViaMetadata) {
     auto& state = get(client);
 
     stdx::lock_guard<Client> lk(*client);
     state._clientMetadata = std::move(clientMetadata);
+    state._setViaMetadata = setViaMetadata;
 }
 
 
-Status ClientMetadataIsMasterState::readFromMetadata(OperationContext* txn, BSONElement& element) {
+Status ClientMetadataIsMasterState::readFromMetadata(OperationContext* opCtx,
+                                                     BSONElement& element) {
+    auto& clientMetadataIsMasterState = ClientMetadataIsMasterState::get(opCtx->getClient());
+
+    // If client metadata is not present in network requests, reset the in-memory metadata to be
+    // blank so that the wrong
+    // app name is not propagated.
     if (element.eoo()) {
+        auto client = opCtx->getClient();
+
+        if (clientMetadataIsMasterState._setViaMetadata && !client->isInDirectClient()) {
+            clientMetadataIsMasterState.setClientMetadata(client, boost::none, true);
+        }
+
         return Status::OK();
     }
 
@@ -85,23 +99,22 @@ Status ClientMetadataIsMasterState::readFromMetadata(OperationContext* txn, BSON
         return swParseClientMetadata.getStatus();
     }
 
-    auto& clientMetadataIsMasterState = ClientMetadataIsMasterState::get(txn->getClient());
-
-    clientMetadataIsMasterState.setClientMetadata(txn->getClient(),
-                                                  std::move(swParseClientMetadata.getValue()));
+    clientMetadataIsMasterState.setClientMetadata(
+        opCtx->getClient(), std::move(swParseClientMetadata.getValue()), true);
 
     return Status::OK();
 }
 
-void ClientMetadataIsMasterState::writeToMetadata(OperationContext* txn, BSONObjBuilder* builder) {
+void ClientMetadataIsMasterState::writeToMetadata(OperationContext* opCtx,
+                                                  BSONObjBuilder* builder) {
     // We may be asked to write metadata on background threads that are not associated with an
     // operation context
-    if (!txn) {
+    if (!opCtx) {
         return;
     }
 
     const auto& clientMetadata =
-        ClientMetadataIsMasterState::get(txn->getClient()).getClientMetadata();
+        ClientMetadataIsMasterState::get(opCtx->getClient()).getClientMetadata();
 
     // Skip appending metadata if there is none
     if (!clientMetadata || clientMetadata.get().getDocument().isEmpty()) {

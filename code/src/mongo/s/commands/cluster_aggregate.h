@@ -34,14 +34,18 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/aggregation_request.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_merge_cursors.h"
+#include "mongo/s/async_requests_sender.h"
 #include "mongo/s/commands/strategy.h"
-#include "mongo/s/config.h"
+#include "mongo/s/query/cluster_client_cursor_params.h"
 
 namespace mongo {
 
+class LiteParsedPipeline;
 class OperationContext;
+class ShardId;
 
 /**
  * Methods for running aggregation across a sharded cluster.
@@ -60,39 +64,45 @@ public:
     };
 
     /**
-     * Executes an aggregation command. 'cmdObj' specifies the aggregation to run. Fills in 'result'
-     * with the command response.
+     * Executes the aggregation 'request' using context 'opCtx'.
+     *
+     * The 'namespaces' struct should contain both the user-requested namespace and the namespace
+     * over which the aggregation will actually execute. Typically these two namespaces are the
+     * same, but they may differ in the case of a query on a view.
+     *
+     * The raw aggregate command parameters should be passed in 'cmdObj'.
+     *
+     * On success, fills out 'result' with the command response.
      */
-    static Status runAggregate(OperationContext* txn,
+    static Status runAggregate(OperationContext* opCtx,
                                const Namespaces& namespaces,
+                               const AggregationRequest& request,
                                BSONObj cmdObj,
-                               int options,
                                BSONObjBuilder* result);
 
 private:
-    static std::vector<DocumentSourceMergeCursors::CursorDescriptor> parseCursors(
-        const std::vector<Strategy::CommandResult>& shardResults);
-
-    static void killAllCursors(const std::vector<Strategy::CommandResult>& shardResults);
     static void uassertAllShardsSupportExplain(
-        const std::vector<Strategy::CommandResult>& shardResults);
+        const std::vector<AsyncRequestsSender::Response>& shardResults);
 
     // These are temporary hacks because the runCommand method doesn't report the exact
     // host the command was run on which is necessary for cursor support. The exact host
     // could be different from conn->getServerAddress() for connections that map to
     // multiple servers such as for replica sets. These also take care of registering
     // returned cursors.
-    static BSONObj aggRunCommand(DBClientBase* conn,
+    static BSONObj aggRunCommand(OperationContext* opCtx,
+                                 const ShardId& shardId,
+                                 DBClientBase* conn,
                                  const Namespaces& namespaces,
-                                 BSONObj cmd,
-                                 int queryOptions);
+                                 const AggregationRequest& aggRequest,
+                                 BSONObj cmd);
 
-    static Status aggPassthrough(OperationContext* txn,
-                                 const Namespaces& namespaces,
-                                 std::shared_ptr<DBConfig> conf,
+    static Status aggPassthrough(OperationContext*,
+                                 const Namespaces&,
+                                 const ShardId&,
                                  BSONObj cmd,
-                                 BSONObjBuilder* result,
-                                 int queryOptions);
+                                 const AggregationRequest&,
+                                 const LiteParsedPipeline&,
+                                 BSONObjBuilder* result);
 };
 
 }  // namespace mongo

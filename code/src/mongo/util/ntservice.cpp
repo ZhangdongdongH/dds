@@ -287,7 +287,7 @@ void installServiceOrDie(const wstring& serviceName,
     SC_HANDLE schSCManager = ::OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (schSCManager == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err);
+        log() << "Error connecting to the Service Control Manager: " << windows::GetErrMsg(err);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
 
@@ -336,7 +336,7 @@ void installServiceOrDie(const wstring& serviceName,
                                   NULL);                      // user account password
     if (schService == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error creating service: " << GetWinErrMsg(err);
+        log() << "Error creating service: " << windows::GetErrMsg(err);
         ::CloseServiceHandle(schSCManager);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
@@ -441,7 +441,7 @@ void removeServiceOrDie(const wstring& serviceName) {
     SC_HANDLE schSCManager = ::OpenSCManager(NULL, NULL, SC_MANAGER_ALL_ACCESS);
     if (schSCManager == NULL) {
         DWORD err = ::GetLastError();
-        log() << "Error connecting to the Service Control Manager: " << GetWinErrMsg(err);
+        log() << "Error connecting to the Service Control Manager: " << windows::GetErrMsg(err);
         quickExit(EXIT_NTSERVICE_ERROR);
     }
 
@@ -524,25 +524,22 @@ bool reportStatus(DWORD reportState, DWORD waitHint, DWORD exitCode) {
 // Minimum of time we tell Windows to wait before we are guilty of a hung shutdown
 const int kStopWaitHintMillis = 30000;
 
-// Run exitCleanly on a separate thread so we can report progress to Windows
+// Run shutdownNoTerminate on a separate thread so we can report progress to Windows
 // Note: Windows may still kill us for taking too long,
 // On client OSes, SERVICE_CONTROL_SHUTDOWN has a 5 second timeout configured in
 // HKEY_LOCAL_MACHINE\SYSTEM\CurrentControlSet\Control
 static void serviceStop() {
-    // VS2013 Doesn't support future<void>, so fake it with a bool.
-    stdx::packaged_task<bool()> exitCleanlyTask([] {
+    stdx::packaged_task<void()> shutdownNoTerminateTask([] {
         setThreadName("serviceStopWorker");
         // Stop the process
-        // TODO: SERVER-5703, separate the "cleanup for shutdown" functionality from
-        // the "terminate process" functionality in exitCleanly.
-        exitCleanly(EXIT_WINDOWS_SERVICE_STOP);
+        shutdownNoTerminate();
         return true;
     });
-    stdx::future<bool> exitedCleanly = exitCleanlyTask.get_future();
+    stdx::future<void> exitedCleanly = shutdownNoTerminateTask.get_future();
 
     // Launch the packaged task in a thread. We needn't ever join it,
     // so it doesn't even need a name.
-    stdx::thread(std::move(exitCleanlyTask)).detach();
+    stdx::thread(std::move(shutdownNoTerminateTask)).detach();
 
     const auto timeout = Milliseconds(kStopWaitHintMillis / 2);
 
@@ -575,12 +572,13 @@ static void serviceShutdown(const char* controlCodeName) {
     setThreadName("serviceShutdown");
 
     log() << "got " << controlCodeName << " request from Windows Service Control Manager, "
-          << (inShutdown() ? "already in shutdown" : "will terminate after current cmd ends");
+          << (globalInShutdownDeprecated() ? "already in shutdown"
+                                           : "will terminate after current cmd ends");
 
     reportStatus(SERVICE_STOP_PENDING, kStopWaitHintMillis);
 
     // Note: This triggers _serviceCallback, ie  ServiceMain,
-    // to stop by setting inShutdown() == true
+    // to stop by setting globalInShutdownDeprecated() == true
     shutdownNoTerminate();
 
     // Note: we will report exit status in initService

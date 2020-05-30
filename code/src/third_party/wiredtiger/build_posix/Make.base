@@ -17,10 +17,12 @@ endif
 
 bin_PROGRAMS = wt
 wt_SOURCES =\
+	src/utilities/util_alter.c \
 	src/utilities/util_backup.c \
 	src/utilities/util_cpyright.c \
 	src/utilities/util_compact.c \
 	src/utilities/util_create.c \
+	src/utilities/util_downgrade.c \
 	src/utilities/util_drop.c \
 	src/utilities/util_dump.c \
 	src/utilities/util_list.c \
@@ -35,6 +37,7 @@ wt_SOURCES =\
 	src/utilities/util_rename.c \
 	src/utilities/util_salvage.c \
 	src/utilities/util_stat.c \
+	src/utilities/util_truncate.c \
 	src/utilities/util_upgrade.c \
 	src/utilities/util_verbose.c \
 	src/utilities/util_verify.c \

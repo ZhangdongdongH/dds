@@ -47,20 +47,21 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace mongo {
 
 // static
 const char* CachedPlanStage::kStageType = "CACHED_PLAN";
 
-CachedPlanStage::CachedPlanStage(OperationContext* txn,
+CachedPlanStage::CachedPlanStage(OperationContext* opCtx,
                                  Collection* collection,
                                  WorkingSet* ws,
                                  CanonicalQuery* cq,
                                  const QueryPlannerParams& params,
                                  size_t decisionWorks,
                                  PlanStage* root)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _ws(ws),
       _canonicalQuery(cq),
@@ -114,7 +115,7 @@ Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
             return Status::OK();
         } else if (PlanStage::NEED_YIELD == state) {
             if (id == WorkingSet::INVALID_ID) {
-                if (!yieldPolicy->allowedToYield()) {
+                if (!yieldPolicy->canAutoYield()) {
                     throw WriteConflictException();
                 }
             } else {
@@ -124,7 +125,7 @@ Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
                 _fetcher.reset(member->releaseFetcher());
             }
 
-            if (yieldPolicy->allowedToYield()) {
+            if (yieldPolicy->canAutoYield()) {
                 yieldPolicy->forceYield();
             }
 
@@ -140,18 +141,19 @@ Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
 
             LOG(1) << "Execution of cached plan failed, falling back to replan."
                    << " query: " << redact(_canonicalQuery->toStringShort())
-                   << " planSummary: " << redact(Explain::getPlanSummary(child().get()))
+                   << " planSummary: " << Explain::getPlanSummary(child().get())
                    << " status: " << redact(statusObj);
 
             const bool shouldCache = false;
             return replan(yieldPolicy, shouldCache);
         } else if (PlanStage::DEAD == state) {
             BSONObj statusObj;
+            invariant(WorkingSet::INVALID_ID != id);
             WorkingSetCommon::getStatusMemberObject(*_ws, id, &statusObj);
 
             LOG(1) << "Execution of cached plan failed: PlanStage died"
                    << ", query: " << redact(_canonicalQuery->toStringShort())
-                   << " planSummary: " << redact(Explain::getPlanSummary(child().get()))
+                   << " planSummary: " << Explain::getPlanSummary(child().get())
                    << " status: " << redact(statusObj);
 
             return WorkingSetCommon::getMemberObjectStatus(statusObj);
@@ -166,7 +168,7 @@ Status CachedPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
            << " works, but was originally cached with only " << _decisionWorks
            << " works. Evicting cache entry and replanning query: "
            << redact(_canonicalQuery->toStringShort())
-           << " plan summary before replan: " << redact(Explain::getPlanSummary(child().get()));
+           << " plan summary before replan: " << Explain::getPlanSummary(child().get());
 
     const bool shouldCache = true;
     return replan(yieldPolicy, shouldCache);
@@ -178,14 +180,9 @@ Status CachedPlanStage::tryYield(PlanYieldPolicy* yieldPolicy) {
     //   2) some stage requested a yield due to a document fetch, or
     //   3) we need to yield and retry due to a WriteConflictException.
     // In all cases, the actual yielding happens here.
-    if (yieldPolicy->shouldYield()) {
+    if (yieldPolicy->shouldYieldOrInterrupt()) {
         // Here's where we yield.
-        bool alive = yieldPolicy->yield(_fetcher.get());
-
-        if (!alive) {
-            return Status(ErrorCodes::QueryPlanKilled,
-                          "CachedPlanStage killed during plan selection");
-        }
+        return yieldPolicy->yieldOrInterrupt(_fetcher.get());
     }
 
     // We're done using the fetcher, so it should be freed. We don't want to
@@ -204,16 +201,15 @@ Status CachedPlanStage::replan(PlanYieldPolicy* yieldPolicy, bool shouldCache) {
     _specificStats.replanned = true;
 
     // Use the query planning module to plan the whole query.
-    std::vector<QuerySolution*> rawSolutions;
-    Status status = QueryPlanner::plan(*_canonicalQuery, _plannerParams, &rawSolutions);
-    if (!status.isOK()) {
+    auto statusWithSolutions = QueryPlanner::plan(*_canonicalQuery, _plannerParams);
+    if (!statusWithSolutions.isOK()) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "error processing query: " << _canonicalQuery->toString()
                                     << " planner returned error: "
-                                    << status.reason());
+                                    << statusWithSolutions.getStatus().reason());
     }
 
-    OwnedPointerVector<QuerySolution> solutions(rawSolutions);
+    auto solutions = std::move(statusWithSolutions.getValue());
 
     // We cannot figure out how to answer the query.  Perhaps it requires an index
     // we do not have?
@@ -228,7 +224,7 @@ Status CachedPlanStage::replan(PlanYieldPolicy* yieldPolicy, bool shouldCache) {
         // cache entry if requested by the caller.
         if (shouldCache) {
             PlanCache* cache = _collection->infoCache()->getPlanCache();
-            cache->remove(*_canonicalQuery);
+            cache->remove(*_canonicalQuery).transitional_ignore();
         }
 
         PlanStage* newRoot;
@@ -236,12 +232,13 @@ Status CachedPlanStage::replan(PlanYieldPolicy* yieldPolicy, bool shouldCache) {
         verify(StageBuilder::build(
             getOpCtx(), _collection, *_canonicalQuery, *solutions[0], _ws, &newRoot));
         _children.emplace_back(newRoot);
-        _replannedQs.reset(solutions.popAndReleaseBack());
+        _replannedQs = std::move(solutions.back());
+        solutions.pop_back();
 
         LOG(1)
             << "Replanning of query resulted in single query solution, which will not be cached. "
             << redact(_canonicalQuery->toStringShort())
-            << " plan summary after replan: " << redact(Explain::getPlanSummary(child().get()))
+            << " plan summary after replan: " << Explain::getPlanSummary(child().get())
             << " previous cache entry evicted: " << (shouldCache ? "yes" : "no");
         return Status::OK();
     }
@@ -263,8 +260,8 @@ Status CachedPlanStage::replan(PlanYieldPolicy* yieldPolicy, bool shouldCache) {
         verify(StageBuilder::build(
             getOpCtx(), _collection, *_canonicalQuery, *solutions[ix], _ws, &nextPlanRoot));
 
-        // Takes ownership of 'solutions[ix]' and 'nextPlanRoot'.
-        multiPlanStage->addPlan(solutions.releaseAt(ix), nextPlanRoot, _ws);
+        // Takes ownership of 'nextPlanRoot'.
+        multiPlanStage->addPlan(std::move(solutions[ix]), nextPlanRoot, _ws);
     }
 
     // Delegate to the MultiPlanStage's plan selection facility.
@@ -274,7 +271,7 @@ Status CachedPlanStage::replan(PlanYieldPolicy* yieldPolicy, bool shouldCache) {
     }
 
     LOG(1) << "Replanning " << redact(_canonicalQuery->toStringShort())
-           << " resulted in plan with summary: " << redact(Explain::getPlanSummary(child().get()))
+           << " resulted in plan with summary: " << Explain::getPlanSummary(child().get())
            << ", which " << (shouldCache ? "has" : "has not") << " been written to the cache";
     return Status::OK();
 }
@@ -299,13 +296,13 @@ PlanStage::StageState CachedPlanStage::doWork(WorkingSetID* out) {
     return child()->work(out);
 }
 
-void CachedPlanStage::doInvalidate(OperationContext* txn,
+void CachedPlanStage::doInvalidate(OperationContext* opCtx,
                                    const RecordId& dl,
                                    InvalidationType type) {
     for (auto it = _results.begin(); it != _results.end(); ++it) {
         WorkingSetMember* member = _ws->get(*it);
         if (member->hasRecordId() && member->recordId == dl) {
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
         }
     }
 }

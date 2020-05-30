@@ -26,8 +26,6 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
-
 #include "mongo/db/commands.h"
 #include "mongo/db/cursor_id.h"
 
@@ -37,17 +35,18 @@ namespace mongo {
  * Base class for the killCursors command, which attempts to kill all given cursors.  Contains code
  * common to mongos and mongod implementations.
  */
-class KillCursorsCmdBase : public Command {
+class KillCursorsCmdBase : public BasicCommand {
 public:
-    KillCursorsCmdBase() : Command("killCursors") {}
+    KillCursorsCmdBase() : BasicCommand("killCursors") {}
 
+    virtual ~KillCursorsCmdBase() {}
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const final {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool maintenanceOk() const final {
@@ -58,8 +57,8 @@ public:
         return false;
     }
 
-    void help(std::stringstream& help) const final {
-        help << "kill a list of cursor ids";
+    std::string help() const final {
+        return "kill a list of cursor ids";
     }
 
     bool shouldAffectCommandCounter() const final {
@@ -68,25 +67,30 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final;
+                               const BSONObj& cmdObj) const final;
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) final;
 
 private:
     /**
-     * Kill the cursor with id 'cursorId' in namespace 'nss'. Use 'txn' if necessary.
+     * Verify the cursor exists, is unpinned, and can be killed by the current user(s).
+     */
+    virtual Status _checkAuth(Client* client,
+                              const NamespaceString& nss,
+                              CursorId cursorId) const = 0;
+
+    /**
+     * Kill the cursor with id 'cursorId' in namespace 'nss'. Use 'opCtx' if necessary.
      *
      * Returns Status::OK() if the cursor was killed, or ErrorCodes::CursorNotFound if there is no
      * such cursor, or ErrorCodes::OperationFailed if the cursor cannot be killed.
      */
-    virtual Status _killCursor(OperationContext* txn,
+    virtual Status _killCursor(OperationContext* opCtx,
                                const NamespaceString& nss,
-                               CursorId cursorId) = 0;
+                               CursorId cursorId) const = 0;
 };
 
 }  // namespace mongo

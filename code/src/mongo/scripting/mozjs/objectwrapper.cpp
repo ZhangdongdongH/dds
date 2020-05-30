@@ -107,27 +107,29 @@ void ObjectWrapper::Key::set(JSContext* cx, JS::HandleObject o, JS::HandleValue 
 void ObjectWrapper::Key::define(JSContext* cx,
                                 JS::HandleObject o,
                                 JS::HandleValue value,
-                                unsigned attrs) {
+                                unsigned attrs,
+                                JSNative getter,
+                                JSNative setter) {
     switch (_type) {
         case Type::Field:
-            if (JS_DefineProperty(cx, o, _field, value, attrs))
+            if (JS_DefineProperty(cx, o, _field, value, attrs, getter, setter))
                 return;
             break;
         case Type::Index:
-            if (JS_DefineElement(cx, o, _idx, value, attrs))
+            if (JS_DefineElement(cx, o, _idx, value, attrs, getter, setter))
                 return;
             break;
         case Type::Id: {
             JS::RootedId id(cx, _id);
 
-            if (JS_DefinePropertyById(cx, o, id, value, attrs))
+            if (JS_DefinePropertyById(cx, o, id, value, attrs, getter, setter))
                 return;
             break;
         }
         case Type::InternedString: {
             InternedStringId id(cx, _internedString);
 
-            if (JS_DefinePropertyById(cx, o, id, value, attrs))
+            if (JS_DefinePropertyById(cx, o, id, value, attrs, getter, setter))
                 return;
             break;
         }
@@ -379,8 +381,16 @@ void ObjectWrapper::setObject(Key key, JS::HandleObject object) {
     setValue(key, value);
 }
 
-void ObjectWrapper::defineProperty(Key key, JS::HandleValue val, unsigned attrs) {
-    key.define(_context, _object, val, attrs);
+void ObjectWrapper::setPrototype(JS::HandleObject object) {
+    if (JS_SetPrototype(_context, _object, object))
+        return;
+
+    throwCurrentJSException(_context, ErrorCodes::InternalError, "Failed to set prototype");
+}
+
+void ObjectWrapper::defineProperty(
+    Key key, JS::HandleValue val, unsigned attrs, JSNative getter, JSNative setter) {
+    key.define(_context, _object, val, attrs, getter, setter);
 }
 
 void ObjectWrapper::deleteProperty(Key key) {
@@ -445,7 +455,8 @@ void ObjectWrapper::callMethod(JS::HandleValue fun, JS::MutableHandleValue out) 
 }
 
 BSONObj ObjectWrapper::toBSON() {
-    if (getScope(_context)->getProto<BSONInfo>().instanceOf(_object)) {
+    if (getScope(_context)->getProto<BSONInfo>().instanceOf(_object) ||
+        getScope(_context)->getProto<DBRefInfo>().instanceOf(_object)) {
         BSONObj* originalBSON = nullptr;
         bool altered;
 
@@ -581,7 +592,8 @@ ObjectWrapper::WriteFieldRecursionFrame::WriteFieldRecursionFrame(JSContext* cx,
         }
     }
 
-    if (getScope(cx)->getProto<BSONInfo>().instanceOf(thisv)) {
+    if (getScope(cx)->getProto<BSONInfo>().instanceOf(thisv) ||
+        getScope(cx)->getProto<DBRefInfo>().instanceOf(thisv)) {
         std::tie(originalBSON, altered) = BSONInfo::originalBSON(cx, thisv);
     }
 }

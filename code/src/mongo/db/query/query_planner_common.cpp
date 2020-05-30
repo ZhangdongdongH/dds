@@ -46,33 +46,17 @@ void QueryPlannerCommon::reverseScans(QuerySolutionNode* node) {
         if (isn->bounds.isSimpleRange) {
             std::swap(isn->bounds.startKey, isn->bounds.endKey);
             // If only one bound is included, swap which one is included.
-            switch (isn->bounds.boundInclusion) {
-                case BoundInclusion::kIncludeStartKeyOnly:
-                    isn->bounds.boundInclusion = BoundInclusion::kIncludeEndKeyOnly;
-                    break;
-                case BoundInclusion::kIncludeEndKeyOnly:
-                    isn->bounds.boundInclusion = BoundInclusion::kIncludeStartKeyOnly;
-                    break;
-                case BoundInclusion::kIncludeBothStartAndEndKeys:
-                case BoundInclusion::kExcludeBothStartAndEndKeys:
-                    // These are both symmetric so no change needed.
-                    break;
-            }
+            isn->bounds.boundInclusion =
+                IndexBounds::reverseBoundInclusion(isn->bounds.boundInclusion);
         } else {
             for (size_t i = 0; i < isn->bounds.fields.size(); ++i) {
-                std::vector<Interval>& iv = isn->bounds.fields[i].intervals;
-                // Step 1: reverse the list.
-                std::reverse(iv.begin(), iv.end());
-                // Step 2: reverse each interval.
-                for (size_t j = 0; j < iv.size(); ++j) {
-                    iv[j].reverse();
-                }
+                isn->bounds.fields[i].reverse();
             }
         }
 
         if (!isn->bounds.isValidFor(isn->index.keyPattern, isn->direction)) {
-            LOG(5) << "Invalid bounds: " << redact(isn->bounds.toString());
-            invariant(0);
+            severe() << "Invalid bounds: " << redact(isn->bounds.toString());
+            MONGO_UNREACHABLE;
         }
 
         // TODO: we can just negate every value in the already computed properties.

@@ -48,7 +48,7 @@ public:
           _fromMigrate(false),
           _isExplain(false),
           _returnDeleted(false),
-          _yieldPolicy(PlanExecutor::YIELD_MANUAL) {}
+          _yieldPolicy(PlanExecutor::NO_YIELD) {}
 
     void setQuery(const BSONObj& query) {
         _query = query;
@@ -115,12 +115,22 @@ public:
         return _yieldPolicy;
     }
 
+    void setStmtId(StmtId stmtId) {
+        _stmtId = std::move(stmtId);
+    }
+
+    StmtId getStmtId() const {
+        return _stmtId;
+    }
+
 private:
     const NamespaceString& _nsString;
     BSONObj _query;
     BSONObj _proj;
     BSONObj _sort;
     BSONObj _collation;
+    // The statement id of this request.
+    StmtId _stmtId = kUninitializedStmtId;
     bool _multi;
     bool _god;
     bool _fromMigrate;

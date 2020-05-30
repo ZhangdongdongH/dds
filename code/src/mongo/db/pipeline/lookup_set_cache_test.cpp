@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/db/pipeline/document_comparator.h"
 #include "mongo/db/pipeline/lookup_set_cache.h"
 #include "mongo/db/pipeline/value_comparator.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
@@ -40,43 +41,44 @@
 
 namespace mongo {
 
-bool vectorContains(const boost::optional<std::vector<BSONObj>>& vector,
-                    const BSONObj& expectedObj) {
+bool vectorContains(const std::vector<Document>* vector, const Document& expectedDoc) {
     ASSERT_TRUE(vector);
-    return std::find_if(vector->begin(), vector->end(), [&expectedObj](const BSONObj& obj) {
-               return SimpleBSONObjComparator::kInstance.evaluate(expectedObj == obj);
-           }) != vector->end();
+    DocumentComparator comparator;
+    return std::find_if(
+               vector->begin(), vector->end(), [&comparator, &expectedDoc](const Document& doc) {
+                   return comparator.evaluate(expectedDoc == doc);
+               }) != vector->end();
 }
 
-BSONObj intToObj(int value) {
-    return BSON("n" << value);
+Document intToDoc(int value) {
+    return Document{{"n", value}};
 }
+
+const ValueComparator defaultComparator{nullptr};
 
 TEST(LookupSetCacheTest, InsertAndRetrieveWorksCorrectly) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
-    cache.insert(Value(0), intToObj(1));
-    cache.insert(Value(0), intToObj(2));
-    cache.insert(Value(0), intToObj(3));
-    cache.insert(Value(1), intToObj(4));
-    cache.insert(Value(1), intToObj(5));
+    LookupSetCache cache(defaultComparator);
+    cache.insert(Value(0), intToDoc(1));
+    cache.insert(Value(0), intToDoc(2));
+    cache.insert(Value(0), intToDoc(3));
+    cache.insert(Value(1), intToDoc(4));
+    cache.insert(Value(1), intToDoc(5));
 
     ASSERT(cache[Value(0)]);
-    ASSERT_TRUE(vectorContains(cache[Value(0)], intToObj(1)));
-    ASSERT_TRUE(vectorContains(cache[Value(0)], intToObj(2)));
-    ASSERT_TRUE(vectorContains(cache[Value(0)], intToObj(3)));
-    ASSERT_FALSE(vectorContains(cache[Value(0)], intToObj(4)));
-    ASSERT_FALSE(vectorContains(cache[Value(0)], intToObj(5)));
+    ASSERT_TRUE(vectorContains(cache[Value(0)], intToDoc(1)));
+    ASSERT_TRUE(vectorContains(cache[Value(0)], intToDoc(2)));
+    ASSERT_TRUE(vectorContains(cache[Value(0)], intToDoc(3)));
+    ASSERT_FALSE(vectorContains(cache[Value(0)], intToDoc(4)));
+    ASSERT_FALSE(vectorContains(cache[Value(0)], intToDoc(5)));
 }
 
 TEST(LookupSetCacheTest, CacheDoesEvictInExpectedOrder) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
+    LookupSetCache cache(defaultComparator);
 
-    cache.insert(Value(0), intToObj(0));
-    cache.insert(Value(1), intToObj(0));
-    cache.insert(Value(2), intToObj(0));
-    cache.insert(Value(3), intToObj(0));
+    cache.insert(Value(0), intToDoc(0));
+    cache.insert(Value(1), intToDoc(0));
+    cache.insert(Value(2), intToDoc(0));
+    cache.insert(Value(3), intToDoc(0));
 
     // Cache ordering is {1: ..., 3: ..., 2: ..., 0: ...}.
     cache.evictOne();
@@ -90,11 +92,10 @@ TEST(LookupSetCacheTest, CacheDoesEvictInExpectedOrder) {
 }
 
 TEST(LookupSetCacheTest, ReadDoesMoveKeyToFrontOfCache) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
+    LookupSetCache cache(defaultComparator);
 
-    cache.insert(Value(0), intToObj(0));
-    cache.insert(Value(1), intToObj(0));
+    cache.insert(Value(0), intToDoc(0));
+    cache.insert(Value(1), intToDoc(0));
     // Cache ordering is now {1: [1], 0: [0]}.
 
     ASSERT_TRUE(cache[Value(0)]);
@@ -106,13 +107,12 @@ TEST(LookupSetCacheTest, ReadDoesMoveKeyToFrontOfCache) {
 }
 
 TEST(LookupSetCacheTest, InsertDoesPutKeyInMiddle) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
+    LookupSetCache cache(defaultComparator);
 
-    cache.insert(Value(0), intToObj(0));
-    cache.insert(Value(1), intToObj(0));
-    cache.insert(Value(2), intToObj(0));
-    cache.insert(Value(3), intToObj(0));
+    cache.insert(Value(0), intToDoc(0));
+    cache.insert(Value(1), intToDoc(0));
+    cache.insert(Value(2), intToDoc(0));
+    cache.insert(Value(3), intToDoc(0));
 
     cache.evictUntilSize(1);
 
@@ -120,26 +120,24 @@ TEST(LookupSetCacheTest, InsertDoesPutKeyInMiddle) {
 }
 
 TEST(LookupSetCacheTest, EvictDoesRespectMemoryUsage) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
+    LookupSetCache cache(defaultComparator);
 
-    cache.insert(Value(0), intToObj(0));
-    cache.insert(Value(1), intToObj(0));
+    cache.insert(Value(0), intToDoc(0));
+    cache.insert(Value(1), intToDoc(0));
 
     // One size_t for the key, one for the value.
-    cache.evictDownTo(Value(1).getApproximateSize() + static_cast<size_t>(intToObj(0).objsize()));
+    cache.evictDownTo(Value(1).getApproximateSize() + intToDoc(0).getApproximateSize());
 
     ASSERT_TRUE(cache[Value(1)]);
     ASSERT_FALSE(cache[Value(0)]);
 }
 
 TEST(LookupSetCacheTest, ComplexAccessPatternDoesBehaveCorrectly) {
-    const StringData::ComparatorInterface* stringComparator = nullptr;
-    LookupSetCache cache(stringComparator);
+    LookupSetCache cache(defaultComparator);
 
     for (int i = 0; i < 5; i++) {
         for (int j = 0; j < 5; j++) {
-            cache.insert(Value(j), intToObj(i));
+            cache.insert(Value(j), intToDoc(i));
         }
     }
 
@@ -148,11 +146,11 @@ TEST(LookupSetCacheTest, ComplexAccessPatternDoesBehaveCorrectly) {
     ASSERT_FALSE(cache[Value(0)]);
 
     ASSERT_TRUE(cache[Value(1)]);
-    ASSERT_TRUE(vectorContains(cache[Value(1)], intToObj(0)));
-    ASSERT_TRUE(vectorContains(cache[Value(1)], intToObj(1)));
-    ASSERT_TRUE(vectorContains(cache[Value(1)], intToObj(2)));
-    ASSERT_TRUE(vectorContains(cache[Value(1)], intToObj(3)));
-    ASSERT_TRUE(vectorContains(cache[Value(1)], intToObj(4)));
+    ASSERT_TRUE(vectorContains(cache[Value(1)], intToDoc(0)));
+    ASSERT_TRUE(vectorContains(cache[Value(1)], intToDoc(1)));
+    ASSERT_TRUE(vectorContains(cache[Value(1)], intToDoc(2)));
+    ASSERT_TRUE(vectorContains(cache[Value(1)], intToDoc(3)));
+    ASSERT_TRUE(vectorContains(cache[Value(1)], intToDoc(4)));
 
     cache.evictUntilSize(2);
     // Cache ordering is now {1: ..., 3: ...}
@@ -164,8 +162,8 @@ TEST(LookupSetCacheTest, ComplexAccessPatternDoesBehaveCorrectly) {
     cache.evictOne();
     ASSERT_FALSE(cache[Value(1)]);
 
-    cache.insert(Value(5), intToObj(0));
-    cache.evictDownTo(Value(5).getApproximateSize() + static_cast<size_t>(intToObj(0).objsize()));
+    cache.insert(Value(5), intToDoc(0));
+    cache.evictDownTo(Value(5).getApproximateSize() + intToDoc(0).getApproximateSize());
 
     ASSERT_EQ(cache.size(), 1U);
     ASSERT_TRUE(cache[Value(5)]);
@@ -173,20 +171,21 @@ TEST(LookupSetCacheTest, ComplexAccessPatternDoesBehaveCorrectly) {
 
 TEST(LookupSetCacheTest, CacheKeysRespectCollation) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kToLowerString);
-    LookupSetCache cache(&collator);
+    ValueComparator comparator{&collator};
+    LookupSetCache cache(comparator);
 
-    cache.insert(Value("foo"), intToObj(1));
-    cache.insert(Value("FOO"), intToObj(2));
-    cache.insert(Value("FOOz"), intToObj(3));
+    cache.insert(Value("foo"_sd), intToDoc(1));
+    cache.insert(Value("FOO"_sd), intToDoc(2));
+    cache.insert(Value("FOOz"_sd), intToDoc(3));
 
     {
-        auto fooResult = cache[Value("FoO")];
+        auto fooResult = cache[Value("FoO"_sd)];
         ASSERT_TRUE(fooResult);
         ASSERT_EQ(2U, fooResult->size());
     }
 
     {
-        auto foozResult = cache[Value("fooZ")];
+        auto foozResult = cache[Value("fooZ"_sd)];
         ASSERT_TRUE(foozResult);
         ASSERT_EQ(1U, foozResult->size());
     }
@@ -196,16 +195,13 @@ TEST(LookupSetCacheTest, CacheKeysRespectCollation) {
 // foreign collection.
 TEST(LookupSetCacheTest, CachedValuesDontRespectCollation) {
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kToLowerString);
-    LookupSetCache cache(&collator);
+    ValueComparator comparator{&collator};
+    LookupSetCache cache(comparator);
 
-    cache.insert(Value("foo"),
-                 BSON("foo"
-                      << "bar"));
-    cache.insert(Value("foo"),
-                 BSON("foo"
-                      << "BAR"));
+    cache.insert(Value("foo"_sd), Document{{"foo", "bar"_sd}});
+    cache.insert(Value("foo"_sd), Document{{"foo", "BAR"_sd}});
 
-    auto fooResult = cache[Value("foo")];
+    auto fooResult = cache[Value("foo"_sd)];
     ASSERT_TRUE(fooResult);
     ASSERT_EQ(2U, fooResult->size());
 }

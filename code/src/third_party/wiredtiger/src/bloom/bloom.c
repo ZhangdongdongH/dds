@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -37,8 +37,8 @@ __bloom_init(WT_SESSION_IMPL *session,
 		len += strlen(config);
 	WT_ERR(__wt_calloc_def(session, len, &bloom->config));
 	/* Add the standard config at the end, so it overrides user settings. */
-	(void)snprintf(bloom->config, len,
-	    "%s,%s", config == NULL ? "" : config, WT_BLOOM_TABLE_CONFIG);
+	WT_ERR(__wt_snprintf(bloom->config, len,
+	    "%s,%s", config == NULL ? "" : config, WT_BLOOM_TABLE_CONFIG));
 
 	bloom->session = session;
 
@@ -95,6 +95,7 @@ int
 __wt_bloom_create(
     WT_SESSION_IMPL *session, const char *uri, const char *config,
     uint64_t count, uint32_t factor, uint32_t k, WT_BLOOM **bloomp)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_BLOOM *bloom;
 	WT_DECL_RET;
@@ -132,8 +133,12 @@ __bloom_open_cursor(WT_BLOOM *bloom, WT_CURSOR *owner)
 	c = NULL;
 	WT_RET(__wt_open_cursor(session, bloom->uri, owner, cfg, &c));
 
-	/* Bump the cache priority for Bloom filters. */
-	__wt_evict_priority_set(session, WT_EVICT_INT_SKEW);
+	/*
+	 * Bump the cache priority for Bloom filters: this makes eviction favor
+	 * pages from other trees over Bloom filters.
+	 */
+#define	WT_EVICT_BLOOM_SKEW	1000
+	__wt_evict_priority_set(session, WT_EVICT_BLOOM_SKEW);
 
 	bloom->c = c;
 	return (0);
@@ -148,6 +153,7 @@ int
 __wt_bloom_open(WT_SESSION_IMPL *session,
     const char *uri, uint32_t factor, uint32_t k,
     WT_CURSOR *owner, WT_BLOOM **bloomp)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_BLOOM *bloom;
 	WT_CURSOR *c;
@@ -178,6 +184,7 @@ err:	WT_TRET(__wt_bloom_close(bloom));
  */
 void
 __wt_bloom_insert(WT_BLOOM *bloom, WT_ITEM *key)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	uint64_t h1, h2;
 	uint32_t i;
@@ -195,6 +202,7 @@ __wt_bloom_insert(WT_BLOOM *bloom, WT_ITEM *key)
  */
 int
 __wt_bloom_finalize(WT_BLOOM *bloom)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_CURSOR *c;
 	WT_DECL_RET;
@@ -257,15 +265,16 @@ __wt_bloom_hash_get(WT_BLOOM *bloom, WT_BLOOM_HASH *bhash)
 {
 	WT_CURSOR *c;
 	WT_DECL_RET;
-	int result;
-	uint32_t i;
 	uint64_t h1, h2;
+	uint32_t i;
 	uint8_t bit;
+	int result;
 
 	/* Get operations are only supported by finalized bloom filters. */
 	WT_ASSERT(bloom->session, bloom->bitstring == NULL);
 
 	/* Create a cursor on the first time through. */
+	c = NULL;
 	WT_ERR(__bloom_open_cursor(bloom, NULL));
 	c = bloom->c;
 
@@ -290,11 +299,22 @@ __wt_bloom_hash_get(WT_BLOOM *bloom, WT_BLOOM_HASH *bhash)
 	WT_ERR(c->reset(c));
 	return (result);
 
-err:	/* Don't return WT_NOTFOUND from a failed search. */
-	if (ret == WT_NOTFOUND)
-		ret = WT_ERROR;
-	__wt_err(bloom->session, ret, "Failed lookup in bloom filter");
-	return (ret);
+err:	if (c != NULL)
+		WT_TRET(c->reset(c));
+
+	/*
+	 * Error handling from this function is complex. A search in the
+	 * backing bit field should never return WT_NOTFOUND - so translate
+	 * that into a different error code and report an error. If we got a
+	 * WT_ROLLBACK it may be because there is a lot of cache pressure and
+	 * the transaction is being killed - don't report an error message in
+	 * that case.
+	 */
+	if (ret == WT_ROLLBACK || ret == WT_CACHE_FULL)
+		return (ret);
+	WT_RET_MSG(bloom->session,
+	    ret == WT_NOTFOUND ? WT_ERROR : ret,
+	    "Failed lookup in bloom filter");
 }
 
 /*
@@ -304,6 +324,7 @@ err:	/* Don't return WT_NOTFOUND from a failed search. */
  */
 int
 __wt_bloom_get(WT_BLOOM *bloom, WT_ITEM *key)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_BLOOM_HASH bhash;
 
@@ -363,6 +384,7 @@ __wt_bloom_intersection(WT_BLOOM *bloom, WT_BLOOM *other)
  */
 int
 __wt_bloom_close(WT_BLOOM *bloom)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_DECL_RET;
 	WT_SESSION_IMPL *session;
@@ -385,6 +407,7 @@ __wt_bloom_close(WT_BLOOM *bloom)
  */
 int
 __wt_bloom_drop(WT_BLOOM *bloom, const char *config)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_DECL_RET;
 	WT_SESSION *wt_session;

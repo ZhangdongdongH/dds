@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Main package for the mongoexport tool.
 package main
 
@@ -24,14 +30,14 @@ const (
 func main() {
 	// initialize command-line opts
 	opts := options.New("mongoexport", mongoexport.Usage,
-		options.EnabledOptions{Auth: true, Connection: true, Namespace: true})
+		options.EnabledOptions{Auth: true, Connection: true, Namespace: true, URI: true})
 
 	outputOpts := &mongoexport.OutputFormatOptions{}
 	opts.AddOptions(outputOpts)
 	inputOpts := &mongoexport.InputOptions{}
 	opts.AddOptions(inputOpts)
 
-	args, err := opts.Parse()
+	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
 		log.Logvf(log.Always, "error parsing command line options: %v", err)
 		log.Logvf(log.Always, "try 'mongoexport --help' for more information")
@@ -56,12 +62,14 @@ func main() {
 		return
 	}
 
-	// connect directly, unless a replica set name is explicitly specified
-	_, setName := util.ParseConnectionString(opts.Host)
-	opts.Direct = (setName == "")
-	opts.ReplicaSetName = setName
+	// verify uri options and log them
+	opts.URI.LogUnsupportedOptions()
 
 	provider, err := db.NewSessionProvider(*opts)
+	if err != nil {
+		log.Logvf(log.Always, "%v", err)
+		os.Exit(util.ExitError)
+	}
 	defer provider.Close()
 
 	// temporarily allow secondary reads for the isMongos check

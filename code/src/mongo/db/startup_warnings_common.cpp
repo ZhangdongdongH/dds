@@ -35,6 +35,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <fstream>
 
+#include "mongo/config.h"
 #include "mongo/db/server_options.h"
 #include "mongo/util/log.h"
 #include "mongo/util/net/ssl_options.h"
@@ -61,19 +62,6 @@ void logCommonStartupWarnings(const ServerGlobalParams& serverParams) {
         }
     }
 
-    if (serverParams.authState == ServerGlobalParams::AuthState::kEnabled &&
-        (serverParams.rest || serverParams.isHttpInterfaceEnabled || serverParams.jsonp)) {
-        log() << startupWarningsLog;
-        log()
-            << "** WARNING: The server is started with the web server interface and access control."
-            << startupWarningsLog;
-        log() << "**          The web interfaces (rest, httpinterface and/or jsonp) are insecure "
-              << startupWarningsLog;
-        log() << "**          and should be disabled unless required for backward compatibility."
-              << startupWarningsLog;
-        warned = true;
-    }
-
     if (serverParams.authState == ServerGlobalParams::AuthState::kUndefined) {
         log() << startupWarningsLog;
         log() << "** WARNING: Access control is not enabled for the database."
@@ -96,11 +84,16 @@ void logCommonStartupWarnings(const ServerGlobalParams& serverParams) {
     * specify a sslCAFile parameter from the shell
     */
     if (sslGlobalParams.sslMode.load() != SSLParams::SSLMode_disabled &&
+#ifdef MONGO_CONFIG_SSL_CERTIFICATE_SELECTORS
+        sslGlobalParams.sslCertificateSelector.empty() &&
+#endif
         sslGlobalParams.sslCAFile.empty()) {
         log() << "";
-        log() << "** WARNING: No SSL certificate validation can be performed since"
+        log() << "** WARNING: No client certificate validation can be performed since"
                  " no CA file has been provided";
-
+#ifdef MONGO_CONFIG_SSL_CERTIFICATE_SELECTORS
+        log() << "**          and no sslCertificateSelector has been specified.";
+#endif
         log() << "**          Please specify an sslCAFile parameter.";
     }
 
@@ -124,6 +117,23 @@ void logCommonStartupWarnings(const ServerGlobalParams& serverParams) {
         warned = true;
     }
 #endif
+
+    if (serverParams.bind_ips.empty()) {
+        log() << startupWarningsLog;
+        log() << "** WARNING: This server is bound to localhost." << startupWarningsLog;
+        log() << "**          Remote systems will be unable to connect to this server. "
+              << startupWarningsLog;
+        log() << "**          Start the server with --bind_ip <address> to specify which IP "
+              << startupWarningsLog;
+        log() << "**          addresses it should serve responses from, or with --bind_ip_all to"
+              << startupWarningsLog;
+        log() << "**          bind to all interfaces. If this behavior is desired, start the"
+              << startupWarningsLog;
+        log() << "**          server with --bind_ip 127.0.0.1 to disable this warning."
+              << startupWarningsLog;
+        warned = true;
+    }
+
 
     if (warned) {
         log() << startupWarningsLog;

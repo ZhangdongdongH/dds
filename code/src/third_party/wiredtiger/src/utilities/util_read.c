@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -17,9 +17,10 @@ util_read(WT_SESSION *session, int argc, char *argv[])
 	WT_DECL_RET;
 	uint64_t recno;
 	int ch;
+	char *uri, *value;
 	bool rkey, rval;
-	const char *uri, *value;
 
+	uri = NULL;
 	while ((ch = __wt_getopt(progname, argc, argv, "")) != EOF)
 		switch (ch) {
 		case '?':
@@ -32,28 +33,34 @@ util_read(WT_SESSION *session, int argc, char *argv[])
 	/* The remaining arguments are a uri followed by a list of keys. */
 	if (argc < 2)
 		return (usage());
-	if ((uri = util_name(session, *argv, "table")) == NULL)
+	if ((uri = util_uri(session, *argv, "table")) == NULL)
 		return (1);
 
-	/* Open the object. */
-	if ((ret = session->open_cursor(
-	    session, uri, NULL, NULL, &cursor)) != 0)
-		return (util_err(session, ret, "%s: session.open", uri));
+	/*
+	 * Open the object; free allocated memory immediately to simplify
+	 * future error handling.
+	 */
+	if ((ret =
+	    session->open_cursor(session, uri, NULL, NULL, &cursor)) != 0)
+		(void)util_err(session, ret, "%s: session.open_cursor", uri);
+	free(uri);
+	if (ret != 0)
+		return (ret);
 
 	/*
 	 * A simple search only makes sense if the key format is a string or a
 	 * record number, and the value format is a single string.
 	 */
-	if (strcmp(cursor->key_format, "r") != 0 &&
-	    strcmp(cursor->key_format, "S") != 0) {
+	if (!WT_STREQ(cursor->key_format, "r") &&
+	    !WT_STREQ(cursor->key_format, "S")) {
 		fprintf(stderr,
 		    "%s: read command only possible when the key format is "
 		    "a record number or string\n",
 		    progname);
 		return (1);
 	}
-	rkey = strcmp(cursor->key_format, "r") == 0;
-	if (strcmp(cursor->value_format, "S") != 0) {
+	rkey = WT_STREQ(cursor->key_format, "r");
+	if (!WT_STREQ(cursor->value_format, "S")) {
 		fprintf(stderr,
 		    "%s: read command only possible when the value format is "
 		    "a string\n",
@@ -67,7 +74,7 @@ util_read(WT_SESSION *session, int argc, char *argv[])
 	 */
 	for (rval = false; *++argv != NULL;) {
 		if (rkey) {
-			if (util_str2recno(session, *argv, &recno))
+			if (util_str2num(session, *argv, true, &recno))
 				return (1);
 			cursor->set_key(cursor, recno);
 		} else

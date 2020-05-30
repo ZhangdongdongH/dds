@@ -33,24 +33,55 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/oplog_interface.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/fail_point_service.h"
 
 namespace mongo {
 namespace repl {
+
+// It is necessary to have this forward declare for the mongo fail point
+// at this location because of the splitting of the rollback algorithms into
+// two separate files, rs_rollback and rs_rollback_no_uuid. However, after
+// MongoDB 3.8 is released, we no longer need to maintain rs_rollback_no_uuid
+// code and these forward declares can be removed. See SERVER-29766.
+MONGO_FAIL_POINT_DECLARE(rollbackHangBeforeFinish);
+MONGO_FAIL_POINT_DECLARE(rollbackHangThenFailAfterWritingMinValid);
 
 class RollBackLocalOperations {
     MONGO_DISALLOW_COPYING(RollBackLocalOperations);
 
 public:
+    class RollbackCommonPoint {
+
+    public:
+        RollbackCommonPoint(BSONObj oplogBSON, RecordId recordId);
+
+        RecordId getRecordId() const {
+            return _recordId;
+        }
+
+        OpTime getOpTime() const {
+            return _opTime;
+        }
+
+        boost::optional<Date_t> getWallClockTime() const {
+            return _wallClockTime;
+        }
+
+    private:
+        RecordId _recordId;
+        OpTime _opTime;
+        boost::optional<Date_t> _wallClockTime;
+    };
+
     /**
      * Type of function to roll back an operation or process it for future use.
      * It can return any status except ErrorCodes::NoSuchKey. See onRemoteOperation().
      */
     using RollbackOperationFn = stdx::function<Status(const BSONObj&)>;
-
-    using RollbackCommonPoint = std::pair<OpTime, RecordId>;
 
     /**
      * Initializes rollback processor with a valid local oplog.

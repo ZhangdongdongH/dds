@@ -45,15 +45,21 @@ namespace rename_collection {
 Status checkAuthForRenameCollectionCommand(Client* client,
                                            const std::string& dbname,
                                            const BSONObj& cmdObj) {
-    NamespaceString sourceNS = NamespaceString(cmdObj.getStringField("renameCollection"));
-    NamespaceString targetNS = NamespaceString(cmdObj.getStringField("to"));
+    const auto sourceNsElt = cmdObj["renameCollection"];
+    const auto targetNsElt = cmdObj["to"];
+
+    uassert(ErrorCodes::TypeMismatch,
+            "'renameCollection' must be of type String",
+            sourceNsElt.type() == BSONType::String);
+    uassert(ErrorCodes::TypeMismatch,
+            "'to' must be of type String",
+            targetNsElt.type() == BSONType::String);
+
+    const NamespaceString sourceNS(sourceNsElt.valueStringData());
+    const NamespaceString targetNS(targetNsElt.valueStringData());
     bool dropTarget = cmdObj["dropTarget"].trueValue();
 
     if (sourceNS.db() == targetNS.db() && !sourceNS.isSystem() && !targetNS.isSystem()) {
-        // If renaming within the same database, then if you have renameCollectionSameDB and
-        // either can read both of source and dest collections or *can't* read either of source
-        // or dest collection, then you get can do the rename, even without insert on the
-        // destination collection.
         bool canRename = AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
             ResourcePattern::forDatabaseName(sourceNS.db()), ActionType::renameCollectionSameDB);
 
@@ -69,6 +75,9 @@ Status checkAuthForRenameCollectionCommand(Client* client,
         bool canReadDest = AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
             ResourcePattern::forExactNamespace(targetNS), ActionType::find);
 
+        // Even if the user can rename collections and can drop the target collection,
+        // the user should not be able to rename a collection from one they can't read
+        // to one they can.
         if (canRename && canDropTargetIfNeeded && (canReadSrc || !canReadDest)) {
             return Status::OK();
         }

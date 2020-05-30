@@ -33,7 +33,9 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/shim.h"
 #include "mongo/base/status.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege_format.h"
 #include "mongo/db/auth/role_name.h"
 #include "mongo/db/auth/user.h"
@@ -43,7 +45,6 @@
 
 namespace mongo {
 
-class AuthorizationManager;
 class AuthzSessionExternalState;
 class OperationContext;
 
@@ -53,10 +54,11 @@ class OperationContext;
  * easier to test as well as to allow different implementations for mongos and mongod.
  */
 class AuthzManagerExternalState {
-    MONGO_DISALLOW_COPYING(AuthzManagerExternalState);
+    AuthzManagerExternalState(const AuthzManagerExternalState&) = delete;
+    AuthzManagerExternalState& operator=(const AuthzManagerExternalState&) = delete;
 
 public:
-    static stdx::function<std::unique_ptr<AuthzManagerExternalState>()> create;
+    static MONGO_DECLARE_SHIM(()->std::unique_ptr<AuthzManagerExternalState>) create;
 
     virtual ~AuthzManagerExternalState();
 
@@ -65,7 +67,7 @@ public:
      * calling other methods.  Object may not be used after this method returns something other
      * than Status::OK().
      */
-    virtual Status initialize(OperationContext* txn) = 0;
+    virtual Status initialize(OperationContext* opCtx) = 0;
 
     /**
      * Creates an external state manipulator for an AuthorizationSession whose
@@ -78,7 +80,7 @@ public:
      * Retrieves the schema version of the persistent data describing users and roles.
      * Will leave *outVersion unmodified on non-OK status return values.
      */
-    virtual Status getStoredAuthorizationVersion(OperationContext* txn, int* outVersion) = 0;
+    virtual Status getStoredAuthorizationVersion(OperationContext* opCtx, int* outVersion) = 0;
 
     /**
      * Writes into "result" a document describing the named user and returns Status::OK().  The
@@ -91,7 +93,7 @@ public:
      *
      * If the user does not exist, returns ErrorCodes::UserNotFound.
      */
-    virtual Status getUserDescription(OperationContext* txn,
+    virtual Status getUserDescription(OperationContext* opCtx,
                                       const UserName& userName,
                                       BSONObj* result) = 0;
 
@@ -109,9 +111,10 @@ public:
      *
      * If the role does not exist, returns ErrorCodes::RoleNotFound.
      */
-    virtual Status getRoleDescription(OperationContext* txn,
+    virtual Status getRoleDescription(OperationContext* opCtx,
                                       const RoleName& roleName,
                                       PrivilegeFormat showPrivileges,
+                                      AuthenticationRestrictionsFormat,
                                       BSONObj* result) = 0;
 
     /**
@@ -127,9 +130,10 @@ public:
      * inconsistencies.
      */
 
-    virtual Status getRolesDescription(OperationContext* txn,
+    virtual Status getRolesDescription(OperationContext* opCtx,
                                        const std::vector<RoleName>& roles,
                                        PrivilegeFormat showPrivileges,
+                                       AuthenticationRestrictionsFormat,
                                        BSONObj* result) = 0;
 
     /**
@@ -144,20 +148,21 @@ public:
      * some of the information in a given role description is inconsistent, the document will
      * contain a "warnings" array, with std::string messages describing inconsistencies.
      */
-    virtual Status getRoleDescriptionsForDB(OperationContext* txn,
-                                            const std::string dbname,
+    virtual Status getRoleDescriptionsForDB(OperationContext* opCtx,
+                                            const std::string& dbname,
                                             PrivilegeFormat showPrivileges,
+                                            AuthenticationRestrictionsFormat,
                                             bool showBuiltinRoles,
                                             std::vector<BSONObj>* result) = 0;
 
     /**
      * Returns true if there exists at least one privilege document in the system.
      */
-    virtual bool hasAnyPrivilegeDocuments(OperationContext* txn) = 0;
+    virtual bool hasAnyPrivilegeDocuments(OperationContext* opCtx) = 0;
 
-    virtual void logOp(OperationContext* txn,
+    virtual void logOp(OperationContext* opCtx,
                        const char* op,
-                       const char* ns,
+                       const NamespaceString& ns,
                        const BSONObj& o,
                        const BSONObj* o2) {}
 
@@ -169,7 +174,7 @@ protected:
      * Returns true if roles for this user were provided by the client, and can be obtained from
      * the connection.
      */
-    bool shouldUseRolesFromConnection(OperationContext* txn, const UserName& username);
+    bool shouldUseRolesFromConnection(OperationContext* opCtx, const UserName& username);
 };
 
 }  // namespace mongo

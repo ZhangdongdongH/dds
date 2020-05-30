@@ -23,14 +23,15 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/oplogstart.h"
 #include "mongo/db/exec/working_set.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
 #include "mongo/db/query/canonical_query.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/service_context.h"
 #include "mongo/dbtests/dbtests.h"
@@ -44,21 +45,26 @@ static const NamespaceString nss("unittests.oplogstarttests");
 
 class Base {
 public:
-    Base()
-        : _scopedXact(&_txn, MODE_X),
-          _lk(_txn.lockState()),
-          _context(&_txn, nss.ns()),
-          _client(&_txn) {
-        Collection* c = _context.db()->getCollection(nss.ns());
+    Base() : _lk(&_opCtx), _context(&_opCtx, nss.ns()), _client(&_opCtx) {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
+
+        Collection* c = _context.db()->getCollection(&_opCtx, nss);
         if (!c) {
-            WriteUnitOfWork wuow(&_txn);
-            c = _context.db()->createCollection(&_txn, nss.ns());
+            WriteUnitOfWork wuow(&_opCtx);
+            c = _context.db()->createCollection(&_opCtx, nss.ns());
             wuow.commit();
         }
-        ASSERT(c->getIndexCatalog()->haveIdIndex(&_txn));
+        ASSERT(c->getIndexCatalog()->haveIdIndex(&_opCtx));
     }
 
     ~Base() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         client()->dropCollection(nss.ns());
 
         // The OplogStart stage is not allowed to outlive it's RecoveryUnit.
@@ -67,7 +73,7 @@ public:
 
 protected:
     Collection* collection() {
-        return _context.db()->getCollection(nss.ns());
+        return _context.db()->getCollection(&_opCtx, nss);
     }
 
     DBDirectClient* client() {
@@ -77,12 +83,15 @@ protected:
     void setupFromQuery(const BSONObj& query) {
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(query);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            &_txn, std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         _cq = std::move(statusWithCQ.getValue());
         _oplogws.reset(new WorkingSet());
-        _stage.reset(new OplogStart(&_txn, collection(), _cq->root(), _oplogws.get()));
+        const auto timestamp = query[repl::OpTime::kTimestampFieldName]
+                                   .embeddedObjectUserCheck()
+                                   .firstElement()
+                                   .timestamp();
+        _stage = stdx::make_unique<OplogStart>(&_opCtx, collection(), timestamp, _oplogws.get());
     }
 
     void assertWorkingSetMemberHasId(WorkingSetID id, int expectedId) {
@@ -99,9 +108,8 @@ protected:
 
 private:
     // The order of these is important in order to ensure order of destruction
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
-    ScopedTransaction _scopedXact;
+    const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_opCtxPtr;
     Lock::GlobalWrite _lk;
     OldClientContext _context;
 
@@ -117,11 +125,15 @@ private:
 class OplogStartIsOldest : public Base {
 public:
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         for (int i = 0; i < 10; ++i) {
-            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << Timestamp(1000, i)));
         }
 
-        setupFromQuery(BSON("ts" << BSON("$gte" << 10)));
+        setupFromQuery(BSON("ts" << BSON("$gte" << Timestamp(1000, 10))));
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         // collection scan needs to be initialized
@@ -141,11 +153,15 @@ public:
 class OplogStartIsNewest : public Base {
 public:
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         for (int i = 0; i < 10; ++i) {
-            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << Timestamp(1000, i)));
         }
 
-        setupFromQuery(BSON("ts" << BSON("$gte" << 1)));
+        setupFromQuery(BSON("ts" << BSON("$gte" << Timestamp(1000, 0))));
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         // collection scan needs to be initialized
@@ -168,11 +184,15 @@ public:
 class OplogStartIsNewestExtentHop : public Base {
 public:
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         for (int i = 0; i < 10; ++i) {
-            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i));
+            client()->insert(nss.ns(), BSON("_id" << i << "ts" << Timestamp(1000, i)));
         }
 
-        setupFromQuery(BSON("ts" << BSON("$gte" << 1)));
+        setupFromQuery(BSON("ts" << BSON("$gte" << Timestamp(1000, 1))));
 
         WorkingSetID id = WorkingSet::INVALID_ID;
         // ensure that we go into extent hopping mode immediately
@@ -190,17 +210,29 @@ public:
 class SizedExtentHopBase : public Base {
 public:
     SizedExtentHopBase() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         client()->dropCollection(nss.ns());
     }
     virtual ~SizedExtentHopBase() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         client()->dropCollection(nss.ns());
     }
 
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         buildCollection();
 
         WorkingSetID id = WorkingSet::INVALID_ID;
-        setupFromQuery(BSON("ts" << BSON("$gte" << tsGte())));
+        setupFromQuery(BSON("ts" << BSON("$gte" << Timestamp(1000, tsGte()))));
 
         // ensure that we go into extent hopping mode immediately
         _stage->setBackwardsScanTime(0);
@@ -224,14 +256,14 @@ protected:
         BSONObj info;
         // Create a collection with specified extent sizes
         BSONObj command =
-            BSON("create" << nss.coll() << "capped" << true << "$nExtents" << extentSizes()
-                          << "autoIndexId"
-                          << false);
+            BSON("create" << nss.coll() << "capped" << true << "$nExtents" << extentSizes());
         ASSERT(client()->runCommand(nss.db().toString(), command, info));
 
         // Populate documents.
         for (int i = 0; i < numDocs(); ++i) {
-            client()->insert(nss.ns(), BSON("_id" << i << "ts" << i << "payload" << payload8k()));
+            client()->insert(
+                nss.ns(),
+                BSON("_id" << i << "ts" << Timestamp(1000, i + 1) << "payload" << payload8k()));
         }
     }
 
@@ -407,7 +439,7 @@ public:
 
         // These tests rely on extent allocation details specific to mmapv1.
         // TODO figure out a way to generically test this.
-        if (getGlobalServiceContext()->getGlobalStorageEngine()->isMmapV1()) {
+        if (getGlobalServiceContext()->getStorageEngine()->isMmapV1()) {
             add<OplogStartIsNewestExtentHop>();
             add<OplogStartOneEmptyExtent>();
             add<OplogStartTwoEmptyExtents>();

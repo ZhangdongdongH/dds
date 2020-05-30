@@ -50,21 +50,28 @@ REGISTER_DOCUMENT_SOURCE(skip,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceSkip::createFromBson);
 
-const char* DocumentSourceSkip::getSourceName() const {
-    return "$skip";
-}
+constexpr StringData DocumentSourceSkip::kStageName;
 
 DocumentSource::GetNextResult DocumentSourceSkip::getNext() {
     pExpCtx->checkForInterrupt();
 
-    auto nextInput = pSource->getNext();
-    for (; _nSkippedSoFar < _nToSkip && nextInput.isAdvanced(); nextInput = pSource->getNext()) {
+    while (_nSkippedSoFar < _nToSkip) {
+        // For performance reasons, a streaming stage must not keep references to documents across
+        // calls to getNext(). Such stages must retrieve a result from their child and then release
+        // it (or return it) before asking for another result. Failing to do so can result in extra
+        // work, since the Document/Value library must copy data on write when that data has a
+        // refcount above one.
+        auto nextInput = pSource->getNext();
+        if (!nextInput.isAdvanced()) {
+            return nextInput;
+        }
         ++_nSkippedSoFar;
     }
-    return nextInput;
+
+    return pSource->getNext();
 }
 
-Value DocumentSourceSkip::serialize(bool explain) const {
+Value DocumentSourceSkip::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value(DOC(getSourceName() << _nToSkip));
 }
 
@@ -76,19 +83,14 @@ Pipeline::SourceContainer::iterator DocumentSourceSkip::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     invariant(*itr == this);
 
-    auto nextLimit = dynamic_cast<DocumentSourceLimit*>((*std::next(itr)).get());
     auto nextSkip = dynamic_cast<DocumentSourceSkip*>((*std::next(itr)).get());
-
-    if (nextLimit) {
-        // Swap the $limit before this stage, allowing a top-k sort to be possible, provided there
-        // is a $sort stage.
-        nextLimit->setLimit(nextLimit->getLimit() + _nToSkip);
-        std::swap(*itr, *std::next(itr));
-        return itr == container->begin() ? itr : std::prev(itr);
-    } else if (nextSkip) {
-        _nToSkip += nextSkip->getSkip();
-        container->erase(std::next(itr));
-        return itr;
+    if (nextSkip) {
+        // '_nToSkip' can potentially overflow causing it to become negative and skip nothing.
+        if (std::numeric_limits<long long>::max() - _nToSkip - nextSkip->getSkip() >= 0) {
+            _nToSkip += nextSkip->getSkip();
+            container->erase(std::next(itr));
+            return itr;
+        }
     }
     return std::next(itr);
 }
@@ -96,7 +98,6 @@ Pipeline::SourceContainer::iterator DocumentSourceSkip::doOptimizeAt(
 intrusive_ptr<DocumentSourceSkip> DocumentSourceSkip::create(
     const intrusive_ptr<ExpressionContext>& pExpCtx, long long nToSkip) {
     intrusive_ptr<DocumentSourceSkip> skip(new DocumentSourceSkip(pExpCtx, nToSkip));
-    skip->injectExpressionContext(pExpCtx);
     return skip;
 }
 

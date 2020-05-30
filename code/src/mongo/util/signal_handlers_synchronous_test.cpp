@@ -58,7 +58,6 @@ IGNORED_SIGNAL(SIGUSR2)
 IGNORED_SIGNAL(SIGHUP)
 IGNORED_SIGNAL(SIGPIPE)
 FATAL_SIGNAL(SIGQUIT)
-FATAL_SIGNAL(SIGABRT)
 FATAL_SIGNAL(SIGILL)
 
 #if not defined(__has_feature)
@@ -67,6 +66,7 @@ FATAL_SIGNAL(SIGILL)
 
 #if !__has_feature(address_sanitizer)
 // These signals trip the leak sanitizer
+FATAL_SIGNAL(SIGABRT)
 FATAL_SIGNAL(SIGSEGV)
 FATAL_SIGNAL(SIGBUS)
 FATAL_SIGNAL(SIGFPE)
@@ -97,7 +97,12 @@ DEATH_TEST(FatalTerminateTest,
             uasserted(28721, "Fatal second exception");
         }
     } tid;
-    uasserted(28719, "Non-fatal first exception");
+
+    // This is a workaround for https://gcc.gnu.org/bugzilla/show_bug.cgi?id=83400. We should delete
+    // this variable once we are on a compiler that doesn't require it.
+    volatile bool workaroundGCCBug = true;  // NOLINT
+    if (workaroundGCCBug)
+        uasserted(28719, "Non-fatal first exception");
 }
 
 }  // namespace

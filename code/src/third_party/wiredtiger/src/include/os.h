@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -11,8 +11,14 @@
 	 * A call returning 0 indicates success; any call where		\
 	 * 0 is not the only successful return must provide an		\
 	 * expression evaluating to 0 in all successful	cases.		\
+	 *								\
+	 * XXX								\
+	 * Casting the call's return to int is because CentOS 7.3.1611	\
+	 * complains about syscall returning a long and the loss of	\
+	 * integer precision in the assignment to ret. The cast should	\
+	 * be a no-op everywhere.					\
 	 */								\
-	if (((ret) = (call)) == 0)					\
+	if (((ret) = (int)(call)) == 0)					\
 		break;							\
 	/*								\
 	 * The call's error was either returned by the call or		\
@@ -28,9 +34,11 @@
 		(ret) = __wt_errno();					\
 } while (0)
 
+#define	WT_RETRY_MAX	10
+
 #define	WT_SYSCALL_RETRY(call, ret) do {				\
 	int __retry;							\
-	for (__retry = 0; __retry < 10; ++__retry) {			\
+	for (__retry = 0; __retry < WT_RETRY_MAX; ++__retry) {		\
 		WT_SYSCALL(call, ret);					\
 		switch (ret) {						\
 		case EAGAIN:						\
@@ -59,9 +67,18 @@
 #define	WT_TIMEDIFF_SEC(end, begin)					\
 	(WT_TIMEDIFF_NS((end), (begin)) / WT_BILLION)
 
+#define	WT_CLOCKDIFF_NS(end, begin)					\
+	(__wt_clock_to_nsec(end, begin))
+#define	WT_CLOCKDIFF_US(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_THOUSAND)
+#define	WT_CLOCKDIFF_MS(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_MILLION)
+#define	WT_CLOCKDIFF_SEC(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_BILLION)
+
 #define	WT_TIMECMP(t1, t2)						\
 	((t1).tv_sec < (t2).tv_sec ? -1 :				\
-	     (t1).tv_sec == (t2.tv_sec) ?				\
+	     (t1).tv_sec == (t2).tv_sec ?				\
 	     (t1).tv_nsec < (t2).tv_nsec ? -1 :				\
 	     (t1).tv_nsec == (t2).tv_nsec ? 0 : 1 : 1)
 
@@ -149,9 +166,11 @@ struct __wt_fstream {
 	wt_off_t size;				/* File size */
 	WT_ITEM  buf;				/* Data */
 
-#define	WT_STREAM_APPEND	0x01		/* Open a stream for append */
-#define	WT_STREAM_READ		0x02		/* Open a stream for read */
-#define	WT_STREAM_WRITE		0x04		/* Open a stream for write */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_STREAM_APPEND	0x1u		/* Open a stream for append */
+#define	WT_STREAM_READ		0x2u		/* Open a stream for read */
+#define	WT_STREAM_WRITE		0x4u		/* Open a stream for write */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t flags;
 
 	int (*close)(WT_SESSION_IMPL *, WT_FSTREAM *);

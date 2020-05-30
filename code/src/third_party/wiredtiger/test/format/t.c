@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -49,14 +49,7 @@ main(int argc, char *argv[])
 
 	config = NULL;
 
-#ifdef _WIN32
-	g.progname = "t_format.exe";
-#else
-	if ((g.progname = strrchr(argv[0], DIR_DELIM)) == NULL)
-		g.progname = argv[0];
-	else
-		++g.progname;
-#endif
+	(void)testutil_set_progname(argv);
 
 #if 0
 	/* Configure the GNU malloc for debugging. */
@@ -74,7 +67,7 @@ main(int argc, char *argv[])
 	home = NULL;
 	onerun = 0;
 	while ((ch = __wt_getopt(
-	    g.progname, argc, argv, "1C:c:H:h:Llqrt:")) != EOF)
+	    progname, argc, argv, "1C:c:H:h:Llqrt:")) != EOF)
 		switch (ch) {
 		case '1':			/* One run */
 			onerun = 1;
@@ -106,12 +99,11 @@ main(int argc, char *argv[])
 			g.c_quiet = 1;
 			break;
 		case 'r':			/* Replay a run */
-			g.replay = 1;
+			g.replay = true;
 			break;
 		default:
 			usage();
 		}
-	argc -= __wt_optind;
 	argv += __wt_optind;
 
 	/* Initialize the global RNG. */
@@ -176,16 +168,17 @@ main(int argc, char *argv[])
 	 */
 	testutil_check(pthread_rwlock_init(&g.append_lock, NULL));
 	testutil_check(pthread_rwlock_init(&g.backup_lock, NULL));
-	testutil_check(pthread_rwlock_init(&g.checkpoint_lock, NULL));
 	testutil_check(pthread_rwlock_init(&g.death_lock, NULL));
+	testutil_check(pthread_rwlock_init(&g.ts_lock, NULL));
 
-	printf("%s: process %" PRIdMAX "\n", g.progname, (intmax_t)getpid());
+	printf("%s: process %" PRIdMAX "\n", progname, (intmax_t)getpid());
 	while (++g.run_cnt <= g.c_runs || g.c_runs == 0 ) {
 		startup();			/* Start a run */
 
 		config_setup();			/* Run configuration */
 		config_print(0);		/* Dump run configuration */
-		key_len_setup();		/* Setup keys */
+		key_init();			/* Setup keys/values */
+		val_init();
 
 		start = time(NULL);
 		track("starting up", 0ULL, NULL);
@@ -257,10 +250,12 @@ main(int argc, char *argv[])
 		/* Overwrite the progress line with a completion line. */
 		if (!g.c_quiet)
 			printf("\r%78s\r", " ");
-		printf("%4d: %s, %s (%.0f seconds)\n",
+		printf("%4" PRIu32 ": %s, %s (%.0f seconds)\n",
 		    g.run_cnt, g.c_data_source,
 		    g.c_file_type, difftime(time(NULL), start));
 		fflush(stdout);
+
+		val_teardown();			/* Teardown keys/values */
 	}
 
 	/* Flush/close any logging information. */
@@ -271,8 +266,8 @@ main(int argc, char *argv[])
 
 	testutil_check(pthread_rwlock_destroy(&g.append_lock));
 	testutil_check(pthread_rwlock_destroy(&g.backup_lock));
-	testutil_check(pthread_rwlock_destroy(&g.checkpoint_lock));
 	testutil_check(pthread_rwlock_destroy(&g.death_lock));
+	testutil_check(pthread_rwlock_destroy(&g.ts_lock));
 
 	config_clear();
 
@@ -344,7 +339,7 @@ usage(void)
 	    "usage: %s [-1Llqr] [-C wiredtiger-config]\n    "
 	    "[-c config-file] [-H mount] [-h home] "
 	    "[name=value ...]\n",
-	    g.progname);
+	    progname);
 	fprintf(stderr, "%s",
 	    "\t-1 run once\n"
 	    "\t-C specify wiredtiger_open configuration arguments\n"

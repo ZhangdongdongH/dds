@@ -28,6 +28,7 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands/killcursors_common.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
@@ -40,9 +41,23 @@ public:
     ClusterKillCursorsCmd() = default;
 
 private:
-    Status _killCursor(OperationContext* txn, const NamespaceString& nss, CursorId cursorId) final {
-        return grid.getCursorManager()->killCursor(nss, cursorId);
+    Status _checkAuth(Client* client, const NamespaceString& nss, CursorId cursorId) const final {
+        auto const authzSession = AuthorizationSession::get(client);
+        auto authChecker = [&authzSession, &nss](UserNameIterator userNames) -> Status {
+            return authzSession->checkAuthForKillCursors(nss, userNames);
+        };
+
+        return Grid::get(client->getOperationContext())
+            ->getCursorManager()
+            ->checkAuthForKillCursors(client->getOperationContext(), nss, cursorId, authChecker);
     }
+
+    Status _killCursor(OperationContext* opCtx,
+                       const NamespaceString& nss,
+                       CursorId cursorId) const final {
+        return Grid::get(opCtx)->getCursorManager()->killCursor(opCtx, nss, cursorId);
+    }
+
 } clusterKillCursorsCmd;
 
 }  // namespace

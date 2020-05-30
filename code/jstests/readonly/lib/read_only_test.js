@@ -1,7 +1,7 @@
 var StandaloneFixture, ShardedFixture, runReadOnlyTest, zip2, cycleN;
 
 (function() {
-    "use_strict";
+    "use strict";
 
     function makeDirectoryReadOnly(dir) {
         if (_isWindows()) {
@@ -37,6 +37,7 @@ var StandaloneFixture, ShardedFixture, runReadOnlyTest, zip2, cycleN;
             var options = {queryableBackupMode: "", noCleanData: true, dbpath: this.dbpath};
 
             this.mongod = MongoRunner.runMongod(options);
+            assert.neq(this.mongod, null);
 
             test.exec(this.mongod.getDB("test")[test.name]);
 
@@ -51,14 +52,20 @@ var StandaloneFixture, ShardedFixture, runReadOnlyTest, zip2, cycleN;
     };
 
     ShardedFixture.prototype.runLoadPhase = function runLoadPhase(test) {
-        this.shardingTest = new ShardingTest({nopreallocj: true, mongos: 1, shards: this.nShards});
+        // TODO: SERVER-33830 remove shardAsReplicaSet: false
+        this.shardingTest = new ShardingTest({
+            nopreallocj: true,
+            mongos: 1,
+            shards: this.nShards,
+            other: {shardAsReplicaSet: false}
+        });
 
         this.paths = this.shardingTest.getDBPaths();
 
         jsTest.log("sharding test collection...");
 
         // Use a hashed shard key so we actually hit multiple shards.
-        this.shardingTest.shardColl(test.name, {_id: "hashed"});
+        this.shardingTest.shardColl(test.name, {_id: "hashed"}, false);
 
         test.load(this.shardingTest.getDB("test")[test.name]);
     };

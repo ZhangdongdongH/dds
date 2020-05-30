@@ -40,8 +40,9 @@ using std::string;
 
 REGISTER_GRANULARITY_ROUNDER(POWERSOF2, GranularityRounderPowersOfTwo::create);
 
-intrusive_ptr<GranularityRounder> GranularityRounderPowersOfTwo::create() {
-    return new GranularityRounderPowersOfTwo();
+intrusive_ptr<GranularityRounder> GranularityRounderPowersOfTwo::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    return new GranularityRounderPowersOfTwo(expCtx);
 }
 
 namespace {
@@ -79,8 +80,7 @@ Value GranularityRounderPowersOfTwo::roundUp(Value value) {
         exp = Value(63 - countLeadingZeros64(number) + 1);
     }
 
-    Variables vars;
-    return ExpressionPow::create(Value(2), exp)->evaluate(&vars);
+    return ExpressionPow::create(getExpCtx(), Value(2), exp)->evaluate(Document());
 }
 
 Value GranularityRounderPowersOfTwo::roundDown(Value value) {
@@ -112,8 +112,7 @@ Value GranularityRounderPowersOfTwo::roundDown(Value value) {
         }
     }
 
-    Variables vars;
-    return ExpressionPow::create(Value(2), exp)->evaluate(&vars);
+    return ExpressionPow::create(getExpCtx(), Value(2), exp)->evaluate(Document());
 }
 
 string GranularityRounderPowersOfTwo::getName() {

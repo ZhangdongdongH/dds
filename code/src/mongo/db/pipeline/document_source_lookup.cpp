@@ -34,9 +34,11 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/pipeline/document.h"
+#include "mongo/db/pipeline/document_path_support.h"
 #include "mongo/db/pipeline/expression.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/db/query/query_knobs.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
@@ -44,42 +46,134 @@ namespace mongo {
 using boost::intrusive_ptr;
 using std::vector;
 
+namespace {
+std::string pipelineToString(const vector<BSONObj>& pipeline) {
+    StringBuilder sb;
+    sb << "[";
+
+    auto first = true;
+    for (auto& stageSpec : pipeline) {
+        if (!first) {
+            sb << ", ";
+        } else {
+            first = false;
+        }
+        sb << stageSpec;
+    }
+    sb << "]";
+    return sb.str();
+}
+}  // namespace
+
+constexpr size_t DocumentSourceLookUp::kMaxSubPipelineDepth;
+
+DocumentSourceLookUp::DocumentSourceLookUp(NamespaceString fromNs,
+                                           std::string as,
+                                           const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
+    : DocumentSource(pExpCtx),
+      _fromNs(std::move(fromNs)),
+      _as(std::move(as)),
+      _variables(pExpCtx->variables),
+      _variablesParseState(pExpCtx->variablesParseState.copyWith(_variables.useIdGenerator())) {
+    const auto& resolvedNamespace = pExpCtx->getResolvedNamespace(_fromNs);
+    _resolvedNs = resolvedNamespace.ns;
+    _resolvedPipeline = resolvedNamespace.pipeline;
+    _fromExpCtx = pExpCtx->copyWith(_resolvedNs);
+
+    _fromExpCtx->subPipelineDepth += 1;
+    uassert(ErrorCodes::MaxSubPipelineDepthExceeded,
+            str::stream() << "Maximum number of nested $lookup sub-pipelines exceeded. Limit is "
+                          << kMaxSubPipelineDepth,
+            _fromExpCtx->subPipelineDepth <= kMaxSubPipelineDepth);
+}
+
 DocumentSourceLookUp::DocumentSourceLookUp(NamespaceString fromNs,
                                            std::string as,
                                            std::string localField,
                                            std::string foreignField,
                                            const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
-      _fromNs(std::move(fromNs)),
-      _as(std::move(as)),
-      _localField(std::move(localField)),
-      _foreignField(foreignField),
-      _foreignFieldFieldName(std::move(foreignField)) {}
+    : DocumentSourceLookUp(fromNs, as, pExpCtx) {
+    _localField = std::move(localField);
+    _foreignField = std::move(foreignField);
+    // We append an additional BSONObj to '_resolvedPipeline' as a placeholder for the $match stage
+    // we'll eventually construct from the input document.
+    _resolvedPipeline.reserve(_resolvedPipeline.size() + 1);
+    _resolvedPipeline.push_back(BSONObj());
+}
 
-std::unique_ptr<LiteParsedDocumentSourceOneForeignCollection> DocumentSourceLookUp::liteParse(
+DocumentSourceLookUp::DocumentSourceLookUp(NamespaceString fromNs,
+                                           std::string as,
+                                           std::vector<BSONObj> pipeline,
+                                           BSONObj letVariables,
+                                           const boost::intrusive_ptr<ExpressionContext>& pExpCtx)
+    : DocumentSourceLookUp(fromNs, as, pExpCtx) {
+    // '_resolvedPipeline' will first be initialized by the constructor delegated to within this
+    // constructor's initializer list. It will be populated with view pipeline prefix if 'fromNs'
+    // represents a view. We append the user 'pipeline' to the end of '_resolvedPipeline' to ensure
+    // any view prefix is not overwritten.
+    _resolvedPipeline.insert(_resolvedPipeline.end(), pipeline.begin(), pipeline.end());
+
+    _userPipeline = std::move(pipeline);
+
+    _cache.emplace(internalDocumentSourceLookupCacheSizeBytes.load());
+
+    for (auto&& varElem : letVariables) {
+        const auto varName = varElem.fieldNameStringData();
+        Variables::uassertValidNameForUserWrite(varName);
+
+        _letVariables.emplace_back(
+            varName.toString(),
+            Expression::parseOperand(pExpCtx, varElem, pExpCtx->variablesParseState),
+            _variablesParseState.defineVariable(varName));
+    }
+
+    initializeIntrospectionPipeline();
+}
+
+std::unique_ptr<DocumentSourceLookUp::LiteParsed> DocumentSourceLookUp::LiteParsed::parse(
     const AggregationRequest& request, const BSONElement& spec) {
-    uassert(40319,
+    uassert(ErrorCodes::FailedToParse,
             str::stream() << "the $lookup stage specification must be an object, but found "
                           << typeName(spec.type()),
             spec.type() == BSONType::Object);
 
     auto specObj = spec.Obj();
     auto fromElement = specObj["from"];
-    uassert(40320,
+    uassert(ErrorCodes::FailedToParse,
             str::stream() << "missing 'from' option to $lookup stage specification: " << specObj,
             fromElement);
-    uassert(40321,
+    uassert(ErrorCodes::FailedToParse,
             str::stream() << "'from' option to $lookup must be a string, but was type "
                           << typeName(specObj["from"].type()),
             fromElement.type() == BSONType::String);
 
-    NamespaceString nss(request.getNamespaceString().db(), fromElement.valueStringData());
-    uassert(40322, str::stream() << "invalid $lookup namespace: " << nss.ns(), nss.isValid());
-    return stdx::make_unique<LiteParsedDocumentSourceOneForeignCollection>(std::move(nss));
+    NamespaceString fromNss(request.getNamespaceString().db(), fromElement.valueStringData());
+    uassert(ErrorCodes::InvalidNamespace,
+            str::stream() << "invalid $lookup namespace: " << fromNss.ns(),
+            fromNss.isValid());
+
+    stdx::unordered_set<NamespaceString> foreignNssSet;
+
+    // Recursively lite parse the nested pipeline, if one exists.
+    auto pipelineElem = specObj["pipeline"];
+    boost::optional<LiteParsedPipeline> liteParsedPipeline;
+    if (pipelineElem) {
+        auto pipeline = uassertStatusOK(AggregationRequest::parsePipelineFromBSON(pipelineElem));
+        AggregationRequest foreignAggReq(fromNss, std::move(pipeline));
+        liteParsedPipeline = LiteParsedPipeline(foreignAggReq);
+
+        auto pipelineInvolvedNamespaces = liteParsedPipeline->getInvolvedNamespaces();
+        foreignNssSet.insert(pipelineInvolvedNamespaces.begin(), pipelineInvolvedNamespaces.end());
+    }
+
+    foreignNssSet.insert(fromNss);
+
+    return stdx::make_unique<DocumentSourceLookUp::LiteParsed>(
+        std::move(fromNss), std::move(foreignNssSet), std::move(liteParsedPipeline));
 }
 
 REGISTER_DOCUMENT_SOURCE(lookup,
-                         DocumentSourceLookUp::liteParse,
+                         DocumentSourceLookUp::LiteParsed::parse,
                          DocumentSourceLookUp::createFromBson);
 
 const char* DocumentSourceLookUp::getSourceName() const {
@@ -96,7 +190,7 @@ namespace {
  *    ...
  *  ]}
  */
-BSONObj buildEqualityOrQuery(const std::string& fieldName, const vector<Value>& values) {
+BSONObj buildEqualityOrQuery(const std::string& fieldName, const BSONArray& values) {
     BSONObjBuilder orBuilder;
     {
         BSONArrayBuilder orPredicatesBuilder(orBuilder.subarrayStart("$or"));
@@ -112,17 +206,7 @@ BSONObj buildEqualityOrQuery(const std::string& fieldName, const vector<Value>& 
 DocumentSource::GetNextResult DocumentSourceLookUp::getNext() {
     pExpCtx->checkForInterrupt();
 
-    uassert(4567, "from collection cannot be sharded", !_mongod->isSharded(_fromExpCtx->ns));
-
-    if (!_additionalFilter && _matchSrc) {
-        // We have internalized a $match, but have not yet computed the descended $match that should
-        // be applied to our queries.
-        _additionalFilter = DocumentSourceMatch::descendMatchOnPath(
-                                _matchSrc->getMatchExpression(), _as.fullPath(), pExpCtx)
-                                ->getQuery();
-    }
-
-    if (_handlingUnwind) {
+    if (_unwindSrc) {
         return unwindResult();
     }
 
@@ -130,25 +214,31 @@ DocumentSource::GetNextResult DocumentSourceLookUp::getNext() {
     if (!nextInput.isAdvanced()) {
         return nextInput;
     }
+
     auto inputDoc = nextInput.releaseDocument();
 
     // If we have not absorbed a $unwind, we cannot absorb a $match. If we have absorbed a $unwind,
-    // '_handlingUnwind' would be set to true, and we would not have made it here.
+    // '_unwindSrc' would be non-null, and we would not have made it here.
     invariant(!_matchSrc);
 
-    auto matchStage =
-        makeMatchStageFromInput(inputDoc, _localField, _foreignFieldFieldName, BSONObj());
-    // We've already allocated space for the trailing $match stage in '_fromPipeline'.
-    _fromPipeline.back() = matchStage;
-    auto pipeline = uassertStatusOK(_mongod->makePipeline(_fromPipeline, _fromExpCtx));
+    if (!wasConstructedWithPipelineSyntax()) {
+        auto matchStage =
+            makeMatchStageFromInput(inputDoc, *_localField, _foreignField->fullPath(), BSONObj());
+        // We've already allocated space for the trailing $match stage in '_resolvedPipeline'.
+        _resolvedPipeline.back() = matchStage;
+    }
+
+    auto pipeline = buildPipeline(inputDoc);
 
     std::vector<Value> results;
     int objsize = 0;
+
     while (auto result = pipeline->getNext()) {
         objsize += result->getApproximateSize();
         uassert(4568,
-                str::stream() << "Total size of documents in " << _fromNs.coll() << " matching "
-                              << matchStage
+                str::stream() << "Total size of documents in " << _fromNs.coll()
+                              << " matching pipeline "
+                              << getUserPipelineDefinition()
                               << " exceeds maximum document size",
                 objsize <= BSONObjMaxInternalSize);
         results.emplace_back(std::move(*result));
@@ -159,6 +249,52 @@ DocumentSource::GetNextResult DocumentSourceLookUp::getNext() {
     return output.freeze();
 }
 
+std::unique_ptr<Pipeline, PipelineDeleter> DocumentSourceLookUp::buildPipeline(
+    const Document& inputDoc) {
+    // Copy all 'let' variables into the foreign pipeline's expression context.
+    copyVariablesToExpCtx(_variables, _variablesParseState, _fromExpCtx.get());
+
+    // Resolve the 'let' variables to values per the given input document.
+    resolveLetVariables(inputDoc, &_fromExpCtx->variables);
+
+    // If we don't have a cache, build and return the pipeline immediately.
+    if (!_cache || _cache->isAbandoned()) {
+        return uassertStatusOK(
+            pExpCtx->mongoProcessInterface->makePipeline(_resolvedPipeline, _fromExpCtx));
+    }
+
+    // Tailor the pipeline construction for our needs. We want a non-optimized pipeline without a
+    // cursor source.
+    MongoProcessInterface::MakePipelineOptions pipelineOpts;
+    pipelineOpts.optimize = false;
+    pipelineOpts.attachCursorSource = false;
+
+    // Construct the basic pipeline without a cache stage.
+    auto pipeline = uassertStatusOK(
+        pExpCtx->mongoProcessInterface->makePipeline(_resolvedPipeline, _fromExpCtx, pipelineOpts));
+
+    // Add the cache stage at the end and optimize. During the optimization process, the cache will
+    // either move itself to the correct position in the pipeline, or will abandon itself if no
+    // suitable cache position exists.
+    pipeline->addFinalSource(
+        DocumentSourceSequentialDocumentCache::create(_fromExpCtx, _cache.get_ptr()));
+
+    pipeline->optimizePipeline();
+
+    if (!_cache->isServing()) {
+        // The cache has either been abandoned or has not yet been built. Attach a cursor.
+        uassertStatusOK(pExpCtx->mongoProcessInterface->attachCursorSourceToPipeline(
+            _fromExpCtx, pipeline.get()));
+    }
+
+    // If the cache has been abandoned, release it.
+    if (_cache->isAbandoned()) {
+        _cache.reset();
+    }
+
+    return pipeline;
+}
+
 DocumentSource::GetModPathsReturn DocumentSourceLookUp::getModifiedPaths() const {
     std::set<std::string> modifiedPaths{_as.fullPath()};
     if (_unwindSrc) {
@@ -167,7 +303,7 @@ DocumentSource::GetModPathsReturn DocumentSourceLookUp::getModifiedPaths() const
         modifiedPaths.insert(pathsModifiedByUnwind.paths.begin(),
                              pathsModifiedByUnwind.paths.end());
     }
-    return {GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths)};
+    return {GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths), {}};
 }
 
 Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
@@ -178,9 +314,8 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
 
     // If we are not already handling an $unwind stage internally, we can combine with the
     // following $unwind stage.
-    if (nextUnwind && !_handlingUnwind && nextUnwind->getUnwindPath() == _as.fullPath()) {
+    if (nextUnwind && !_unwindSrc && nextUnwind->getUnwindPath() == _as.fullPath()) {
         _unwindSrc = std::move(nextUnwind);
-        _handlingUnwind = true;
         container->erase(std::next(itr));
         return itr;
     }
@@ -192,7 +327,7 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
         return std::next(itr);
     }
 
-    if (!_handlingUnwind || _unwindSrc->indexPath() || _unwindSrc->preserveNullAndEmptyArrays()) {
+    if (!_unwindSrc || _unwindSrc->indexPath() || _unwindSrc->preserveNullAndEmptyArrays()) {
         // We must be unwinding our result to internalize a $match. For example, consider the
         // following pipeline:
         //
@@ -259,9 +394,8 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     }
 
     // We can internalize the $match.
-    if (!_handlingMatch) {
+    if (!_matchSrc) {
         _matchSrc = nextMatch;
-        _handlingMatch = true;
     } else {
         // We have already absorbed a $match. We need to join it with 'dependent'.
         _matchSrc->joinMatchWith(nextMatch);
@@ -270,40 +404,76 @@ Pipeline::SourceContainer::iterator DocumentSourceLookUp::doOptimizeAt(
     // Remove the original $match. There may be further optimization between this $lookup and the
     // new neighbor, so we return an iterator pointing to ourself.
     container->erase(std::next(itr));
+
+    // We have internalized a $match, but have not yet computed the descended $match that should
+    // be applied to our queries.
+    _additionalFilter = DocumentSourceMatch::descendMatchOnPath(
+                            _matchSrc->getMatchExpression(), _as.fullPath(), pExpCtx)
+                            ->getQuery()
+                            .getOwned();
+
+    if (wasConstructedWithPipelineSyntax()) {
+        auto matchObj = BSON("$match" << *_additionalFilter);
+        _resolvedPipeline.push_back(matchObj);
+    }
+
     return itr;
 }
 
-void DocumentSourceLookUp::dispose() {
-    _pipeline.reset();
-    pSource->dispose();
+std::string DocumentSourceLookUp::getUserPipelineDefinition() {
+    if (wasConstructedWithPipelineSyntax()) {
+        return pipelineToString(_userPipeline);
+    }
+
+    return _resolvedPipeline.back().toString();
+}
+
+void DocumentSourceLookUp::doDispose() {
+    if (_pipeline) {
+        _pipeline->dispose(pExpCtx->opCtx);
+        _pipeline.reset();
+    }
 }
 
 BSONObj DocumentSourceLookUp::makeMatchStageFromInput(const Document& input,
                                                       const FieldPath& localFieldPath,
                                                       const std::string& foreignFieldName,
                                                       const BSONObj& additionalFilter) {
-    Value localFieldVal = input.getNestedField(localFieldPath);
+    // Add the 'localFieldPath' of 'input' into 'localFieldList'. If 'localFieldPath' references a
+    // field with an array in its path, we may need to join on multiple values, so we add each
+    // element to 'localFieldList'.
+    BSONArrayBuilder arrBuilder;
+    bool containsRegex = false;
+    document_path_support::visitAllValuesAtPath(input, localFieldPath, [&](const Value& nextValue) {
+        arrBuilder << nextValue;
+        if (!containsRegex && nextValue.getType() == BSONType::RegEx) {
+            containsRegex = true;
+        }
+    });
 
-    // Missing values are treated as null.
-    if (localFieldVal.missing()) {
-        localFieldVal = Value(BSONNULL);
+    if (arrBuilder.arrSize() == 0) {
+        // Missing values are treated as null.
+        arrBuilder << BSONNULL;
     }
 
+    const auto localFieldListSize = arrBuilder.arrSize();
+    const auto localFieldList = arrBuilder.arr();
+
     // We construct a query of one of the following forms, depending on the contents of
-    // 'localFieldVal'.
+    // 'localFieldList'.
     //
-    //   {$and: [{<foreignFieldName>: {$eq: <localFieldVal>}}, <additionalFilter>]}
-    //     if 'localFieldVal' isn't an array value.
+    //   {$and: [{<foreignFieldName>: {$eq: <localFieldList[0]>}}, <additionalFilter>]}
+    //     if 'localFieldList' contains a single element.
     //
     //   {$and: [{<foreignFieldName>: {$in: [<value>, <value>, ...]}}, <additionalFilter>]}
-    //     if 'localFieldVal' is an array value but doesn't contain any elements that are regular
-    //     expressions.
+    //     if 'localFieldList' contains more than one element but doesn't contain any that are
+    //     regular expressions.
     //
     //   {$and: [{$or: [{<foreignFieldName>: {$eq: <value>}},
     //                  {<foreignFieldName>: {$eq: <value>}}, ...]},
     //           <additionalFilter>]}
-    //     if 'localFieldVal' is an array value and it contains at least one element that is a
-    //     regular expression.
+    //     if 'localFieldList' contains more than one element and it contains at least one element
+    //     that is a regular expression.
 
     // We wrap the query in a $match so that it can be parsed into a DocumentSourceMatch when
     // constructing a pipeline to execute.
@@ -313,31 +483,27 @@ BSONObj DocumentSourceLookUp::makeMatchStageFromInput(const Document& input,
     BSONArrayBuilder andObj(query.subarrayStart("$and"));
     BSONObjBuilder joiningObj(andObj.subobjStart());
 
-    if (localFieldVal.isArray()) {
+    if (localFieldListSize > 1) {
         // A $lookup on an array value corresponds to finding documents in the foreign collection
         // that have a value of any of the elements in the array value, rather than finding
         // documents that have a value equal to the entire array value. These semantics are
         // automatically provided to us by using the $in query operator.
-        const vector<Value>& localArray = localFieldVal.getArray();
-        const bool containsRegex = std::any_of(
-            localArray.begin(), localArray.end(), [](Value val) { return val.getType() == RegEx; });
-
         if (containsRegex) {
             // A regular expression inside the $in query operator will perform pattern matching on
             // any string values. Since we want regular expressions to only match other RegEx types,
             // we write the query as a $or of equality comparisons instead.
-            BSONObj orQuery = buildEqualityOrQuery(foreignFieldName, localFieldVal.getArray());
+            BSONObj orQuery = buildEqualityOrQuery(foreignFieldName, localFieldList);
             joiningObj.appendElements(orQuery);
         } else {
-            // { <foreignFieldName> : { "$in" : <localFieldVal> } }
+            // { <foreignFieldName> : { "$in" : <localFieldList> } }
             BSONObjBuilder subObj(joiningObj.subobjStart(foreignFieldName));
-            subObj << "$in" << localFieldVal;
+            subObj << "$in" << localFieldList;
             subObj.doneFast();
         }
     } else {
-        // { <foreignFieldName> : { "$eq" : <localFieldVal> } }
+        // { <foreignFieldName> : { "$eq" : <localFieldList[0]> } }
         BSONObjBuilder subObj(joiningObj.subobjStart(foreignFieldName));
-        subObj << "$eq" << localFieldVal;
+        subObj << "$eq" << localFieldList[0];
         subObj.doneFast();
     }
 
@@ -367,12 +533,24 @@ DocumentSource::GetNextResult DocumentSourceLookUp::unwindResult() {
 
         _input = nextInput.releaseDocument();
 
-        BSONObj filter = _additionalFilter.value_or(BSONObj());
-        auto matchStage =
-            makeMatchStageFromInput(*_input, _localField, _foreignFieldFieldName, filter);
-        // We've already allocated space for the trailing $match stage in '_fromPipeline'.
-        _fromPipeline.back() = matchStage;
-        _pipeline = uassertStatusOK(_mongod->makePipeline(_fromPipeline, _fromExpCtx));
+        if (!wasConstructedWithPipelineSyntax()) {
+            BSONObj filter = _additionalFilter.value_or(BSONObj());
+            auto matchStage =
+                makeMatchStageFromInput(*_input, *_localField, _foreignField->fullPath(), filter);
+            // We've already allocated space for the trailing $match stage in '_resolvedPipeline'.
+            _resolvedPipeline.back() = matchStage;
+        }
+
+        if (_pipeline) {
+            _pipeline->dispose(pExpCtx->opCtx);
+        }
+
+        _pipeline = buildPipeline(*_input);
+
+        // The $lookup stage takes responsibility for disposing of its Pipeline, since it will
+        // potentially be used by multiple OperationContexts, and the $lookup stage is part of an
+        // outer Pipeline that will propagate dispose() calls before being destroyed.
+        _pipeline.get_deleter().dismissDisposal();
 
         _cursorIndex = 0;
         _nextValue = _pipeline->getNext();
@@ -407,14 +585,66 @@ DocumentSource::GetNextResult DocumentSourceLookUp::unwindResult() {
     return output.freeze();
 }
 
-void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array, bool explain) const {
-    MutableDocument output(DOC(
-        getSourceName() << DOC("from" << _fromNs.coll() << "as" << _as.fullPath() << "localField"
-                                      << _localField.fullPath()
-                                      << "foreignField"
-                                      << _foreignField.fullPath())));
+void DocumentSourceLookUp::copyVariablesToExpCtx(const Variables& vars,
+                                                 const VariablesParseState& vps,
+                                                 ExpressionContext* expCtx) {
+    expCtx->variables = vars;
+    expCtx->variablesParseState = vps.copyWith(expCtx->variables.useIdGenerator());
+}
+
+void DocumentSourceLookUp::resolveLetVariables(const Document& localDoc, Variables* variables) {
+    invariant(variables);
+
+    for (auto& letVar : _letVariables) {
+        auto value = letVar.expression->evaluate(localDoc);
+        variables->setConstantValue(letVar.id, value);
+    }
+}
+
+void DocumentSourceLookUp::initializeIntrospectionPipeline() {
+    copyVariablesToExpCtx(_variables, _variablesParseState, _fromExpCtx.get());
+    _parsedIntrospectionPipeline = uassertStatusOK(Pipeline::parse(_resolvedPipeline, _fromExpCtx));
+
+    auto& sources = _parsedIntrospectionPipeline->getSources();
+
+    // Ensure that the pipeline does not contain a $changeStream stage. This check will be
+    // performed recursively on all sub-pipelines.
+    uassert(ErrorCodes::IllegalOperation,
+            "$changeStream is not allowed within a $lookup foreign pipeline",
+            sources.empty() || !sources.front()->constraints().isChangeStreamStage());
+}
+
+void DocumentSourceLookUp::serializeToArray(
+    std::vector<Value>& array, boost::optional<ExplainOptions::Verbosity> explain) const {
+    Document doc;
+    if (wasConstructedWithPipelineSyntax()) {
+        MutableDocument exprList;
+        for (auto letVar : _letVariables) {
+            exprList.addField(letVar.name,
+                              letVar.expression->serialize(static_cast<bool>(explain)));
+        }
+
+        auto pipeline = _userPipeline;
+        if (_additionalFilter) {
+            pipeline.push_back(BSON("$match" << *_additionalFilter));
+        }
+
+        doc = Document{{getSourceName(),
+                        Document{{"from", _fromNs.coll()},
+                                 {"as", _as.fullPath()},
+                                 {"let", exprList.freeze()},
+                                 {"pipeline", pipeline}}}};
+    } else {
+        doc = Document{{getSourceName(),
+                        {Document{{"from", _fromNs.coll()},
+                                  {"as", _as.fullPath()},
+                                  {"localField", _localField->fullPath()},
+                                  {"foreignField", _foreignField->fullPath()}}}}};
+    }
+
+    MutableDocument output(doc);
     if (explain) {
-        if (_handlingUnwind) {
+        if (_unwindSrc) {
             const boost::optional<FieldPath> indexPath = _unwindSrc->indexPath();
             output[getSourceName()]["unwinding"] =
                 Value(DOC("preserveNullAndEmptyArrays"
@@ -423,24 +653,24 @@ void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array, bool expl
                           << (indexPath ? Value(indexPath->fullPath()) : Value())));
         }
 
-        if (_matchSrc) {
+        // Only add _matchSrc for explain when $lookup was constructed with localField/foreignField
+        // syntax. For pipeline sytax, _matchSrc will be included as part of the pipeline
+        // definition.
+        if (!wasConstructedWithPipelineSyntax() && _additionalFilter) {
             // Our output does not have to be parseable, so include a "matching" field with the
             // descended match expression.
-            output[getSourceName()]["matching"] =
-                Value(DocumentSourceMatch::descendMatchOnPath(
-                          _matchSrc->getMatchExpression(), _as.fullPath(), pExpCtx)
-                          ->getQuery());
+            output[getSourceName()]["matching"] = Value(*_additionalFilter);
         }
 
         array.push_back(Value(output.freeze()));
     } else {
         array.push_back(Value(output.freeze()));
 
-        if (_handlingUnwind) {
+        if (_unwindSrc) {
             _unwindSrc->serializeToArray(array);
         }
 
-        if (_matchSrc) {
+        if (!wasConstructedWithPipelineSyntax() && _matchSrc) {
             // '_matchSrc' tracks the originally specified $match. We descend upon the $match in the
             // first call to getNext(), at which point we are confident that we no longer need to
             // serialize the $lookup again.
@@ -450,60 +680,104 @@ void DocumentSourceLookUp::serializeToArray(std::vector<Value>& array, bool expl
 }
 
 DocumentSource::GetDepsReturn DocumentSourceLookUp::getDependencies(DepsTracker* deps) const {
-    deps->fields.insert(_localField.fullPath());
+    if (wasConstructedWithPipelineSyntax()) {
+        // We will use the introspection pipeline which we prebuilt during construction.
+        invariant(_parsedIntrospectionPipeline);
+
+        DepsTracker subDeps(deps->getMetadataAvailable());
+
+        // Get the subpipeline dependencies. Subpipeline stages may reference both 'let' variables
+        // declared by this $lookup and variables declared externally.
+        for (auto&& source : _parsedIntrospectionPipeline->getSources()) {
+            source->getDependencies(&subDeps);
+        }
+
+        // Add the 'let' dependencies to the tracker. Because the caller is only interested in
+        // references to external variables, filter out any subpipeline references to 'let'
+        // variables declared by this $lookup.
+        for (auto&& letVar : _letVariables) {
+            letVar.expression->addDependencies(deps);
+            subDeps.vars.erase(letVar.id);
+        }
+
+        // Add sub-pipeline variable dependencies. Do not add field dependencies, since these refer
+        // to the fields from the foreign collection rather than the local collection.
+        deps->vars.insert(subDeps.vars.begin(), subDeps.vars.end());
+    } else {
+        deps->fields.insert(_localField->fullPath());
+    }
     return SEE_NEXT;
 }
 
-void DocumentSourceLookUp::doInjectExpressionContext() {
-    auto it = pExpCtx->resolvedNamespaces.find(_fromNs.coll());
-    invariant(it != pExpCtx->resolvedNamespaces.end());
-    const auto& resolvedNamespace = it->second;
-    _fromExpCtx = pExpCtx->copyWith(resolvedNamespace.ns);
-    _fromPipeline = resolvedNamespace.pipeline;
-
-    // We append an additional BSONObj to '_fromPipeline' as a placeholder for the $match stage
-    // we'll eventually construct from the input document.
-    _fromPipeline.reserve(_fromPipeline.size() + 1);
-    _fromPipeline.push_back(BSONObj());
-}
-
-void DocumentSourceLookUp::doDetachFromOperationContext() {
+void DocumentSourceLookUp::detachFromOperationContext() {
     if (_pipeline) {
         // We have a pipeline we're going to be executing across multiple calls to getNext(), so we
         // use Pipeline::detachFromOperationContext() to take care of updating '_fromExpCtx->opCtx'.
         _pipeline->detachFromOperationContext();
         invariant(_fromExpCtx->opCtx == nullptr);
-    } else {
+    } else if (_fromExpCtx) {
         _fromExpCtx->opCtx = nullptr;
     }
 }
 
-void DocumentSourceLookUp::doReattachToOperationContext(OperationContext* opCtx) {
+void DocumentSourceLookUp::reattachToOperationContext(OperationContext* opCtx) {
     if (_pipeline) {
         // We have a pipeline we're going to be executing across multiple calls to getNext(), so we
         // use Pipeline::reattachToOperationContext() to take care of updating '_fromExpCtx->opCtx'.
         _pipeline->reattachToOperationContext(opCtx);
         invariant(_fromExpCtx->opCtx == opCtx);
-    } else {
+    } else if (_fromExpCtx) {
         _fromExpCtx->opCtx = opCtx;
     }
 }
 
 intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
     BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx) {
-    uassert(4569, "the $lookup specification must be an Object", elem.type() == Object);
+    uassert(ErrorCodes::FailedToParse,
+            "the $lookup specification must be an Object",
+            elem.type() == BSONType::Object);
 
     NamespaceString fromNs;
     std::string as;
+
     std::string localField;
     std::string foreignField;
 
+    BSONObj letVariables;
+    std::vector<BSONObj> pipeline;
+    bool hasPipeline = false;
+    bool hasLet = false;
+
     for (auto&& argument : elem.Obj()) {
-        uassert(4570,
-                str::stream() << "arguments to $lookup must be strings, " << argument << " is type "
-                              << argument.type(),
-                argument.type() == String);
         const auto argName = argument.fieldNameStringData();
+
+        if (argName == "pipeline") {
+            auto result = AggregationRequest::parsePipelineFromBSON(argument);
+            if (!result.isOK()) {
+                uasserted(ErrorCodes::FailedToParse,
+                          str::stream() << "invalid $lookup pipeline definition: "
+                                        << result.getStatus().toString());
+            }
+            pipeline = std::move(result.getValue());
+            hasPipeline = true;
+            continue;
+        }
+
+        if (argName == "let") {
+            uassert(ErrorCodes::FailedToParse,
+                    str::stream() << "$lookup argument '" << argument
+                                  << "' must be an object, is type "
+                                  << argument.type(),
+                    argument.type() == BSONType::Object);
+            letVariables = argument.Obj();
+            hasLet = true;
+            continue;
+        }
+
+        uassert(ErrorCodes::FailedToParse,
+                str::stream() << "$lookup argument '" << argument << "' must be a string, is type "
+                              << argument.type(),
+                argument.type() == BSONType::String);
 
         if (argName == "from") {
             fromNs = NamespaceString(pExpCtx->ns.db().toString() + '.' + argument.String());
@@ -514,16 +788,39 @@ intrusive_ptr<DocumentSource> DocumentSourceLookUp::createFromBson(
         } else if (argName == "foreignField") {
             foreignField = argument.String();
         } else {
-            uasserted(4571,
+            uasserted(ErrorCodes::FailedToParse,
                       str::stream() << "unknown argument to $lookup: " << argument.fieldName());
         }
     }
 
-    uassert(4572,
-            "need to specify fields from, as, localField, and foreignField for a $lookup",
-            !fromNs.ns().empty() && !as.empty() && !localField.empty() && !foreignField.empty());
+    uassert(
+        ErrorCodes::FailedToParse, "must specify 'from' field for a $lookup", !fromNs.ns().empty());
+    uassert(ErrorCodes::FailedToParse, "must specify 'as' field for a $lookup", !as.empty());
 
-    return new DocumentSourceLookUp(
-        std::move(fromNs), std::move(as), std::move(localField), std::move(foreignField), pExpCtx);
+    if (hasPipeline) {
+        uassert(ErrorCodes::FailedToParse,
+                "$lookup with 'pipeline' may not specify 'localField' or 'foreignField'",
+                localField.empty() && foreignField.empty());
+
+        return new DocumentSourceLookUp(std::move(fromNs),
+                                        std::move(as),
+                                        std::move(pipeline),
+                                        std::move(letVariables),
+                                        pExpCtx);
+    } else {
+        uassert(ErrorCodes::FailedToParse,
+                "$lookup requires either 'pipeline' or both 'localField' and 'foreignField' to be "
+                "specified",
+                !localField.empty() && !foreignField.empty());
+        uassert(ErrorCodes::FailedToParse,
+                "$lookup with a 'let' argument must also specify 'pipeline'",
+                !hasLet);
+
+        return new DocumentSourceLookUp(std::move(fromNs),
+                                        std::move(as),
+                                        std::move(localField),
+                                        std::move(foreignField),
+                                        pExpCtx);
+    }
 }
 }

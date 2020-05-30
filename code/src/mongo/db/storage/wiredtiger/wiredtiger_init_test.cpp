@@ -31,6 +31,8 @@
 
 #include "mongo/db/json.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/service_context_test_fixture.h"
+#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_global_options.h"
@@ -42,32 +44,20 @@ namespace {
 
 using namespace mongo;
 
-class WiredTigerFactoryTest : public mongo::unittest::Test {
+class WiredTigerFactoryTest : public ServiceContextTest {
 private:
     virtual void setUp() {
         ServiceContext* globalEnv = getGlobalServiceContext();
         ASSERT_TRUE(globalEnv);
-        ASSERT_TRUE(getGlobalServiceContext()->isRegisteredStorageEngine(kWiredTigerEngineName));
-        std::unique_ptr<StorageFactoriesIterator> sfi(
-            getGlobalServiceContext()->makeStorageFactoriesIterator());
-        ASSERT_TRUE(sfi);
-        bool found = false;
-        while (sfi->more()) {
-            const StorageEngine::Factory* currentFactory = sfi->next();
-            if (currentFactory->getCanonicalName() == kWiredTigerEngineName) {
-                found = true;
-                factory = currentFactory;
-                break;
-            }
-            found = true;
-        }
-        ASSERT_TRUE(found);
+        ASSERT_TRUE(isRegisteredStorageEngine(globalEnv, kWiredTigerEngineName));
+        factory = getFactoryForStorageEngine(globalEnv, kWiredTigerEngineName);
+        ASSERT_TRUE(factory);
         _oldOptions = wiredTigerGlobalOptions;
     }
 
     virtual void tearDown() {
         wiredTigerGlobalOptions = _oldOptions;
-        factory = NULL;
+        factory = nullptr;
     }
 
     WiredTigerGlobalOptions _oldOptions;

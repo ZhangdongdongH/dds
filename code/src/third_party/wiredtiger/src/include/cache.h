@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -7,12 +7,16 @@
  */
 
 /*
+ * Helper: in order to read without any calls to eviction, we have to ignore
+ * the cache size and disable splits.
+ */
+#define	WT_READ_NO_EVICT	(WT_READ_IGNORE_CACHE_SIZE | WT_READ_NO_SPLIT)
+
+/*
  * Tuning constants: I hesitate to call this tuning, but we want to review some
  * number of pages from each file's in-memory tree for each page we evict.
  */
-#define	WT_EVICT_INT_SKEW  (1<<20)	/* Prefer leaf pages over internal
-					   pages by this many increments of the
-					   read generation. */
+#define	WT_EVICT_MAX_TREES	1000	/* Maximum walk points */
 #define	WT_EVICT_WALK_BASE	300	/* Pages tracked across file visits */
 #define	WT_EVICT_WALK_INCR	100	/* Pages added each walk */
 
@@ -50,6 +54,10 @@ typedef enum __wt_cache_op {
 	WT_SYNC_WRITE_LEAVES
 } WT_CACHE_OP;
 
+#define	WT_LAS_NUM_SESSIONS	5
+#define	WT_LAS_SWEEP_ENTRIES	(20 * WT_THOUSAND)
+#define	WT_LAS_SWEEP_SEC	2
+
 /*
  * WiredTiger cache structure.
  */
@@ -66,8 +74,7 @@ struct __wt_cache {
 	uint64_t bytes_dirty_leaf;
 	uint64_t pages_dirty_leaf;
 	uint64_t bytes_evict;		/* Bytes/pages discarded by eviction */
-	volatile uint64_t pages_evict;
-	uint64_t pages_evicted;		/* Pages evicted during a pass */
+	uint64_t pages_evicted;
 	uint64_t bytes_image;		/* Bytes of disk images */
 	uint64_t bytes_inmem;		/* Bytes/pages in memory */
 	uint64_t pages_inmem;
@@ -75,15 +82,18 @@ struct __wt_cache {
 	uint64_t bytes_read;		/* Bytes read into memory */
 	uint64_t bytes_written;
 
+	uint64_t bytes_lookaside;	/* Lookaside bytes inmem */
+
+	volatile uint64_t eviction_progress;	/* Eviction progress count */
+	uint64_t last_eviction_progress;/* Tracked eviction progress */
+
 	uint64_t app_waits;		/* User threads waited for cache */
 	uint64_t app_evicts;		/* Pages evicted by user threads */
 	uint64_t server_evicts;		/* Pages evicted by server thread */
 	uint64_t worker_evicts;		/* Pages evicted by worker threads */
 
 	uint64_t evict_max_page_size;	/* Largest page seen at eviction */
-#ifdef	HAVE_DIAGNOSTIC
-	struct timespec stuck_ts;	/* Stuck timestamp */
-#endif
+	struct timespec stuck_time;	/* Stuck time */
 
 	/*
 	 * Read information.
@@ -99,18 +109,34 @@ struct __wt_cache {
 	WT_CONDVAR *evict_cond;		/* Eviction server condition */
 	WT_SPINLOCK evict_walk_lock;	/* Eviction walk location */
 
-	u_int eviction_dirty_target;    /* Percent to allow dirty */
-	u_int eviction_dirty_trigger;	/* Percent to trigger dirty eviction */
-	u_int eviction_trigger;		/* Percent to trigger eviction */
-	u_int eviction_target;		/* Percent to end eviction */
+	/*
+	 * Eviction threshold percentages use double type to allow for
+	 * specifying percentages less than one.
+	 */
+	double eviction_dirty_target;	/* Percent to allow dirty */
+	double eviction_dirty_trigger;	/* Percent to trigger dirty eviction */
+	double eviction_trigger;	/* Percent to trigger eviction */
+	double eviction_target;		/* Percent to end eviction */
 
-	u_int eviction_checkpoint_target;/* Percent to reduce dirty
+	double eviction_checkpoint_target;/* Percent to reduce dirty
 					   to during checkpoint scrubs */
-	double eviction_scrub_limit;	/* Percent of cache to trigger
-					   dirty eviction during checkpoint
-					   scrubs */
+	double eviction_scrub_target;	/* Current scrub target */
 
 	u_int overhead_pct;	        /* Cache percent adjustment */
+	uint64_t cache_max_wait_us;	/* Maximum time an operation waits for
+					 * space in cache */
+
+	/*
+	 * Eviction thread tuning information.
+	 */
+	uint32_t evict_tune_datapts_needed;         /* Data needed to tune */
+	struct timespec evict_tune_last_action_time;/* Time of last action */
+	struct timespec evict_tune_last_time;	    /* Time of last check */
+	uint32_t evict_tune_num_points;	            /* Number of values tried */
+	uint64_t evict_tune_progress_last;	    /* Progress counter */
+	uint64_t evict_tune_progress_rate_max;	    /* Max progress rate */
+	bool evict_tune_stable;	                    /* Are we stable? */
+	uint32_t evict_tune_workers_best;           /* Best performing value */
 
 	/*
 	 * Pass interrupt counter.
@@ -122,7 +148,7 @@ struct __wt_cache {
 	 */
 	WT_SPINLOCK evict_pass_lock;	/* Eviction pass lock */
 	WT_SESSION_IMPL *walk_session;	/* Eviction pass session */
-	WT_DATA_HANDLE *evict_file_next;/* LRU next file to search */
+	WT_DATA_HANDLE *walk_tree;	/* LRU walk current tree */
 
 	WT_SPINLOCK evict_queue_lock;	/* Eviction current queue lock */
 	WT_EVICT_QUEUE evict_queues[WT_EVICT_QUEUE_MAX];
@@ -140,20 +166,62 @@ struct __wt_cache {
 #define	WT_EVICT_SCORE_BUMP	10
 #define	WT_EVICT_SCORE_CUTOFF	10
 #define	WT_EVICT_SCORE_MAX	100
-	uint32_t evict_aggressive_score;/* Score of how aggressive eviction
-					   should be about selecting eviction
-					   candidates. If eviction is
-					   struggling to make progress, this
-					   score rises (up to a maximum of
-					   100), at which point the cache is
-					   "stuck" and transaction will be
-					   rolled back. */
-	uint32_t evict_empty_score;	/* Score of how often LRU queues are
-					   empty on refill. This score varies
-					   between 0 (if the queue hasn't been
-					   empty for a long time) and 100 (if
-					   the queue has been empty the last 10
-					   times we filled up. */
+	/*
+	 * Score of how aggressive eviction should be about selecting eviction
+	 * candidates. If eviction is struggling to make progress, this score
+	 * rises (up to a maximum of 100), at which point the cache is "stuck"
+	 * and transaction will be rolled back.
+	 */
+	uint32_t evict_aggressive_score;
+
+	/*
+	 * Score of how often LRU queues are empty on refill. This score varies
+	 * between 0 (if the queue hasn't been empty for a long time) and 100
+	 * (if the queue has been empty the last 10 times we filled up.
+	 */
+	uint32_t evict_empty_score;
+
+	/*
+	 * Score of how much pressure storing historical versions is having on
+	 * eviction.  This score varies between 0, if reconciliation always
+	 * sees updates that are globally visible and hence can be discarded,
+	 * to 100 if no updates are globally visible.
+	 */
+	int32_t evict_lookaside_score;
+
+	/*
+	 * Shared lookaside lock, session and cursor, used by threads accessing
+	 * the lookaside table (other than eviction server and worker threads
+	 * and the sweep thread, all of which have their own lookaside cursors).
+	 */
+	WT_SPINLOCK	 las_lock;
+	WT_SESSION_IMPL *las_session[WT_LAS_NUM_SESSIONS];
+	bool las_session_inuse[WT_LAS_NUM_SESSIONS];
+
+	uint32_t las_fileid;            /* Lookaside table file ID */
+	uint64_t las_insert_count;      /* Count of inserts to lookaside */
+	uint64_t las_remove_count;      /* Count of removes from lookaside */
+	uint64_t las_pageid;		/* Lookaside table page ID counter */
+
+	bool las_reader;		/* Indicate an LAS reader to sweep */
+	WT_RWLOCK las_sweepwalk_lock;
+	WT_SPINLOCK las_sweep_lock;
+	WT_ITEM las_sweep_key;		/* Track sweep position. */
+	uint32_t las_sweep_dropmin;	/* Minimum btree ID in current set. */
+	uint8_t *las_sweep_dropmap;	/* Bitmap of dropped btree IDs. */
+	uint32_t las_sweep_dropmax;	/* Maximum btree ID in current set. */
+
+	uint32_t *las_dropped;		/* List of dropped btree IDs. */
+	size_t las_dropped_next;	/* Next index into drop list. */
+	size_t las_dropped_alloc;	/* Allocated size of drop list. */
+
+	/*
+	 * The "lookaside_activity" verbose messages are throttled to once per
+	 * checkpoint. To accomplish this we track the checkpoint generation
+	 * for the most recent read and write verbose messages.
+	 */
+	uint64_t las_verb_gen_read;
+	uint64_t las_verb_gen_write;
 
 	/*
 	 * Cache pool information.
@@ -172,22 +240,28 @@ struct __wt_cache {
 	/*
 	 * Flags.
 	 */
-#define	WT_CACHE_EVICT_CLEAN	  0x001 /* Evict clean pages */
-#define	WT_CACHE_EVICT_CLEAN_HARD 0x002 /* Clean % blocking app threads */
-#define	WT_CACHE_EVICT_DIRTY	  0x004 /* Evict dirty pages */
-#define	WT_CACHE_EVICT_DIRTY_HARD 0x008 /* Dirty % blocking app threads */
-#define	WT_CACHE_EVICT_SCRUB	  0x010 /* Scrub dirty pages */
-#define	WT_CACHE_EVICT_URGENT	  0x020 /* Pages are in the urgent queue */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CACHE_POOL_MANAGER	  0x1u	/* The active cache pool manager */
+#define	WT_CACHE_POOL_RUN	  0x2u	/* Cache pool thread running */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+	uint32_t pool_flags;		/* Cache pool flags */
+
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CACHE_EVICT_CLEAN	  0x01u	/* Evict clean pages */
+#define	WT_CACHE_EVICT_CLEAN_HARD 0x02u	/* Clean % blocking app threads */
+#define	WT_CACHE_EVICT_DIRTY	  0x04u	/* Evict dirty pages */
+#define	WT_CACHE_EVICT_DIRTY_HARD 0x08u	/* Dirty % blocking app threads */
+#define	WT_CACHE_EVICT_LOOKASIDE  0x10u	/* Try lookaside eviction */
+#define	WT_CACHE_EVICT_SCRUB	  0x20u	/* Scrub dirty pages */
+#define	WT_CACHE_EVICT_URGENT	  0x40u	/* Pages are in the urgent queue */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 #define	WT_CACHE_EVICT_ALL	(WT_CACHE_EVICT_CLEAN | WT_CACHE_EVICT_DIRTY)
-#define	WT_CACHE_EVICT_MASK	  0x0FF
-#define	WT_CACHE_POOL_MANAGER	  0x100 /* The active cache pool manager */
-#define	WT_CACHE_POOL_RUN	  0x200 /* Cache pool thread running */
 	uint32_t flags;
 };
 
-#define	WT_WITH_PASS_LOCK(session, ret, op) do {			\
+#define	WT_WITH_PASS_LOCK(session, op) do {				\
 	WT_ASSERT(session, !F_ISSET(session, WT_SESSION_LOCKED_PASS));	\
-	WT_WITH_LOCK(session, ret,					\
+	WT_WITH_LOCK_WAIT(session,					\
 	    &cache->evict_pass_lock, WT_SESSION_LOCKED_PASS, op);	\
 } while (0)
 
@@ -209,6 +283,8 @@ struct __wt_cache_pool {
 
 	uint8_t pool_managed;		/* Cache pool has a manager thread */
 
-#define	WT_CACHE_POOL_ACTIVE	0x01	/* Cache pool is active */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CACHE_POOL_ACTIVE	0x1u	/* Cache pool is active */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint8_t flags;
 };

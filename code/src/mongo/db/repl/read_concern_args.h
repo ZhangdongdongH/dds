@@ -33,7 +33,10 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/json.h"
+#include "mongo/db/logical_time.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -42,25 +45,34 @@ class BSONObj;
 
 namespace repl {
 
-enum class ReadConcernLevel { kLocalReadConcern, kMajorityReadConcern, kLinearizableReadConcern };
-
 class ReadConcernArgs {
 public:
     static const std::string kReadConcernFieldName;
     static const std::string kAfterOpTimeFieldName;
+    static const std::string kAfterClusterTimeFieldName;
+    static const std::string kAtClusterTimeFieldName;
     static const std::string kLevelFieldName;
 
+    static const OperationContext::Decoration<ReadConcernArgs> get;
+
     ReadConcernArgs();
+
+    ReadConcernArgs(boost::optional<ReadConcernLevel> level);
+
     ReadConcernArgs(boost::optional<OpTime> opTime, boost::optional<ReadConcernLevel> level);
 
+    ReadConcernArgs(boost::optional<LogicalTime> clusterTime,
+                    boost::optional<ReadConcernLevel> level);
     /**
      * Format:
      * {
-     *    find: “coll”,
+     *    find: "coll"
      *    filter: <Query Object>,
      *    readConcern: { // optional
-     *      level: "[majority|local|linearizable]",
+     *      level: "[majority|local|linearizable|available|snapshot]",
      *      afterOpTime: { ts: <timestamp>, term: <NumberLong> },
+     *      afterClusterTime: <timestamp>,
+     *      atClusterTime: <timestamp>
      *    }
      * }
      */
@@ -76,24 +88,67 @@ public:
     Status initialize(const BSONElement& readConcernElem);
 
     /**
+     * Upconverts the readConcern level to 'snapshot', or returns a non-ok status if this
+     * readConcern cannot be upconverted.
+     */
+    Status upconvertReadConcernLevelToSnapshot();
+
+    /**
      * Appends level and afterOpTime.
      */
     void appendInfo(BSONObjBuilder* builder) const;
 
     /**
-     * Returns whether these arguments are 'empty' in the sense that no read concern has been
-     * requested.
+     * Returns true if any of clusterTime,  opTime or level arguments are set.
      */
     bool isEmpty() const;
 
+    /**
+     *  Returns default kLocalReadConcern if _level is not set.
+     */
     ReadConcernLevel getLevel() const;
-    OpTime getOpTime() const;
+
+    /**
+     *  Returns readConcernLevel before upconverting, or same as getLevel() if not upconverted.
+     */
+    ReadConcernLevel getOriginalLevel() const;
+
+    /**
+     * Checks whether _level is explicitly set.
+     */
+    bool hasLevel() const;
+
+    /**
+     * Returns the opTime. Deprecated: will be replaced with getArgsAfterClusterTime.
+     */
+    boost::optional<OpTime> getArgsOpTime() const;
+
+    boost::optional<LogicalTime> getArgsAfterClusterTime() const;
+
+    boost::optional<LogicalTime> getArgsAtClusterTime() const;
     BSONObj toBSON() const;
     std::string toString() const;
 
 private:
+    /**
+     *  Read data after the OpTime of an operation on this replica set. Deprecated.
+     *  The only user is for read-after-optime calls using the config server optime.
+     */
     boost::optional<OpTime> _opTime;
+    /**
+     *  Read data after cluster-wide cluster time.
+     */
+    boost::optional<LogicalTime> _afterClusterTime;
+    /**
+     * Read data at a particular cluster time.
+     */
+    boost::optional<LogicalTime> _atClusterTime;
     boost::optional<ReadConcernLevel> _level;
+
+    /**
+     * If the read concern was upconverted, the original read concern level.
+     */
+    boost::optional<ReadConcernLevel> _originalLevel;
 };
 
 }  // namespace repl

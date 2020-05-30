@@ -53,17 +53,22 @@ public:
     virtual void startup() override;
     virtual void shutdown() override;
     virtual void join() override;
-    virtual std::string getDiagnosticString() const override;
+    virtual void appendDiagnosticBSON(BSONObjBuilder* builder) const override;
     virtual Date_t now() override;
     virtual StatusWith<EventHandle> makeEvent() override;
     virtual void signalEvent(const EventHandle& event) override;
     virtual StatusWith<CallbackHandle> onEvent(const EventHandle& event,
                                                const CallbackFn& work) override;
     virtual void waitForEvent(const EventHandle& event) override;
+    virtual StatusWith<stdx::cv_status> waitForEvent(OperationContext* opCtx,
+                                                     const EventHandle& event,
+                                                     Date_t deadline) override;
     virtual StatusWith<CallbackHandle> scheduleWork(const CallbackFn& work) override;
     virtual StatusWith<CallbackHandle> scheduleWorkAt(Date_t when, const CallbackFn& work) override;
     virtual StatusWith<CallbackHandle> scheduleRemoteCommand(
-        const executor::RemoteCommandRequest& request, const RemoteCommandCallbackFn& cb) override;
+        const executor::RemoteCommandRequest& request,
+        const RemoteCommandCallbackFn& cb,
+        const transport::BatonHandle& baton = nullptr) override;
     virtual void cancel(const CallbackHandle& cbHandle) override;
     virtual void wait(const CallbackHandle& cbHandle) override;
     virtual void appendConnectionStats(executor::ConnectionPoolStats* stats) const override;

@@ -38,37 +38,36 @@ namespace mongo {
 using std::string;
 using std::stringstream;
 
-class CmdConnectionStatus : public Command {
+class CmdConnectionStatus : public BasicCommand {
 public:
-    CmdConnectionStatus() : Command("connectionStatus") {}
-    virtual bool slaveOk() const {
-        return true;
+    CmdConnectionStatus() : BasicCommand("connectionStatus") {}
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
+    bool requiresAuth() const override {
+        return false;
+    }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}  // No auth required
+                                       std::vector<Privilege>* out) const {}  // No auth required
 
-    void help(stringstream& h) const {
-        h << "Returns connection-specific information such as logged-in users and their roles";
+    std::string help() const override {
+        return "Returns connection-specific information such as logged-in users and their roles";
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const string&,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) {
         AuthorizationSession* authSession = AuthorizationSession::get(Client::getCurrent());
 
         bool showPrivileges;
         Status status =
             bsonExtractBooleanFieldWithDefault(cmdObj, "showPrivileges", false, &showPrivileges);
-        if (!status.isOK()) {
-            return appendCommandStatus(result, status);
-        }
+        uassertStatusOK(status);
 
         BSONObjBuilder authInfo(result.subobjStart("authInfo"));
         {

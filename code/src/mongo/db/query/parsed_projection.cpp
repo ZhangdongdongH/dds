@@ -28,9 +28,8 @@
 
 #include "mongo/db/query/parsed_projection.h"
 
-#include "mongo/db/query/query_request.h"
-
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/query/query_request.h"
 
 namespace mongo {
 
@@ -47,10 +46,10 @@ using std::string;
  * Returns a Status indicating how it's invalid otherwise.
  */
 // static
-Status ParsedProjection::make(const BSONObj& spec,
+Status ParsedProjection::make(OperationContext* opCtx,
+                              const BSONObj& spec,
                               const MatchExpression* const query,
-                              ParsedProjection** out,
-                              const ExtensionsCallback& extensionsCallback) {
+                              ParsedProjection** out) {
     // Whether we're including or excluding fields.
     enum class IncludeExclude { kUninitialized, kInclude, kExclude };
     IncludeExclude includeExclude = IncludeExclude::kUninitialized;
@@ -58,6 +57,7 @@ Status ParsedProjection::make(const BSONObj& spec,
     bool requiresDocument = false;
     bool hasIndexKeyProjection = false;
 
+    bool wantTextScore = false;
     bool wantGeoNearPoint = false;
     bool wantGeoNearDistance = false;
     bool wantSortKey = false;
@@ -128,10 +128,17 @@ Status ParsedProjection::make(const BSONObj& spec,
                 // is ok because the parsed MatchExpression is not used after being created. We are
                 // only parsing here in order to ensure that the elemMatch projection is valid.
                 //
-                // TODO: Is there a faster way of validating the elemMatchObj?
+                // Match expression extensions such as $text, $where, $geoNear, $near, and
+                // $nearSphere are not allowed in $elemMatch projections. $expr and $jsonSchema are
+                // not allowed because the matcher is not applied to the root of the document.
                 const CollatorInterface* collator = nullptr;
+                boost::intrusive_ptr<ExpressionContext> expCtx(
+                    new ExpressionContext(opCtx, collator));
                 StatusWithMatchExpression statusWithMatcher =
-                    MatchExpressionParser::parse(elemMatchObj, extensionsCallback, collator);
+                    MatchExpressionParser::parse(elemMatchObj,
+                                                 std::move(expCtx),
+                                                 ExtensionsCallbackNoop(),
+                                                 MatchExpressionParser::kBanAllSpecialFeatures);
                 if (!statusWithMatcher.isOK()) {
                     return statusWithMatcher.getStatus();
                 }
@@ -161,7 +168,9 @@ Status ParsedProjection::make(const BSONObj& spec,
                 }
 
                 // This clobbers everything else.
-                if (e2.valuestr() == QueryRequest::metaIndexKey) {
+                if (e2.valuestr() == QueryRequest::metaTextScore) {
+                    wantTextScore = true;
+                } else if (e2.valuestr() == QueryRequest::metaIndexKey) {
                     hasIndexKeyProjection = true;
                 } else if (e2.valuestr() == QueryRequest::metaGeoNearDistance) {
                     wantGeoNearDistance = true;
@@ -183,10 +192,8 @@ Status ParsedProjection::make(const BSONObj& spec,
         } else if (mongoutils::str::equals(elem.fieldName(), "_id") && !elem.trueValue()) {
             pp->_hasId = false;
         } else {
-            // Projections of dotted fields aren't covered.
-            if (mongoutils::str::contains(elem.fieldName(), '.')) {
-                requiresDocument = true;
-            }
+            pp->_hasDottedFieldPath = pp->_hasDottedFieldPath ||
+                elem.fieldNameStringData().find('.') != std::string::npos;
 
             if (elem.trueValue()) {
                 pp->_includedFields.push_back(elem.fieldNameStringData());
@@ -264,6 +271,7 @@ Status ParsedProjection::make(const BSONObj& spec,
     pp->_requiresDocument = requiresDocument;
 
     // Add meta-projections.
+    pp->_wantTextScore = wantTextScore;
     pp->_wantGeoNearPoint = wantGeoNearPoint;
     pp->_wantGeoNearDistance = wantGeoNearDistance;
     pp->_wantSortKey = wantSortKey;
@@ -382,7 +390,7 @@ bool ParsedProjection::_isPositionalOperator(const char* fieldName) {
 // static
 bool ParsedProjection::_hasPositionalOperatorMatch(const MatchExpression* const query,
                                                    const std::string& matchfield) {
-    if (query->isLogical()) {
+    if (query->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (unsigned int i = 0; i < query->numChildren(); ++i) {
             if (_hasPositionalOperatorMatch(query->getChild(i), matchfield)) {
                 return true;

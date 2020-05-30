@@ -45,20 +45,20 @@ namespace {
  *
  * Document will be empty if FTDC has never run.
  */
-class GetDiagnosticDataCommand final : public Command {
+class GetDiagnosticDataCommand final : public BasicCommand {
 public:
-    GetDiagnosticDataCommand() : Command("getDiagnosticData") {}
+    GetDiagnosticDataCommand() : BasicCommand("getDiagnosticData") {}
 
     bool adminOnly() const override {
         return true;
     }
 
-    void help(std::stringstream& help) const override {
-        help << "get latest diagnostic data collection snapshot";
+    std::string help() const override {
+        return "get latest diagnostic data collection snapshot";
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -67,7 +67,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
 
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::serverStatus)) {
@@ -88,15 +88,14 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& db,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
 
         result.append(
-            "data", FTDCController::get(txn->getServiceContext())->getMostRecentPeriodicDocument());
+            "data",
+            FTDCController::get(opCtx->getServiceContext())->getMostRecentPeriodicDocument());
 
         return true;
     }

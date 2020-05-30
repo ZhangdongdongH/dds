@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -15,9 +15,11 @@ static int usage(void);
 int
 util_loadtext(WT_SESSION *session, int argc, char *argv[])
 {
+	WT_DECL_RET;
 	int ch;
-	const char *uri;
+	char *uri;
 
+	uri = NULL;
 	while ((ch = __wt_getopt(progname, argc, argv, "f:")) != EOF)
 		switch (ch) {
 		case 'f':	/* input file */
@@ -35,10 +37,13 @@ util_loadtext(WT_SESSION *session, int argc, char *argv[])
 	/* The remaining argument is the uri. */
 	if (argc != 1)
 		return (usage());
-	if ((uri = util_name(session, *argv, "table")) == NULL)
+	if ((uri = util_uri(session, *argv, "table")) == NULL)
 		return (1);
 
-	return (text(session, uri));
+	ret = text(session, uri);
+
+	free(uri);
+	return (ret);
 }
 
 /*
@@ -61,7 +66,7 @@ text(WT_SESSION *session, const char *uri)
 	 */
 	if ((ret = session->open_cursor(
 	    session, uri, NULL, "append,overwrite", &cursor)) != 0)
-		return (util_err(session, ret, "%s: session.open", uri));
+		return (util_err(session, ret, "%s: session.open_cursor", uri));
 
 	/*
 	 * We're about to load strings, make sure the formats match.
@@ -69,13 +74,13 @@ text(WT_SESSION *session, const char *uri)
 	 * Row-store tables have key/value pairs, column-store tables only have
 	 * values.
 	 */
-	if (strcmp(cursor->value_format, "S") != 0 ||
-	    (strcmp(cursor->key_format, "S") != 0 &&
-	    strcmp(cursor->key_format, "r") != 0))
+	if (!WT_STREQ(cursor->value_format, "S") ||
+	    (!WT_STREQ(cursor->key_format, "S") &&
+	    !WT_STREQ(cursor->key_format, "r")))
 		return (util_err(session, EINVAL,
 		    "the loadtext command can only load objects configured "
 		    "for record number or string keys, and string values"));
-	readkey = strcmp(cursor->key_format, "r") != 0;
+	readkey = !WT_STREQ(cursor->key_format, "r");
 
 	/* Insert the records */
 	ret = insert(cursor, uri, readkey);
@@ -145,6 +150,8 @@ insert(WT_CURSOR *cursor, const char *name, bool readkey)
 			fflush(stdout);
 		}
 	}
+	free(key.mem);
+	free(value.mem);
 
 	if (verbose)
 		printf("\r\t%s: %" PRIu64 "\n", name, insert_count);

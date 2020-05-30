@@ -48,6 +48,7 @@
 #include "mongo/util/options_parser/option_description.h"
 #include "mongo/util/options_parser/option_section.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/text.h"
 
 namespace mongo {
 namespace optionenvironment {
@@ -341,6 +342,11 @@ Status YAMLNodeToValue(const YAML::Node& YAMLNode,
         return Status::OK();
     }
 
+    if (!YAMLNode.IsScalar() && !YAMLNode.IsNull()) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << "Scalar option '" << key << "' must be a single value");
+    }
+
     // Our YAML parser reads everything as a string, so we need to parse it ourselves.
     std::string stringVal = YAMLNode.Scalar();
     return stringToValue(stringVal, type, key, value);
@@ -416,7 +422,7 @@ Status addBoostVariablesToEnvironment(const po::variables_map& vm,
                 optionValue = Value(mapValue);
             }
 
-            environment->set(iterator->_dottedName, optionValue);
+            environment->set(iterator->_dottedName, optionValue).transitional_ignore();
         }
     }
     return Status::OK();
@@ -605,7 +611,7 @@ Status addConstraints(const OptionSection& options, Environment* dest) {
     std::vector<std::shared_ptr<Constraint>>::const_iterator citerator;
     for (citerator = constraints_vector.begin(); citerator != constraints_vector.end();
          citerator++) {
-        dest->addConstraint(citerator->get());
+        dest->addConstraint(citerator->get()).transitional_ignore();
     }
 
     return Status::OK();
@@ -717,7 +723,7 @@ Status OptionsParser::parseCommandLine(const OptionSection& options,
         }
     } catch (po::multiple_occurrences& e) {
         StringBuilder sb;
-        sb << "Error parsing command line:  Multiple occurrences of option \"--"
+        sb << "Error parsing command line:  Multiple occurrences of option \""
            << e.get_option_name() << "\"";
         return Status(ErrorCodes::BadValue, sb.str());
     } catch (po::error& e) {
@@ -896,9 +902,29 @@ Status OptionsParser::readConfigFile(const std::string& filename, std::string* c
         configVector.resize(nread);
     }
 
+    // Config files cannot have null bytes
+    if (end(configVector) != std::find(begin(configVector), end(configVector), '\0')) {
+
+#if defined(_WIN32)
+        // On Windows, it is common for files to be saved by Notepad as UTF-16 with a BOM so convert
+        // it for the user. If the file lacks a BOM, but is UTF-16 encoded we will fail rather then
+        // try to guess the file encoding.
+        const std::array<unsigned char, 2> UTF16LEBOM = {0xff, 0xfe};
+        if (configVector.size() >= UTF16LEBOM.size() &&
+            memcmp(configVector.data(), UTF16LEBOM.data(), UTF16LEBOM.size()) == 0) {
+            auto wstr = std::wstring(configVector.begin() + 2, configVector.end());
+            *contents = toUtf8String(wstr);
+            return Status::OK();
+        }
+#endif
+
+        return Status(
+            ErrorCodes::FailedToParse,
+            "Config file has null bytes, ensure the file is saved as UTF-8 and not UTF-16.");
+    }
+
     // Copy the vector contents into our result string
     *contents = std::string(configVector.begin(), configVector.end());
-
     return Status::OK();
 }
 
@@ -1115,22 +1141,9 @@ Status OptionsParser::run(const OptionSection& options,
             return ret;
         }
 
-        YAML::Node YAMLConfig;
-        ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+        ret = parseConfigFile(options, config_file, &configEnvironment);
         if (!ret.isOK()) {
             return ret;
-        }
-
-        if (isYAMLConfig(YAMLConfig)) {
-            ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
-        } else {
-            ret = parseINIConfigFile(options, config_file, &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
         }
     }
 
@@ -1183,6 +1196,57 @@ Status OptionsParser::run(const OptionSection& options,
     }
 
     return Status::OK();
+}
+
+Status OptionsParser::runConfigFile(
+    const OptionSection& options,
+    const std::string& config,
+    const std::map<std::string, std::string>& env,  // Unused, interface consistent with run()
+    Environment* configEnvironment) {
+    // Add the default values to our resulting environment
+    Status ret = addDefaultValues(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add values from the provided config file
+    ret = parseConfigFile(options, config, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add the constraints from our options to the result environment
+    ret = addConstraints(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    return ret;
+}
+
+Status OptionsParser::parseConfigFile(const OptionSection& options,
+                                      const std::string& config_file,
+                                      Environment* configEnvironment) {
+    YAML::Node YAMLConfig;
+    Status ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Check if YAML parsing was successful, if not try to read as INI
+    if (isYAMLConfig(YAMLConfig)) {
+        ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    } else {
+        ret = parseINIConfigFile(options, config_file, configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    }
+
+    return ret;
 }
 
 }  // namespace optionenvironment

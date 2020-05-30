@@ -36,48 +36,47 @@
 
 namespace mongo {
 
-class DocumentSourceGraphLookUp final : public DocumentSourceNeedsMongod {
+class DocumentSourceGraphLookUp final : public DocumentSource {
 public:
-    static std::unique_ptr<LiteParsedDocumentSourceOneForeignCollection> liteParse(
+    static std::unique_ptr<LiteParsedDocumentSourceForeignCollections> liteParse(
         const AggregationRequest& request, const BSONElement& spec);
 
     GetNextResult getNext() final;
     const char* getSourceName() const final;
-    void dispose() final;
     BSONObjSet getOutputSorts() final;
-    void serializeToArray(std::vector<Value>& array, bool explain = false) const final;
+    void serializeToArray(
+        std::vector<Value>& array,
+        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     /**
      * Returns the 'as' path, and possibly the fields modified by an absorbed $unwind.
      */
     GetModPathsReturn getModifiedPaths() const final;
 
-    bool canSwapWithMatch() const final {
-        return true;
-    }
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kNone,
+                                     HostTypeRequirement::kPrimaryShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kAllowed,
+                                     TransactionRequirement::kAllowed);
 
-    /**
-     * Attempts to combine with a subsequent $unwind stage, setting the internal '_unwind' field.
-     */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
+        constraints.canSwapWithMatch = true;
+        return constraints;
+    }
 
     GetDepsReturn getDependencies(DepsTracker* deps) const final {
         _startWith->addDependencies(deps);
         return SEE_NEXT;
     };
 
-    bool needsPrimaryShard() const final {
-        return true;
-    }
-
     void addInvolvedCollections(std::vector<NamespaceString>* collections) const final {
         collections->push_back(_from);
     }
 
-    void doDetachFromOperationContext() final;
+    void detachFromOperationContext() final;
 
-    void doReattachToOperationContext(OperationContext* opCtx) final;
+    void reattachToOperationContext(OperationContext* opCtx) final;
 
     static boost::intrusive_ptr<DocumentSourceGraphLookUp> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -95,7 +94,13 @@ public:
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
 protected:
-    void doInjectExpressionContext() final;
+    void doDispose() final;
+
+    /**
+     * Attempts to combine with a subsequent $unwind stage, setting the internal '_unwind' field.
+     */
+    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
+                                                     Pipeline::SourceContainer* container) final;
 
 private:
     DocumentSourceGraphLookUp(
@@ -110,7 +115,7 @@ private:
         boost::optional<long long> maxDepth,
         boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> unwindSrc);
 
-    Value serialize(bool explain = false) const final {
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final {
         // Should not be called; use serializeToArray instead.
         MONGO_UNREACHABLE;
     }
@@ -124,7 +129,7 @@ private:
      * Returns boost::none if no query is necessary, i.e., all values were retrieved from the cache.
      * Otherwise, returns a query object.
      */
-    boost::optional<BSONObj> makeMatchStageFromFrontier(BSONObjSet* cached);
+    boost::optional<BSONObj> makeMatchStageFromFrontier(DocumentUnorderedSet* cached);
 
     /**
      * If we have internalized a $unwind, getNext() dispatches to this function.
@@ -148,7 +153,7 @@ private:
      * Updates '_cache' with 'result' appropriately, given that 'result' was retrieved when querying
      * for 'queried'.
      */
-    void addToCache(const BSONObj& result, const ValueUnorderedSet& queried);
+    void addToCache(const Document& result, const ValueUnorderedSet& queried);
 
     /**
      * Assert that '_visited' and '_frontier' have not exceeded the maximum meory usage, and then
@@ -162,7 +167,7 @@ private:
      *
      * Returns whether '_visited' was updated, and thus, whether the search should recurse.
      */
-    bool addToVisitedAndFrontier(BSONObj result, long long depth);
+    bool addToVisitedAndFrontier(Document result, long long depth);
 
     // $graphLookup options.
     NamespaceString _from;
@@ -188,14 +193,12 @@ private:
     size_t _frontierUsageBytes = 0;
 
     // Only used during the breadth-first search, tracks the set of values on the current frontier.
-    // We use boost::optional to defer initialization until the ExpressionContext containing the
-    // correct comparator is injected.
-    boost::optional<ValueUnorderedSet> _frontier;
+    ValueUnorderedSet _frontier;
 
     // Tracks nodes that have been discovered for a given input. Keys are the '_id' value of the
     // document from the foreign collection, value is the document itself.  The keys are compared
     // using the simple collation.
-    ValueUnorderedMap<BSONObj> _visited;
+    ValueUnorderedMap<Document> _visited;
 
     // Caches query results to avoid repeating any work. This structure is maintained across calls
     // to getNext().
@@ -204,9 +207,6 @@ private:
     // When we have internalized a $unwind, we must keep track of the input document, since we will
     // need it for multiple "getNext()" calls.
     boost::optional<Document> _input;
-
-    // The variables that are in scope to be used by the '_startWith' expression.
-    std::unique_ptr<Variables> _variables;
 
     // Keep track of a $unwind that was absorbed into this stage.
     boost::optional<boost::intrusive_ptr<DocumentSourceUnwind>> _unwind;

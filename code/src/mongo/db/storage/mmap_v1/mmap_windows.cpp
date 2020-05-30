@@ -1,5 +1,3 @@
-// mmap_win.cpp
-
 /*    Copyright 2009 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
@@ -41,20 +39,22 @@
 #include "mongo/util/text.h"
 #include "mongo/util/timer.h"
 
-namespace mongo {
-
 using std::endl;
 using std::string;
 using std::vector;
 
-static size_t fetchMinOSPageSizeBytes() {
-    SYSTEM_INFO si;
-    GetSystemInfo(&si);
-    size_t minOSPageSizeBytes = si.dwPageSize;
-    minOSPageSizeBytesTest(minOSPageSizeBytes);
-    return minOSPageSizeBytes;
+std::size_t mongo::getMinOSPageSizeBytes() {
+    static const std::size_t cachedSize = [] {
+        SYSTEM_INFO si;
+        GetSystemInfo(&si);
+        std::size_t minOSPageSizeBytes = si.dwPageSize;
+        minOSPageSizeBytesTest(minOSPageSizeBytes);
+        return minOSPageSizeBytes;
+    }();
+    return cachedSize;
 }
-const size_t g_minOSPageSizeBytes = fetchMinOSPageSizeBytes();
+
+namespace mongo {
 
 // MapViewMutex
 //
@@ -148,8 +148,8 @@ static void* getNextMemoryMappedFileLocation(unsigned long long mmfSize) {
     return reinterpret_cast<void*>(static_cast<uintptr_t>(thisMemoryMappedFileLocation));
 }
 
-void MemoryMappedFile::close() {
-    LockMongoFilesShared::assertExclusivelyLocked();
+void MemoryMappedFile::close(OperationContext* opCtx) {
+    LockMongoFilesShared::assertExclusivelyLocked(opCtx);
 
     // Prevent flush and close from concurrently running
     stdx::lock_guard<stdx::mutex> lk(_flushMutex);
@@ -163,20 +163,29 @@ void MemoryMappedFile::close() {
     }
 
     views.clear();
+    totalMappedLength.fetchAndSubtract(len);
+    len = 0;
+
     if (maphandle)
         CloseHandle(maphandle);
     maphandle = 0;
-    if (fd)
+    if (fd) {
         CloseHandle(fd);
-    fd = 0;
-    destroyed();  // cleans up from the master list of mmaps
+        fd = 0;
+    }
+
+    destroyed(opCtx);  // cleans up from the master list of mmaps
 }
 
-unsigned long long mapped = 0;
+bool MemoryMappedFile::isClosed() {
+    return !len && !fd && !views.size();
+}
 
-void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) {
+void* MemoryMappedFile::map(OperationContext* opCtx,
+                            const char* filenameIn,
+                            unsigned long long& length) {
     verify(fd == 0 && len == 0);  // can't open more than once
-    setFilename(filenameIn);
+    setFilename(opCtx, filenameIn);
     FileAllocator::get()->allocateAsap(filenameIn, length);
     /* big hack here: Babble uses db names with colons.  doesn't seem to work on windows.  temporary
      * perhaps. */
@@ -185,7 +194,7 @@ void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) 
     filename[255] = 0;
     {
         size_t len = strlen(filename);
-        for (size_t i = len - 1; i >= 0; i--) {
+        for (int i = len - 1; i >= 0; i--) {
             if (filename[i] == '/' || filename[i] == '\\')
                 break;
 
@@ -215,14 +224,12 @@ void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) 
                          NULL);          // hTempl
         if (fd == INVALID_HANDLE_VALUE) {
             DWORD dosError = GetLastError();
-            log() << "CreateFileW for " << filename << " failed with "
-                  << errnoWithDescription(dosError) << " (file size is " << length << ")"
-                  << " in MemoryMappedFile::map" << endl;
+            severe() << "CreateFileW for " << filename << " failed with "
+                     << errnoWithDescription(dosError) << " (file size is " << length << ")"
+                     << " in MemoryMappedFile::map" << endl;
             return 0;
         }
     }
-
-    mapped += length;
 
     {
         DWORD flProtect = readOnly ? PAGE_READONLY : PAGE_READWRITE;
@@ -234,10 +241,11 @@ void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) 
                                        NULL /*lpName*/);
         if (maphandle == NULL) {
             DWORD dosError = GetLastError();
-            log() << "CreateFileMappingW for " << filename << " failed with "
-                  << errnoWithDescription(dosError) << " (file size is " << length << ")"
-                  << " in MemoryMappedFile::map" << endl;
-            close();
+            severe() << "CreateFileMappingW for " << filename << " failed with "
+                     << errnoWithDescription(dosError) << " (file size is " << length << ")"
+                     << " in MemoryMappedFile::map" << endl;
+            LockMongoFilesExclusive lock(opCtx);
+            close(opCtx);
             fassertFailed(16225);
         }
     }
@@ -283,12 +291,13 @@ void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) 
                 }
 #endif
 
-                log() << "MapViewOfFileEx for " << filename << " at address " << thisAddress
-                      << " failed with " << errnoWithDescription(dosError) << " (file size is "
-                      << length << ")"
-                      << " in MemoryMappedFile::map" << endl;
+                severe() << "MapViewOfFileEx for " << filename << " at address " << thisAddress
+                         << " failed with " << errnoWithDescription(dosError) << " (file size is "
+                         << length << ")"
+                         << " in MemoryMappedFile::map" << endl;
 
-                close();
+                LockMongoFilesExclusive lock(opCtx);
+                close(opCtx);
                 fassertFailed(16166);
             }
 
@@ -296,8 +305,12 @@ void* MemoryMappedFile::map(const char* filenameIn, unsigned long long& length) 
         }
     }
 
-    views.push_back(view);
+    // MemoryMappedFile successfully created, now update state.
     len = length;
+    totalMappedLength.fetchAndAdd(len);
+
+    views.push_back(view);
+
     return view;
 }
 
@@ -332,9 +345,9 @@ void* MemoryMappedFile::createPrivateMap() {
                 continue;
             }
 
-            log() << "MapViewOfFileEx for " << filename() << " failed with error "
-                  << errnoWithDescription(dosError) << " (file size is " << len << ")"
-                  << " in MemoryMappedFile::createPrivateMap" << endl;
+            severe() << "MapViewOfFileEx for " << filename() << " failed with error "
+                     << errnoWithDescription(dosError) << " (file size is " << len << ")"
+                     << " in MemoryMappedFile::createPrivateMap" << endl;
 
             fassertFailed(16167);
         }
@@ -346,8 +359,8 @@ void* MemoryMappedFile::createPrivateMap() {
     return privateMapAddress;
 }
 
-void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
-    LockMongoFilesExclusive lockMongoFiles;
+void* MemoryMappedFile::remapPrivateView(OperationContext* opCtx, void* oldPrivateAddr) {
+    LockMongoFilesExclusive lockMongoFiles(opCtx);
 
     privateViews.clearWritableBits(oldPrivateAddr, len);
 
@@ -355,8 +368,9 @@ void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
 
     if (!UnmapViewOfFile(oldPrivateAddr)) {
         DWORD dosError = GetLastError();
-        log() << "UnMapViewOfFile for " << filename() << " failed with error "
-              << errnoWithDescription(dosError) << " in MemoryMappedFile::remapPrivateView" << endl;
+        severe() << "UnMapViewOfFile for " << filename() << " failed with error "
+                 << errnoWithDescription(dosError) << " in MemoryMappedFile::remapPrivateView"
+                 << endl;
         fassertFailed(16168);
     }
 
@@ -369,9 +383,9 @@ void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
                         oldPrivateAddr);  // we want the same address we had before
     if (0 == newPrivateView) {
         DWORD dosError = GetLastError();
-        log() << "MapViewOfFileEx for " << filename() << " failed with error "
-              << errnoWithDescription(dosError) << " (file size is " << len << ")"
-              << " in MemoryMappedFile::remapPrivateView" << endl;
+        severe() << "MapViewOfFileEx for " << filename() << " failed with error "
+                 << errnoWithDescription(dosError) << " (file size is " << len << ")"
+                 << " in MemoryMappedFile::remapPrivateView" << endl;
     }
     fassert(16148, newPrivateView == oldPrivateAddr);
     return newPrivateView;
@@ -392,12 +406,12 @@ public:
           _filename(filename),
           _flushMutex(flushMutex) {}
 
-    void flush() {
+    void flush(OperationContext* opCtx) {
         if (!_view || !_fd)
             return;
 
         {
-            LockMongoFilesShared mmfilesLock;
+            LockMongoFilesShared mmfilesLock(opCtx);
 
             std::set<MongoFile*> mmfs = MongoFile::getAllFiles();
             std::set<MongoFile*>::const_iterator it = mmfs.find(_theFile);
@@ -461,11 +475,13 @@ void MemoryMappedFile::flush(bool sync) {
     uassert(13056, "Async flushing not supported on windows", sync);
     if (!views.empty()) {
         WindowsFlushable f(this, viewForFlushing(), fd, _uniqueId, filename(), _flushMutex);
-        f.flush();
+        auto opCtx = cc().getOperationContext();
+        invariant(opCtx);
+        f.flush(opCtx);
     }
 }
 
 MemoryMappedFile::Flushable* MemoryMappedFile::prepareFlush() {
     return new WindowsFlushable(this, viewForFlushing(), fd, _uniqueId, filename(), _flushMutex);
 }
-}
+}  // namespace mongo

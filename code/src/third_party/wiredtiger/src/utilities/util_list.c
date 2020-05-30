@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -18,11 +18,11 @@ util_list(WT_SESSION *session, int argc, char *argv[])
 {
 	WT_DECL_RET;
 	int ch;
+	char *uri;
 	bool cflag, vflag;
-	char *name;
 
 	cflag = vflag = false;
-	name = NULL;
+	uri = NULL;
 	while ((ch = __wt_getopt(progname, argc, argv, "cv")) != EOF)
 		switch (ch) {
 		case 'c':
@@ -42,17 +42,16 @@ util_list(WT_SESSION *session, int argc, char *argv[])
 	case 0:
 		break;
 	case 1:
-		if ((name = util_name(session, *argv, "table")) == NULL)
+		if ((uri = util_uri(session, *argv, "table")) == NULL)
 			return (1);
 		break;
 	default:
 		return (usage());
 	}
 
-	ret = list_print(session, name, cflag, vflag);
+	ret = list_print(session, uri, cflag, vflag);
 
-	free(name);
-
+	free(uri);
 	return (ret);
 }
 
@@ -99,12 +98,12 @@ list_get_allocsize(WT_SESSION *session, const char *key, size_t *allocsize)
  *	List the high-level objects in the database.
  */
 static int
-list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
+list_print(WT_SESSION *session, const char *uri, bool cflag, bool vflag)
 {
 	WT_CURSOR *cursor;
 	WT_DECL_RET;
-	bool found;
 	const char *key, *value;
+	bool found;
 
 	/* Open the metadata file. */
 	if ((ret = session->open_cursor(
@@ -120,7 +119,7 @@ list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
 		    ret, "%s: WT_SESSION.open_cursor", WT_METADATA_URI));
 	}
 
-	found = name == NULL;
+	found = uri == NULL;
 	while ((ret = cursor->next(cursor)) == 0) {
 		/* Get the key. */
 		if ((ret = cursor->get_key(cursor, &key)) != 0)
@@ -129,8 +128,8 @@ list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
 		/*
 		 * If a name is specified, only show objects that match.
 		 */
-		if (name != NULL) {
-			if (!WT_PREFIX_MATCH(key, name))
+		if (uri != NULL) {
+			if (!WT_PREFIX_MATCH(key, uri))
 				continue;
 			found = true;
 		}
@@ -140,8 +139,11 @@ list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
 		 * We don't normally say anything about the WiredTiger metadata
 		 * and lookaside tables, they're not application/user "objects"
 		 * in the database.  I'm making an exception for the checkpoint
-		 * and verbose options.
+		 * and verbose options. However, skip over the metadata system
+		 * information for anything except the verbose option.
 		 */
+		if (!vflag && WT_PREFIX_MATCH(key, WT_SYSTEM_PREFIX))
+			continue;
 		if (cflag || vflag ||
 		    (strcmp(key, WT_METADATA_URI) != 0 &&
 		    strcmp(key, WT_LAS_URI) != 0))
@@ -161,7 +163,7 @@ list_print(WT_SESSION *session, const char *name, bool cflag, bool vflag)
 	if (ret != WT_NOTFOUND)
 		return (util_cerr(cursor, "next", ret));
 	if (!found) {
-		fprintf(stderr, "%s: %s: not found\n", progname, name);
+		fprintf(stderr, "%s: %s: not found\n", progname, uri);
 		return (1);
 	}
 
@@ -176,8 +178,8 @@ static int
 list_print_checkpoint(WT_SESSION *session, const char *key)
 {
 	WT_BLOCK_CKPT ci;
-	WT_DECL_RET;
 	WT_CKPT *ckpt, *ckptbase;
+	WT_DECL_RET;
 	size_t allocsize, len;
 	time_t t;
 	uint64_t v;
@@ -232,7 +234,8 @@ list_print_checkpoint(WT_SESSION *session, const char *key)
 		if (ci.root_size != 0) {
 			printf("\t\t" "root offset: %" PRIuMAX
 			    " (0x%" PRIxMAX ")\n",
-			    (intmax_t)ci.root_offset, (intmax_t)ci.root_offset);
+			    (uintmax_t)ci.root_offset,
+			    (uintmax_t)ci.root_offset);
 			printf("\t\t" "root size: %" PRIu32
 			    " (0x%" PRIx32 ")\n",
 			    ci.root_size, ci.root_size);

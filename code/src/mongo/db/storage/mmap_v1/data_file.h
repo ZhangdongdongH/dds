@@ -182,9 +182,9 @@ public:
         return version.majorRaw() == 0;
     }
 
-    void init(OperationContext* txn, int fileno, int filelength, const char* filename);
+    void init(OperationContext* opCtx, int fileno, int filelength, const char* filename);
 
-    void checkUpgrade(OperationContext* txn);
+    void checkUpgrade(OperationContext* opCtx);
 
     bool isEmpty() const {
         return uninitialized() || (unusedLength == fileLength - HeaderSize - 16);
@@ -195,18 +195,26 @@ public:
 
 class DataFile {
 public:
-    DataFile(int fn) : _fileNo(fn), _mb(NULL) {}
+    DataFile(OperationContext* opCtx, int fn) : _fileNo(fn), mmf(opCtx), _mb(NULL) {}
 
     /** @return true if found and opened. if uninitialized (prealloc only) does not open. */
-    Status openExisting(const char* filename);
+    Status openExisting(OperationContext* opCtx, const char* filename);
 
     /** creates if DNE */
-    void open(OperationContext* txn,
+    void open(OperationContext* opCtx,
               const char* filename,
               int requestedDataSize = 0,
               bool preallocateOnly = false);
 
-    DiskLoc allocExtentArea(OperationContext* txn, int size);
+    /**
+     * Must be called before destruction.
+     */
+    void close(OperationContext* opCtx) {
+        LockMongoFilesExclusive lock(opCtx);
+        mmf.close(opCtx);
+    }
+
+    DiskLoc allocExtentArea(OperationContext* opCtx, int size);
 
     DataFileHeader* getHeader() {
         return header();

@@ -35,6 +35,7 @@
 #include "mongo/db/query/internal_plans.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/socket_utils.h"
 
 namespace mongo {
 namespace repl {
@@ -43,27 +44,25 @@ namespace {
 
 class OplogIteratorLocal : public OplogInterface::Iterator {
 public:
-    OplogIteratorLocal(OperationContext* txn, const std::string& collectionName);
+    OplogIteratorLocal(OperationContext* opCtx, const std::string& collectionName);
 
     StatusWith<Value> next() override;
 
 private:
-    ScopedTransaction _transaction;
     Lock::DBLock _dbLock;
     Lock::CollectionLock _collectionLock;
     OldClientContext _ctx;
-    std::unique_ptr<PlanExecutor> _exec;
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;
 };
 
-OplogIteratorLocal::OplogIteratorLocal(OperationContext* txn, const std::string& collectionName)
-    : _transaction(txn, MODE_IS),
-      _dbLock(txn->lockState(), nsToDatabase(collectionName), MODE_IS),
-      _collectionLock(txn->lockState(), collectionName, MODE_S),
-      _ctx(txn, collectionName),
-      _exec(InternalPlanner::collectionScan(txn,
+OplogIteratorLocal::OplogIteratorLocal(OperationContext* opCtx, const std::string& collectionName)
+    : _dbLock(opCtx, nsToDatabase(collectionName), MODE_IS),
+      _collectionLock(opCtx->lockState(), collectionName, MODE_S),
+      _ctx(opCtx, collectionName),
+      _exec(InternalPlanner::collectionScan(opCtx,
                                             collectionName,
-                                            _ctx.db()->getCollection(collectionName),
-                                            PlanExecutor::YIELD_MANUAL,
+                                            _ctx.db()->getCollection(opCtx, collectionName),
+                                            PlanExecutor::NO_YIELD,
                                             InternalPlanner::BACKWARD)) {}
 
 StatusWith<OplogInterface::Iterator::Value> OplogIteratorLocal::next() {
@@ -84,20 +83,25 @@ StatusWith<OplogInterface::Iterator::Value> OplogIteratorLocal::next() {
 
 }  // namespace
 
-OplogInterfaceLocal::OplogInterfaceLocal(OperationContext* txn, const std::string& collectionName)
-    : _txn(txn), _collectionName(collectionName) {
-    invariant(txn);
+OplogInterfaceLocal::OplogInterfaceLocal(OperationContext* opCtx, const std::string& collectionName)
+    : _opCtx(opCtx), _collectionName(collectionName) {
+    invariant(opCtx);
     invariant(!collectionName.empty());
 }
 
 std::string OplogInterfaceLocal::toString() const {
     return str::stream() << "LocalOplogInterface: "
                             "operation context: "
-                         << _txn->getOpID() << "; collection: " << _collectionName;
+                         << _opCtx->getOpID() << "; collection: " << _collectionName;
 }
 
 std::unique_ptr<OplogInterface::Iterator> OplogInterfaceLocal::makeIterator() const {
-    return std::unique_ptr<OplogInterface::Iterator>(new OplogIteratorLocal(_txn, _collectionName));
+    return std::unique_ptr<OplogInterface::Iterator>(
+        new OplogIteratorLocal(_opCtx, _collectionName));
+}
+
+HostAndPort OplogInterfaceLocal::hostAndPort() const {
+    return {getHostNameCached(), serverGlobalParams.port};
 }
 
 }  // namespace repl

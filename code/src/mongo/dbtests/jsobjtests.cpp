@@ -39,6 +39,7 @@
 #include "mongo/bson/bsonobj_comparator.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/bson/bson_helper.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
@@ -49,6 +50,7 @@
 #include "mongo/util/embedded_builder.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stringutils.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -162,7 +164,7 @@ FieldCompareResult compareDottedFieldNames(const string& l, const string& r, con
     verify(0);
     return SAME;  // will never get here
 }
-}
+}  // namespace mongo
 
 namespace JsobjTests {
 
@@ -1047,7 +1049,7 @@ public:
          * should fail with an assertion
          */
         nestedBSON = recursiveBSON(BSONObj::maxToStringRecursionDepth + 1);
-        ASSERT_THROWS(nestedBSON.toString(s, false, true), UserException);
+        ASSERT_THROWS(nestedBSON.toString(s, false, true), AssertionException);
     }
 };
 
@@ -1543,18 +1545,18 @@ class LabelishOr : public LabelBase {
                                                 << "p")));
     }
     BSONObj actual() {
-        return OR(BSON("a" << GT << 1 << LTE << "x"),
-                  BSON("b" << NE << 1 << NE << "f" << NE << 22.3),
-                  BSON("x"
-                       << "p"));
+        return BSON(OR(BSON("a" << GT << 1 << LTE << "x"),
+                       BSON("b" << NE << 1 << NE << "f" << NE << 22.3),
+                       BSON("x"
+                            << "p")));
     }
 };
 
 class Unallowed {
 public:
     void run() {
-        ASSERT_THROWS(BSON(GT << 4), MsgAssertionException);
-        ASSERT_THROWS(BSON("a" << 1 << GT << 4), MsgAssertionException);
+        ASSERT_THROWS(BSON(GT << 4), AssertionException);
+        ASSERT_THROWS(BSON("a" << 1 << GT << 4), AssertionException);
     }
 };
 
@@ -2037,9 +2039,9 @@ public:
     }
 
     void good(BSONObj o) {
-        if (o.okForStorageAsRoot())
+        if (o.storageValidEmbedded().isOK())
             return;
-        throw UserException(12528, (string) "should be ok for storage:" + o.toString());
+        uasserted(12528, (string) "should be ok for storage:" + o.toString());
     }
 
     void bad(string s) {
@@ -2047,9 +2049,9 @@ public:
     }
 
     void bad(BSONObj o) {
-        if (!o.okForStorageAsRoot())
+        if (!o.storageValidEmbedded().isOK())
             return;
-        throw UserException(12529, (string) "should NOT be ok for storage:" + o.toString());
+        uasserted(12529, (string) "should NOT be ok for storage:" + o.toString());
     }
 
     void run() {
@@ -2057,10 +2059,6 @@ public:
         good("{}");
         good("{x:1}");
         good("{x:{a:2}}");
-
-        // no dots allowed
-        bad("{'x.y':1}");
-        bad("{'x\\.y':1}");
 
         // Check for $
         bad("{x:{'$a':2}}");
@@ -2071,7 +2069,6 @@ public:
 
         // Queries are not ok
         bad("{num: {$gt: 1}}");
-        bad("{_id: {$regex:'test'}}");
         bad("{$gt: 2}");
         bad("{a : { oo: [ {$bad:1}, {good:1}] }}");
         good("{a : { oo: [ {'\\\\$good':1}, {good:1}] }}");
@@ -2126,28 +2123,6 @@ public:
                              << 1
                              << "$hater"
                              << 1)));
-        bad(BSON("a" << BSON("$ref"
-                             << "coll"
-                             << "$id"
-                             << 1
-                             << "dot.dot"
-                             << 1)));
-
-        // _id isn't a RegEx, or Array
-        good("{_id: 0}");
-        good("{_id: {a:1, b:1}}");
-        good("{_id: {rx: /a/}}");
-        good("{_id: {rx: {$regex: 'a'}}}");
-        bad("{_id: /a/ }");
-        bad("{_id: /a/, other:1}");
-        bad("{hi:1, _id: /a/ }");
-        bad("{_id: /a/i }");
-        bad("{first:/f/i, _id: /a/i }");
-        // Not really a regex type
-        bad("{_id: {$regex: 'a'} }");
-        bad("{_id: {$regex: 'a', $options:'i'} }");
-        bad("{_id:  [1,2]}");
-        bad("{_id:  [1]}");
     }
 };
 
@@ -2322,7 +2297,7 @@ public:
 
             ASSERT(!"Expected Throw");
         } catch (const DBException& e) {
-            if (e.getCode() != 13548)  // we expect the code for oversized buffer
+            if (e.code() != 13548)  // we expect the code for oversized buffer
                 throw;
         }
     }

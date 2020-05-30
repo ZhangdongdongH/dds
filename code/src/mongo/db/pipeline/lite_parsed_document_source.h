@@ -32,8 +32,10 @@
 #include <memory>
 #include <vector>
 
+#include "mongo/db/auth/privilege.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_request.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/unordered_set.h"
@@ -71,7 +73,8 @@ public:
     static void registerParser(const std::string& name, Parser parser);
 
     /**
-     * Constructs a LiteParsedDocumentSource from the user-supplied BSON, or throws a UserException.
+     * Constructs a LiteParsedDocumentSource from the user-supplied BSON, or throws a
+     * AssertionException.
      *
      * Extracts the first field name from 'spec', and delegates to the parser that was registered
      * with that field name using registerParser() above.
@@ -85,11 +88,50 @@ public:
     virtual stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const = 0;
 
     /**
+     * Returns a list of the privileges required for this stage.
+     */
+    virtual PrivilegeVector requiredPrivileges(bool isMongos) const = 0;
+
+    /**
      * Returns true if this is a $collStats stage.
      */
     virtual bool isCollStats() const {
         return false;
     }
+
+    /**
+     * Returns true if this is a $changeStream stage.
+     */
+    virtual bool isChangeStream() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this stage does not require an input source.
+     */
+    virtual bool isInitialSource() const {
+        return false;
+    }
+
+    /**
+     * Returns true if this stage may be forwarded to shards from a mongos.
+     */
+    virtual bool allowedToForwardFromMongos() const {
+        return true;
+    }
+
+    /**
+     * Returns true if this stage may be forwarded from Mongos unmodified.
+     */
+    virtual bool allowedToPassthroughFromMongos() const {
+        return true;
+    }
+
+    /**
+     * Verifies that this stage is allowed to run with the specified read concern. Throws a
+     * UserException if not compatible.
+     */
+    virtual void assertSupportsReadConcern(const repl::ReadConcernArgs& readConcern) const {}
 };
 
 class LiteParsedDocumentSourceDefault final : public LiteParsedDocumentSource {
@@ -109,22 +151,35 @@ public:
     stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
         return stdx::unordered_set<NamespaceString>();
     }
+
+    PrivilegeVector requiredPrivileges(bool isMongos) const final {
+        return {};
+    }
 };
 
 /**
- * Helper class for DocumentSources which work with exactly one foreign collection to register as
- * their lite parser.
+ * Helper class for DocumentSources which which reference one or more foreign collections.
  */
-class LiteParsedDocumentSourceOneForeignCollection : public LiteParsedDocumentSource {
+class LiteParsedDocumentSourceForeignCollections : public LiteParsedDocumentSource {
 public:
-    explicit LiteParsedDocumentSourceOneForeignCollection(NamespaceString foreignNss)
-        : _foreignNss(std::move(foreignNss)) {}
+    LiteParsedDocumentSourceForeignCollections(NamespaceString foreignNss,
+                                               PrivilegeVector privileges)
+        : _foreignNssSet{std::move(foreignNss)}, _requiredPrivileges(std::move(privileges)) {}
+
+    LiteParsedDocumentSourceForeignCollections(stdx::unordered_set<NamespaceString> foreignNssSet,
+                                               PrivilegeVector privileges)
+        : _foreignNssSet(std::move(foreignNssSet)), _requiredPrivileges(std::move(privileges)) {}
 
     stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final {
-        return {_foreignNss};
+        return {_foreignNssSet};
+    }
+
+    PrivilegeVector requiredPrivileges(bool isMongos) const final {
+        return _requiredPrivileges;
     }
 
 private:
-    NamespaceString _foreignNss;
+    stdx::unordered_set<NamespaceString> _foreignNssSet;
+    PrivilegeVector _requiredPrivileges;
 };
 }  // namespace mongo

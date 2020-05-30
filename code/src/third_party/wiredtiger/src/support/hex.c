@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -7,8 +7,6 @@
  */
 
 #include "wt_internal.h"
-
-const u_char __wt_hex[] = "0123456789abcdef";
 
 /*
  * __fill_hex --
@@ -25,8 +23,8 @@ __fill_hex(const uint8_t *src, size_t src_max,
 		--dest_max;
 	for (; src_max > 0 && dest_max > 1;
 	    src_max -= 1, dest_max -= 2, ++src) {
-		*dest++ = __wt_hex[(*src & 0xf0) >> 4];
-		*dest++ = __wt_hex[*src & 0x0f];
+		*dest++ = __wt_hex((*src & 0xf0) >> 4);
+		*dest++ = __wt_hex(*src & 0x0f);
 	}
 	*dest++ = '\0';
 	if (lenp != NULL)
@@ -90,8 +88,8 @@ __wt_raw_to_esc_hex(
 			*t++ = *p;
 		} else {
 			*t++ = '\\';
-			*t++ = __wt_hex[(*p & 0xf0) >> 4];
-			*t++ = __wt_hex[*p & 0x0f];
+			*t++ = __wt_hex((*p & 0xf0) >> 4);
+			*t++ = __wt_hex(*p & 0x0f);
 		}
 	*t++ = '\0';
 	to->size = WT_PTRDIFF(t, to->mem);
@@ -118,6 +116,12 @@ __wt_hex2byte(const u_char *from, u_char *to)
 	case '7': byte = 7 << 4; break;
 	case '8': byte = 8 << 4; break;
 	case '9': byte = 9 << 4; break;
+	case 'A': byte = 10 << 4; break;
+	case 'B': byte = 11 << 4; break;
+	case 'C': byte = 12 << 4; break;
+	case 'D': byte = 13 << 4; break;
+	case 'E': byte = 14 << 4; break;
+	case 'F': byte = 15 << 4; break;
 	case 'a': byte = 10 << 4; break;
 	case 'b': byte = 11 << 4; break;
 	case 'c': byte = 12 << 4; break;
@@ -139,6 +143,12 @@ __wt_hex2byte(const u_char *from, u_char *to)
 	case '7': byte |= 7; break;
 	case '8': byte |= 8; break;
 	case '9': byte |= 9; break;
+	case 'A': byte |= 10; break;
+	case 'B': byte |= 11; break;
+	case 'C': byte |= 12; break;
+	case 'D': byte |= 13; break;
+	case 'E': byte |= 14; break;
+	case 'F': byte |= 15; break;
 	case 'a': byte |= 10; break;
 	case 'b': byte |= 11; break;
 	case 'c': byte |= 12; break;

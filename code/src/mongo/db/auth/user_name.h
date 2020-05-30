@@ -32,7 +32,9 @@
 #include <string>
 
 
+#include "mongo/base/clonable_ptr.h"
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 
 namespace mongo {
@@ -46,6 +48,11 @@ class UserName {
 public:
     UserName() : _splitPoint(0) {}
     UserName(StringData user, StringData dbname);
+
+    /**
+     * Parses a string of the form "db.username" into a UserName object.
+     */
+    static StatusWith<UserName> parse(StringData userNameStr);
 
     /**
      * Gets the user part of a UserName.
@@ -100,13 +107,11 @@ std::ostream& operator<<(std::ostream& os, const UserName& name);
 class UserNameIterator {
 public:
     class Impl {
-        MONGO_DISALLOW_COPYING(Impl);
-
     public:
-        Impl(){};
+        Impl() = default;
         virtual ~Impl(){};
-        static Impl* clone(Impl* orig) {
-            return orig ? orig->doClone() : NULL;
+        std::unique_ptr<Impl> clone() const {
+            return std::unique_ptr<Impl>(doClone());
         }
         virtual bool more() const = 0;
         virtual const UserName& get() const = 0;
@@ -117,14 +122,8 @@ public:
         virtual Impl* doClone() const = 0;
     };
 
-    UserNameIterator() : _impl(nullptr) {}
-    UserNameIterator(const UserNameIterator& other) : _impl(Impl::clone(other._impl.get())) {}
-    explicit UserNameIterator(Impl* impl) : _impl(impl) {}
-
-    UserNameIterator& operator=(const UserNameIterator& other) {
-        _impl.reset(Impl::clone(other._impl.get()));
-        return *this;
-    }
+    UserNameIterator() = default;
+    explicit UserNameIterator(std::unique_ptr<Impl> impl) : _impl(std::move(impl)) {}
 
     bool more() const {
         return _impl.get() && _impl->more();
@@ -145,29 +144,27 @@ public:
     }
 
 private:
-    std::unique_ptr<Impl> _impl;
+    clonable_ptr<Impl> _impl;
 };
 
 
 template <typename ContainerIterator>
 class UserNameContainerIteratorImpl : public UserNameIterator::Impl {
-    MONGO_DISALLOW_COPYING(UserNameContainerIteratorImpl);
-
 public:
     UserNameContainerIteratorImpl(const ContainerIterator& begin, const ContainerIterator& end)
         : _curr(begin), _end(end) {}
-    virtual ~UserNameContainerIteratorImpl() {}
-    virtual bool more() const {
+    ~UserNameContainerIteratorImpl() override {}
+    bool more() const override {
         return _curr != _end;
     }
-    virtual const UserName& next() {
+    const UserName& next() override {
         return *(_curr++);
     }
-    virtual const UserName& get() const {
+    const UserName& get() const override {
         return *_curr;
     }
-    virtual UserNameIterator::Impl* doClone() const {
-        return new UserNameContainerIteratorImpl(_curr, _end);
+    UserNameIterator::Impl* doClone() const override {
+        return new UserNameContainerIteratorImpl(*this);
     }
 
 private:
@@ -178,12 +175,22 @@ private:
 template <typename ContainerIterator>
 UserNameIterator makeUserNameIterator(const ContainerIterator& begin,
                                       const ContainerIterator& end) {
-    return UserNameIterator(new UserNameContainerIteratorImpl<ContainerIterator>(begin, end));
+    return UserNameIterator(
+        std::make_unique<UserNameContainerIteratorImpl<ContainerIterator>>(begin, end));
 }
 
 template <typename Container>
 UserNameIterator makeUserNameIteratorForContainer(const Container& container) {
     return makeUserNameIterator(container.begin(), container.end());
+}
+
+template <typename Container>
+Container userNameIteratorToContainer(UserNameIterator it) {
+    Container container;
+    while (it.more()) {
+        container.emplace_back(it.next());
+    }
+    return container;
 }
 
 }  // namespace mongo

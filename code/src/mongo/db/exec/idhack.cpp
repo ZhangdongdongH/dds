@@ -31,6 +31,7 @@
 #include "mongo/db/exec/idhack.h"
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/projection.h"
 #include "mongo/db/exec/scoped_timer.h"
@@ -49,12 +50,12 @@ using stdx::make_unique;
 // static
 const char* IDHackStage::kStageType = "IDHACK";
 
-IDHackStage::IDHackStage(OperationContext* txn,
+IDHackStage::IDHackStage(OperationContext* opCtx,
                          const Collection* collection,
                          CanonicalQuery* query,
                          WorkingSet* ws,
                          const IndexDescriptor* descriptor)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _workingSet(ws),
       _key(query->getQueryObj()["_id"].wrap()),
@@ -71,12 +72,12 @@ IDHackStage::IDHackStage(OperationContext* txn,
     }
 }
 
-IDHackStage::IDHackStage(OperationContext* txn,
+IDHackStage::IDHackStage(OperationContext* opCtx,
                          Collection* collection,
                          const BSONObj& key,
                          WorkingSet* ws,
                          const IndexDescriptor* descriptor)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _workingSet(ws),
       _key(key),
@@ -160,7 +161,7 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
         }
 
         return advance(id, member, out);
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         // Restart at the beginning on retry.
         _recordCursor.reset();
         if (id != WorkingSet::INVALID_ID)
@@ -208,7 +209,7 @@ void IDHackStage::doReattachToOperationContext() {
         _recordCursor->reattachToOperationContext(getOpCtx());
 }
 
-void IDHackStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void IDHackStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // Since updates can't mutate the '_id' field, we can ignore mutation invalidations.
     if (INVALIDATION_MUTATION == type) {
         return;
@@ -220,7 +221,7 @@ void IDHackStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invali
         WorkingSetMember* member = _workingSet->get(_idBeingPagedIn);
         if (member->hasRecordId() && (member->recordId == dl)) {
             // Fetch it now and kill the RecordId.
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
         }
     }
 }

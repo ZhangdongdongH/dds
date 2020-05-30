@@ -48,31 +48,28 @@ public:
 
     executor::TaskExecutor* getTaskExecutor() const override;
 
-    OldThreadPool* getDbWorkThreadPool() const override;
-
     OpTimeWithTerm getCurrentTermAndLastCommittedOpTime() override;
 
-    void processMetadata(const rpc::ReplSetMetadata& metadata) override;
+    void processMetadata(const rpc::ReplSetMetadata& replMetadata,
+                         boost::optional<rpc::OplogQueryMetadata> oqMetadata) override;
 
     bool shouldStopFetching(const HostAndPort& source,
-                            const rpc::ReplSetMetadata& metadata) override;
+                            const rpc::ReplSetMetadata& replMetadata,
+                            boost::optional<rpc::OplogQueryMetadata> oqMetadata) override;
 
-    std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(OperationContext* txn) const override;
+    std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(OperationContext* opCtx) const override;
 
-    std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(OperationContext* txn) const override;
+    StatusWith<OplogApplier::Operations> getNextApplierBatch(OperationContext* opCtx,
+                                                             OplogBuffer* oplogBuffer) final;
 
-    StatusWith<ReplicaSetConfig> getCurrentConfig() const override;
+    StatusWith<ReplSetConfig> getCurrentConfig() const override;
 
 private:
-    StatusWith<OpTime> _multiApply(OperationContext* txn,
+    StatusWith<OpTime> _multiApply(OperationContext* opCtx,
                                    MultiApplier::Operations ops,
-                                   MultiApplier::ApplyOperationFn applyOperation) override;
-
-    Status _multiSyncApply(MultiApplier::OperationPtrs* ops) override;
-
-    Status _multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                  const HostAndPort& source,
-                                  AtomicUInt32* fetchCount) override;
+                                   OplogApplier::Observer* observer,
+                                   const HostAndPort& source,
+                                   ThreadPool* writerPool) override;
 
 protected:
     ReplicationCoordinator* getReplicationCoordinator() const;

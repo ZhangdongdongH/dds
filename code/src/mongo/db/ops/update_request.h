@@ -30,6 +30,7 @@
 
 #include "mongo/db/curop.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/logical_session_id.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/explain.h"
 #include "mongo/util/mongoutils/str.h"
@@ -54,16 +55,18 @@ public:
         // Return the document as it is after the update.
         RETURN_NEW
     };
+
     inline UpdateRequest(const NamespaceString& nsString)
         : _nsString(nsString),
           _god(false),
           _upsert(false),
           _multi(false),
           _fromMigration(false),
+          _fromOplogApplication(false),
           _lifecycle(NULL),
           _isExplain(false),
           _returnDocs(ReturnDocOption::RETURN_NONE),
-          _yieldPolicy(PlanExecutor::YIELD_MANUAL) {}
+          _yieldPolicy(PlanExecutor::NO_YIELD) {}
 
     const NamespaceString& getNamespaceString() const {
         return _nsString;
@@ -109,6 +112,14 @@ public:
         return _updates;
     }
 
+    inline void setArrayFilters(const std::vector<BSONObj>& arrayFilters) {
+        _arrayFilters = arrayFilters;
+    }
+
+    inline const std::vector<BSONObj>& getArrayFilters() const {
+        return _arrayFilters;
+    }
+
     // Please see documentation on the private members matching these names for
     // explanations of the following fields.
 
@@ -142,6 +153,14 @@ public:
 
     bool isFromMigration() const {
         return _fromMigration;
+    }
+
+    inline void setFromOplogApplication(bool value = true) {
+        _fromOplogApplication = value;
+    }
+
+    bool isFromOplogApplication() const {
+        return _fromOplogApplication;
     }
 
     inline void setLifecycle(UpdateLifecycle* value) {
@@ -184,13 +203,41 @@ public:
         return _yieldPolicy;
     }
 
+    inline void setStmtId(StmtId stmtId) {
+        _stmtId = std::move(stmtId);
+    }
+
+    inline StmtId getStmtId() const {
+        return _stmtId;
+    }
+
     const std::string toString() const {
-        return str::stream() << " query: " << _query << " projection: " << _proj
-                             << " sort: " << _sort << " collation: " << _collation
-                             << " updated: " << _updates << " god: " << _god
-                             << " upsert: " << _upsert << " multi: " << _multi
-                             << " fromMigration: " << _fromMigration
-                             << " isExplain: " << _isExplain;
+        StringBuilder builder;
+        builder << " query: " << _query;
+        builder << " projection: " << _proj;
+        builder << " sort: " << _sort;
+        builder << " collation: " << _collation;
+        builder << " updates: " << _updates;
+        builder << " stmtId: " << _stmtId;
+
+        builder << " arrayFilters: [";
+        bool first = true;
+        for (auto arrayFilter : _arrayFilters) {
+            if (!first) {
+                builder << ", ";
+            }
+            first = false;
+            builder << arrayFilter;
+        }
+        builder << "]";
+
+        builder << " god: " << _god;
+        builder << " upsert: " << _upsert;
+        builder << " multi: " << _multi;
+        builder << " fromMigration: " << _fromMigration;
+        builder << " fromOplogApplication: " << _fromOplogApplication;
+        builder << " isExplain: " << _isExplain;
+        return builder.str();
     }
 
 private:
@@ -211,6 +258,12 @@ private:
     // Contains the modifiers to apply to matched objects, or a replacement document.
     BSONObj _updates;
 
+    // Filters to specify which array elements should be updated.
+    std::vector<BSONObj> _arrayFilters;
+
+    // The statement id of this request.
+    StmtId _stmtId = kUninitializedStmtId;
+
     // Flags controlling the update.
 
     // God bypasses _id checking and index generation. It is only used on behalf of system
@@ -225,6 +278,9 @@ private:
 
     // True if this update is on behalf of a chunk migration.
     bool _fromMigration;
+
+    // True if this update was triggered by the application of an oplog entry.
+    bool _fromOplogApplication;
 
     // The lifecycle data, and events used during the update request.
     UpdateLifecycle* _lifecycle;
@@ -246,7 +302,7 @@ private:
     // without another query before or after the update.
     ReturnDocOption _returnDocs;
 
-    // Whether or not the update should yield. Defaults to YIELD_MANUAL.
+    // Whether or not the update should yield. Defaults to NO_YIELD.
     PlanExecutor::YieldPolicy _yieldPolicy;
 };
 

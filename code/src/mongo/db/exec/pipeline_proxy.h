@@ -37,6 +37,7 @@
 #include "mongo/db/pipeline/pipeline.h"
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/record_id.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -46,7 +47,7 @@ namespace mongo {
 class PipelineProxyStage final : public PlanStage {
 public:
     PipelineProxyStage(OperationContext* opCtx,
-                       boost::intrusive_ptr<Pipeline> pipeline,
+                       std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
                        WorkingSet* ws);
 
     PlanStage::StageState doWork(WorkingSetID* out) final;
@@ -64,24 +65,43 @@ public:
 
     // Not used.
     SpecificStats* getSpecificStats() const final {
-        return NULL;
+        MONGO_UNREACHABLE;
     }
+
+    void doInvalidate(OperationContext* opCtx, const RecordId& rid, InvalidationType type) final {
+        // A PlanExecutor with a PipelineProxyStage should be registered with the global cursor
+        // manager, so should not receive invalidations.
+        MONGO_UNREACHABLE;
+    }
+
+    /**
+     * Pass through the last oplog timestamp from the proxied pipeline.
+     */
+    Timestamp getLatestOplogTimestamp() const;
 
     std::string getPlanSummaryStr() const;
     void getPlanSummaryStats(PlanSummaryStats* statsOut) const;
 
-    // Not used.
     StageType stageType() const final {
         return STAGE_PIPELINE_PROXY;
     }
 
+    /**
+     * Writes the pipelineProxyStage's operators to a std::vector<Value>, providing the level of
+     * detail specified by 'verbosity'.
+     */
+    std::vector<Value> writeExplainOps(ExplainOptions::Verbosity verbosity) const;
+
     static const char* kStageType;
+
+protected:
+    void doDispose() final;
 
 private:
     boost::optional<BSONObj> getNextBson();
 
     // Things in the _stash should be returned before pulling items from _pipeline.
-    const boost::intrusive_ptr<Pipeline> _pipeline;
+    std::unique_ptr<Pipeline, PipelineDeleter> _pipeline;
     std::vector<BSONObj> _stash;
     const bool _includeMetaData;
 

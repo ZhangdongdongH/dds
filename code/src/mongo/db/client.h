@@ -36,23 +36,22 @@
 
 #pragma once
 
+#include <boost/optional.hpp>
+
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/service_context.h"
 #include "mongo/platform/random.h"
-#include "mongo/platform/unordered_set.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/transport/session.h"
 #include "mongo/util/concurrency/spin_lock.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/decorable.h"
-#include "mongo/util/net/abstract_message_port.h"
+#include "mongo/util/invariant.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
 
-class AbstractMessagingPort;
 class Collection;
 class OperationContext;
 
@@ -71,10 +70,26 @@ public:
      *
      * If provided, session's ref count will be bumped by this Client.
      */
-    static void initThread(const char* desc, transport::SessionHandle session = nullptr);
-    static void initThread(const char* desc,
+    static void initThread(StringData desc, transport::SessionHandle session = nullptr);
+    static void initThread(StringData desc,
                            ServiceContext* serviceContext,
                            transport::SessionHandle session);
+
+    /**
+     * Moves client into the thread_local for this thread. After this call, Client::getCurrent
+     * and cc() will return client.get(). The client will be destroyed with the thread exits
+     * or Client::destroy() is called.
+     */
+    static void setCurrent(ServiceContext::UniqueClient client);
+
+    /**
+     * Releases the client being managed by the thread_local for this thread. After this call
+     * cc() will crash the server and Client::getCurrent() will return nullptr until either
+     * Client::initThread() or Client::setCurrent() is called.
+     *
+     * The client will be released to the caller.
+     */
+    static ServiceContext::UniqueClient releaseCurrent();
 
     static Client* getCurrent();
 
@@ -116,7 +131,7 @@ public:
      * Inits a thread if that thread has not already been init'd, setting the thread name to
      * "desc".
      */
-    static void initThreadIfNotAlready(const char* desc);
+    static void initThreadIfNotAlready(StringData desc);
 
     /**
      * Inits a thread if that thread has not already been init'd, using the existing thread name
@@ -151,16 +166,18 @@ public:
     /**
      * Makes a new operation context representing an operation on this client.  At most
      * one operation context may be in scope on a client at a time.
+     *
+     * If provided, the LogicalSessionId links this operation to a logical session.
      */
     ServiceContext::UniqueOperationContext makeOperationContext();
 
     /**
-     * Sets the active operation context on this client to "txn", which must be non-NULL.
+     * Sets the active operation context on this client to "opCtx", which must be non-NULL.
      *
      * It is an error to call this method if there is already an operation context on Client.
      * It is an error to call this on an unlocked client.
      */
-    void setOperationContext(OperationContext* txn);
+    void setOperationContext(OperationContext* opCtx);
 
     /**
      * Clears the active operation context on this client.
@@ -177,7 +194,7 @@ public:
      * by this method while the client is not locked.
      */
     OperationContext* getOperationContext() {
-        return _txn;
+        return _opCtx;
     }
 
     // TODO(spencer): SERVER-10228 SERVER-14779 Remove this/move it fully into OperationContext.
@@ -211,9 +228,6 @@ private:
     // Description for the client (e.g. conn8)
     const std::string _desc;
 
-    // OS id of the thread, which owns this client
-    const stdx::thread::id _threadId;
-
     // > 0 for things "conn", 0 otherwise
     const ConnectionId _connectionId;
 
@@ -224,13 +238,44 @@ private:
     bool _inDirectClient = false;
 
     // If != NULL, then contains the currently active OperationContext
-    OperationContext* _txn = nullptr;
+    OperationContext* _opCtx = nullptr;
 
     PseudoRandom _prng;
 };
+
+/**
+ * Utility class to temporarily swap which client is bound to the running thread.
+ *
+ * Use this class to bind a client to the current thread for the duration of the
+ * AlternativeClientRegion's lifetime, restoring the prior client, if any, at the
+ * end of the block.
+ */
+class AlternativeClientRegion {
+public:
+    explicit AlternativeClientRegion(ServiceContext::UniqueClient& clientToUse)
+        : _alternateClient(&clientToUse) {
+        invariant(clientToUse);
+        if (Client::getCurrent()) {
+            _originalClient = Client::releaseCurrent();
+        }
+        Client::setCurrent(std::move(*_alternateClient));
+    }
+
+    ~AlternativeClientRegion() {
+        *_alternateClient = Client::releaseCurrent();
+        if (_originalClient) {
+            Client::setCurrent(std::move(_originalClient));
+        }
+    }
+
+private:
+    ServiceContext::UniqueClient _originalClient;
+    ServiceContext::UniqueClient* const _alternateClient;
+};
+
 
 /** get the Client object for this thread. */
 Client& cc();
 
 bool haveClient();
-};
+}  // namespace mongo

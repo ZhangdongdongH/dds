@@ -27,11 +27,12 @@
  */
 #pragma once
 
+#include <memory>
+
 #include "mongo/db/concurrency/locker_noop.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/storage/recovery_unit_noop.h"
-#include "mongo/stdx/memory.h"
-#include "mongo/util/progress_meter.h"
+#include "mongo/db/storage/write_unit_of_work.h"
 
 namespace mongo {
 
@@ -45,29 +46,17 @@ public:
      */
     OperationContextNoop() : OperationContextNoop(nullptr, 0) {}
     OperationContextNoop(RecoveryUnit* ru) : OperationContextNoop(nullptr, 0) {
-        setRecoveryUnit(ru, kNotInUnitOfWork);
+        setRecoveryUnit(ru, WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
-
 
     /**
      * This constructor is for use by ServiceContexts, and should not be called directly.
      */
     OperationContextNoop(Client* client, unsigned int opId) : OperationContext(client, opId) {
-        setRecoveryUnit(new RecoveryUnitNoop(), kNotInUnitOfWork);
-        setLockState(stdx::make_unique<LockerNoop>());
+        setRecoveryUnit(new RecoveryUnitNoop(),
+                        WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
+        setLockState(std::make_unique<LockerNoop>());
     }
-
-    virtual ~OperationContextNoop() = default;
-
-    virtual ProgressMeter* setMessage_inlock(const char* msg,
-                                             const std::string& name,
-                                             unsigned long long progressMeterTotal,
-                                             int secondsBetween) override {
-        return &_pm;
-    }
-
-private:
-    ProgressMeter _pm;
 };
 
 }  // namespace mongo

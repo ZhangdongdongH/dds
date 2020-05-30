@@ -38,14 +38,19 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/service_context.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/util/decorable.h"
 #include "mongo/util/net/sock.h"
+#include "mongo/util/net/ssl/apple.hpp"
 #include "mongo/util/net/ssl_types.h"
 #include "mongo/util/time_support.h"
 
+// SChannel implementation
+#if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
 #include <openssl/err.h>
 #include <openssl/ssl.h>
-
+#endif
 #endif  // #ifdef MONGO_CONFIG_SSL
 
 namespace mongo {
@@ -59,31 +64,36 @@ const std::string getSSLVersion(const std::string& prefix, const std::string& su
 namespace mongo {
 struct SSLParams;
 
-class SSLConnection {
+#if MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_OPENSSL
+typedef SSL_CTX* SSLContextType;
+typedef SSL* SSLConnectionType;
+#elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_WINDOWS
+typedef SCHANNEL_CRED* SSLContextType;
+typedef PCtxtHandle SSLConnectionType;
+#elif MONGO_CONFIG_SSL_PROVIDER == MONGO_CONFIG_SSL_PROVIDER_APPLE
+typedef asio::ssl::apple::Context* SSLContextType;
+typedef SSLContextRef SSLConnectionType;
+#else
+#error "Unknown SSL Provider"
+#endif
+
+/**
+ * Maintain per connection SSL state for the Sock class. Used by SSLManagerInterface to perform SSL
+ * operations.
+ */
+class SSLConnectionInterface {
 public:
-    SSL* ssl;
-    BIO* networkBIO;
-    BIO* internalBIO;
-    Socket* socket;
+    virtual ~SSLConnectionInterface();
 
-    SSLConnection(SSL_CTX* ctx, Socket* sock, const char* initialBytes, int len);
-
-    ~SSLConnection();
+    virtual std::string getSNIServerName() const = 0;
 };
 
 struct SSLConfiguration {
-    SSLConfiguration() : serverSubjectName(""), clientSubjectName("") {}
-    SSLConfiguration(const std::string& serverSubjectName,
-                     const std::string& clientSubjectName,
-                     const Date_t& serverCertificateExpirationDate)
-        : serverSubjectName(serverSubjectName),
-          clientSubjectName(clientSubjectName),
-          serverCertificateExpirationDate(serverCertificateExpirationDate) {}
-
     bool isClusterMember(StringData subjectName) const;
+    bool isClusterMember(const SSLX509Name& subjectName) const;
     BSONObj getServerStatusBSON() const;
-    std::string serverSubjectName;
-    std::string clientSubjectName;
+    SSLX509Name serverSubjectName;
+    SSLX509Name clientSubjectName;
     Date_t serverCertificateExpirationDate;
     bool hasCA = false;
 };
@@ -106,6 +116,17 @@ const ASN1OID mongodbRolesOID("1.3.6.1.4.1.34601.2.1.1",
                               "MongoRoles",
                               "Sequence of MongoDB Database Roles");
 
+/**
+ * Counts of negogtiated version used by TLS connections.
+ */
+struct TLSVersionCounts {
+    AtomicInt64 tls10;
+    AtomicInt64 tls11;
+    AtomicInt64 tls12;
+
+    static TLSVersionCounts& get(ServiceContext* serviceContext);
+};
+
 class SSLManagerInterface : public Decorable<SSLManagerInterface> {
 public:
     static std::unique_ptr<SSLManagerInterface> create(const SSLParams& params, bool isServer);
@@ -115,28 +136,30 @@ public:
     /**
      * Initiates a TLS connection.
      * Throws SocketException on failure.
-     * @return a pointer to an SSLConnection. Resources are freed in SSLConnection's destructor
+     * @return a pointer to an SSLConnectionInterface. Resources are freed in
+     * SSLConnectionInterface's destructor
      */
-    virtual SSLConnection* connect(Socket* socket) = 0;
+    virtual SSLConnectionInterface* connect(Socket* socket) = 0;
 
     /**
      * Waits for the other side to initiate a TLS connection.
      * Throws SocketException on failure.
-     * @return a pointer to an SSLConnection. Resources are freed in SSLConnection's destructor
+     * @return a pointer to an SSLConnectionInterface. Resources are freed in
+     * SSLConnectionInterface's destructor
      */
-    virtual SSLConnection* accept(Socket* socket, const char* initialBytes, int len) = 0;
+    virtual SSLConnectionInterface* accept(Socket* socket, const char* initialBytes, int len) = 0;
 
     /**
      * Fetches a peer certificate and validates it if it exists
-     * Throws SocketException on failure
+     * Throws NetworkException on failure
      * @return a std::string containing the certificate's subject name.
      *
      * This version of parseAndValidatePeerCertificate is deprecated because it throws a
-     * SocketException upon failure. New code should prefer the version that returns
+     * NetworkException upon failure. New code should prefer the version that returns
      * a StatusWith instead.
      */
     virtual SSLPeerInfo parseAndValidatePeerCertificateDeprecated(
-        const SSLConnection* conn, const std::string& remoteHost) = 0;
+        const SSLConnectionInterface* conn, const std::string& remoteHost) = 0;
 
     /**
      * Gets the SSLConfiguration containing all information about the current SSL setup
@@ -150,21 +173,13 @@ public:
     static std::string getSSLErrorMessage(int code);
 
     /**
-     * ssl.h wrappers
+     * SSL wrappers
      */
-    virtual int SSL_read(SSLConnection* conn, void* buf, int num) = 0;
+    virtual int SSL_read(SSLConnectionInterface* conn, void* buf, int num) = 0;
 
-    virtual int SSL_write(SSLConnection* conn, const void* buf, int num) = 0;
+    virtual int SSL_write(SSLConnectionInterface* conn, const void* buf, int num) = 0;
 
-    virtual unsigned long ERR_get_error() = 0;
-
-    virtual char* ERR_error_string(unsigned long e, char* buf) = 0;
-
-    virtual int SSL_get_error(const SSLConnection* conn, int ret) = 0;
-
-    virtual int SSL_shutdown(SSLConnection* conn) = 0;
-
-    virtual void SSL_free(SSLConnection* conn) = 0;
+    virtual int SSL_shutdown(SSLConnectionInterface* conn) = 0;
 
     enum class ConnectionDirection { kIncoming, kOutgoing };
 
@@ -173,7 +188,7 @@ public:
      * acceptable on non-blocking connections are set. "direction" specifies whether the SSL_CTX
      * will be used to make outgoing connections or accept incoming connections.
      */
-    virtual Status initSSLContext(SSL_CTX* context,
+    virtual Status initSSLContext(SSLContextType context,
                                   const SSLParams& params,
                                   ConnectionDirection direction) = 0;
 
@@ -185,7 +200,7 @@ public:
      * X509 authorization will be returned.
      */
     virtual StatusWith<boost::optional<SSLPeerInfo>> parseAndValidatePeerCertificate(
-        SSL* ssl, const std::string& remoteHost) = 0;
+        SSLConnectionType ssl, const std::string& remoteHost) = 0;
 };
 
 // Access SSL functions through this instance.
@@ -194,10 +209,27 @@ SSLManagerInterface* getSSLManager();
 extern bool isSSLServer;
 
 /**
- * The global SSL configuration. This should be accessed only after global initialization has
- * completed. If it must be accessed in an initializer, the initializer should have
- * "EndStartupOptionStorage" as a prerequisite.
+ * Returns true if the `nameToMatch` is a valid match against the `certHostName` requirement from an
+ * x.509 certificate.  Matches a remote host name to an x.509 host name, including wildcards.
  */
-const SSLParams& getSSLGlobalParams();
-}
+bool hostNameMatchForX509Certificates(std::string nameToMatch, std::string certHostName);
+
+/**
+ * Parse a binary blob of DER encoded ASN.1 into a set of RoleNames.
+ */
+StatusWith<stdx::unordered_set<RoleName>> parsePeerRoles(ConstDataRange cdrExtension);
+
+/**
+ * Strip the trailing '.' in FQDN.
+ */
+std::string removeFQDNRoot(std::string name);
+
+/**
+ * Escape a string per RGC 2253
+ *
+ * See "2.4 Converting an AttributeValue from ASN.1 to a String" in RFC 2243
+ */
+std::string escapeRfc2253(StringData str);
+
+}  // namespace mongo
 #endif  // #ifdef MONGO_CONFIG_SSL

@@ -26,180 +26,66 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
-
 #include "mongo/platform/basic.h"
 
-#include <string>
+#include "mongo/db/commands/current_op_common.h"
 
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
-#include "mongo/db/commands.h"
-#include "mongo/db/commands/fsync.h"
-#include "mongo/db/curop.h"
-#include "mongo/db/dbmessage.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/matcher/extensions_callback_real.h"
-#include "mongo/db/matcher/matcher.h"
-#include "mongo/db/namespace_string.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/commands/fsync_locked.h"
+#include "mongo/db/commands/run_aggregate.h"
+#include "mongo/db/pipeline/document.h"
 #include "mongo/db/stats/fill_locker_info.h"
-#include "mongo/rpc/metadata/client_metadata.h"
-#include "mongo/rpc/metadata/client_metadata_ismaster.h"
-#include "mongo/util/log.h"
 
 namespace mongo {
 
-class CurrentOpCommand : public Command {
+class CurrentOpCommand final : public CurrentOpCommandBase {
+    MONGO_DISALLOW_COPYING(CurrentOpCommand);
+
 public:
-    CurrentOpCommand() : Command("currentOp") {}
-
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
-        return false;
-    }
-
-    bool slaveOk() const final {
-        return true;
-    }
-
-    bool adminOnly() const final {
-        return true;
-    }
+    CurrentOpCommand() = default;
 
     Status checkAuthForCommand(Client* client,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj) final {
+                               const std::string& dbName,
+                               const BSONObj& cmdObj) const final {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
         if (authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
                                                            ActionType::inprog)) {
             return Status::OK();
         }
 
-        bool isAuthenticated = authzSession->getAuthenticatedUserNames().more();
-        if (isAuthenticated && cmdObj["$ownOps"].trueValue()) {
+        if (authzSession->isAuthenticated() && cmdObj["$ownOps"].trueValue()) {
             return Status::OK();
         }
 
         return Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
 
-    bool run(OperationContext* txn,
-             const std::string& db,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
-             BSONObjBuilder& result) final {
-        const bool includeAll = cmdObj["$all"].trueValue();
-        const bool ownOpsOnly = cmdObj["$ownOps"].trueValue();
+    virtual StatusWith<CursorResponse> runAggregation(
+        OperationContext* opCtx, const AggregationRequest& request) const final {
+        auto aggCmdObj = request.serializeToCommandObj().toBson();
 
-        // Filter the output
-        BSONObj filter;
-        {
-            BSONObjBuilder b;
-            BSONObjIterator i(cmdObj);
-            invariant(i.more());
-            i.next();  // skip {currentOp: 1} which is required to be the first element
-            while (i.more()) {
-                BSONElement e = i.next();
-                if (str::equals("$all", e.fieldName())) {
-                    continue;
-                } else if (str::equals("$ownOps", e.fieldName())) {
-                    continue;
-                }
+        BSONObjBuilder responseBuilder;
 
-                b.append(e);
-            }
-            filter = b.obj();
+        auto status = runAggregate(
+            opCtx, request.getNamespaceString(), request, std::move(aggCmdObj), responseBuilder);
+
+        if (!status.isOK()) {
+            return status;
         }
 
-        std::vector<BSONObj> inprogInfos;
-        BSONArrayBuilder inprogBuilder(result.subarrayStart("inprog"));
+        CommandHelpers::appendSimpleCommandStatus(responseBuilder, true);
 
-        for (ServiceContext::LockedClientsCursor cursor(txn->getClient()->getServiceContext());
-             Client* client = cursor.next();) {
-            invariant(client);
+        return CursorResponse::parseFromBSON(responseBuilder.obj());
+    }
 
-            stdx::lock_guard<Client> lk(*client);
-
-            if (ownOpsOnly &&
-                !AuthorizationSession::get(txn->getClient())->isCoauthorizedWithClient(client)) {
-                continue;
-            }
-
-            const OperationContext* opCtx = client->getOperationContext();
-
-            if (!includeAll) {
-                // Skip over inactive connections.
-                if (!opCtx)
-                    continue;
-            }
-
-            BSONObjBuilder infoBuilder;
-
-            // The client information
-            client->reportState(infoBuilder);
-
-            const auto& clientMetadata =
-                ClientMetadataIsMasterState::get(client).getClientMetadata();
-            if (clientMetadata) {
-                auto appName = clientMetadata.get().getApplicationName();
-                if (!appName.empty()) {
-                    infoBuilder.append("appName", appName);
-                }
-            }
-
-            // Operation context specific information
-            infoBuilder.appendBool("active", static_cast<bool>(opCtx));
-            if (opCtx) {
-                infoBuilder.append("opid", opCtx->getOpID());
-                if (opCtx->isKillPending()) {
-                    infoBuilder.append("killPending", true);
-                }
-
-                CurOp::get(opCtx)->reportState(&infoBuilder);
-
-                // LockState
-                Locker::LockerInfo lockerInfo;
-                opCtx->lockState()->getLockerInfo(&lockerInfo);
-                fillLockerInfo(lockerInfo, infoBuilder);
-            }
-
-            // If we want to include all results or if the filter is empty, then we can append
-            // straight to the inprogBuilder, but otherwise we should run the filter Matcher
-            // outside this loop so we don't lock the ServiceContext while matching - in some cases
-            // this can cause deadlocks.
-            if (includeAll || filter.isEmpty()) {
-                inprogBuilder.append(infoBuilder.obj());
-            } else {
-                inprogInfos.emplace_back(infoBuilder.obj());
-            }
-        }
-
-        if (!inprogInfos.empty()) {
-            // We use ExtensionsCallbackReal here instead of ExtensionsCallbackNoop in order to
-            // support the use case of having a $where filter with currentOp. However, since we
-            // don't have a collection, we pass in a fake collection name (and this is okay,
-            // because $where parsing only relies on the database part of the namespace).
-            const NamespaceString fakeNS(db, "$dummyNamespaceForCurrop");
-            const Matcher matcher(filter, ExtensionsCallbackReal(txn, &fakeNS), nullptr);
-
-            for (const auto& info : inprogInfos) {
-                if (matcher.matches(info)) {
-                    inprogBuilder.append(info);
-                }
-            }
-        }
-        inprogBuilder.done();
-
+    virtual void appendToResponse(BSONObjBuilder* result) const final {
         if (lockedForWriting()) {
-            result.append("fsyncLock", true);
-            result.append("info",
-                          "use db.fsyncUnlock() to terminate the fsync write/snapshot lock");
+            result->append("fsyncLock", true);
+            result->append("info",
+                           "use db.fsyncUnlock() to terminate the fsync write/snapshot lock");
         }
-
-        return true;
     }
 
 } currentOpCommand;

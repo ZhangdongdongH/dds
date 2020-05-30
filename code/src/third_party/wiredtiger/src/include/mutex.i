@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -13,6 +13,18 @@
  * done while holding the spin lock are expected to complete in a small number
  * of instructions.
  */
+
+/*
+ * __spin_init_internal --
+ *      Initialize the WT portion of a spinlock.
+ */
+static inline void
+__spin_init_internal(WT_SPINLOCK *t, const char *name)
+{
+	t->name = name;
+	t->stat_count_off = t->stat_app_usecs_off = t->stat_int_usecs_off = -1;
+	t->initialized = 1;
+}
 
 #if SPINLOCK_TYPE == SPINLOCK_GCC
 
@@ -29,10 +41,9 @@ static inline int
 __wt_spin_init(WT_SESSION_IMPL *session, WT_SPINLOCK *t, const char *name)
 {
 	WT_UNUSED(session);
-	WT_UNUSED(name);
 
 	t->lock = 0;
-	t->stat_count_off = t->stat_app_usecs_off = t->stat_int_usecs_off = -1;
+	__spin_init_internal(t, name);
 	return (0);
 }
 
@@ -91,8 +102,8 @@ __wt_spin_unlock(WT_SESSION_IMPL *session, WT_SPINLOCK *t)
 	__sync_lock_release(&t->lock);
 }
 
-#elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||\
-	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE
+#elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||			\
+    SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE
 
 /*
  * __wt_spin_init --
@@ -102,18 +113,19 @@ static inline int
 __wt_spin_init(WT_SESSION_IMPL *session, WT_SPINLOCK *t, const char *name)
 {
 #if SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE
+	WT_DECL_RET;
 	pthread_mutexattr_t attr;
 
 	WT_RET(pthread_mutexattr_init(&attr));
-	WT_RET(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ADAPTIVE_NP));
-	WT_RET(pthread_mutex_init(&t->lock, &attr));
+	ret = pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ADAPTIVE_NP);
+	if (ret == 0)
+		ret = pthread_mutex_init(&t->lock, &attr);
+	WT_TRET(pthread_mutexattr_destroy(&attr));
+	WT_RET(ret);
 #else
 	WT_RET(pthread_mutex_init(&t->lock, NULL));
 #endif
-
-	t->name = name;
-	t->stat_count_off = t->stat_app_usecs_off = t->stat_int_usecs_off = -1;
-	t->initialized = 1;
+	__spin_init_internal(t, name);
 
 	WT_UNUSED(session);
 	return (0);
@@ -134,8 +146,8 @@ __wt_spin_destroy(WT_SESSION_IMPL *session, WT_SPINLOCK *t)
 	}
 }
 
-#if SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||\
-	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE
+#if SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||				\
+    SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE
 
 /*
  * __wt_spin_trylock --
@@ -195,8 +207,7 @@ __wt_spin_init(WT_SESSION_IMPL *session, WT_SPINLOCK *t, const char *name)
 		return (__wt_map_windows_error(windows_error));
 	}
 
-	t->name = name;
-	t->initialized = 1;
+	__spin_init_internal(t, name);
 	return (0);
 }
 
@@ -282,21 +293,40 @@ __wt_spin_unlock(WT_SESSION_IMPL *session, WT_SPINLOCK *t)
 static inline void
 __wt_spin_lock_track(WT_SESSION_IMPL *session, WT_SPINLOCK *t)
 {
-	struct timespec enter, leave;
+	uint64_t time_start, time_stop;
 	int64_t **stats;
 
 	if (t->stat_count_off != -1 && WT_STAT_ENABLED(session)) {
-		__wt_epoch(session, &enter);
+		time_start = __wt_clock(session);
 		__wt_spin_lock(session, t);
-		__wt_epoch(session, &leave);
+		time_stop = __wt_clock(session);
 		stats = (int64_t **)S2C(session)->stats;
 		stats[session->stat_bucket][t->stat_count_off]++;
 		if (F_ISSET(session, WT_SESSION_INTERNAL))
 			stats[session->stat_bucket][t->stat_int_usecs_off] +=
-			    (int64_t)WT_TIMEDIFF_US(leave, enter);
+			    (int64_t)WT_CLOCKDIFF_US(time_stop, time_start);
 		else
 			stats[session->stat_bucket][t->stat_app_usecs_off] +=
-			    (int64_t)WT_TIMEDIFF_US(leave, enter);
+			    (int64_t)WT_CLOCKDIFF_US(time_stop, time_start);
 	} else
 		__wt_spin_lock(session, t);
+}
+
+/*
+ * __wt_spin_trylock_track --
+ *      Try to lock a spinlock or fail immediately if it is busy.
+ *      Track if successful.
+ */
+static inline int
+__wt_spin_trylock_track(WT_SESSION_IMPL *session, WT_SPINLOCK *t)
+{
+	int64_t **stats;
+
+	if (t->stat_count_off != -1 && WT_STAT_ENABLED(session)) {
+		WT_RET(__wt_spin_trylock(session, t));
+		stats = (int64_t **)S2C(session)->stats;
+		stats[session->stat_bucket][t->stat_count_off]++;
+		return (0);
+	}
+	return (__wt_spin_trylock(session, t));
 }

@@ -1,0 +1,277 @@
+# -*- mode: python; -*-
+
+import libdeps
+
+Import("env")
+Import("get_option")
+
+env = env.Clone()
+
+if get_option('install-mode') == 'hygienic':
+    env.AutoInstall(
+        '',
+        source=[
+            'LICENSE-Embedded.txt',
+        ],
+        INSTALL_ALIAS=[
+            'embedded-dev',
+        ],
+    )
+
+yamlEnv = env.Clone()
+yamlEnv.InjectThirdPartyIncludePaths(libraries=['yaml'])
+
+env.Library(
+    target='embedded',
+    source=[
+        'embedded.cpp',
+        'embedded_auth_manager.cpp',
+        'embedded_auth_session.cpp',
+        'embedded_commands.cpp',
+        'embedded_ismaster.cpp',
+        'embedded_options.cpp',
+        'embedded_options_init.cpp',
+        'embedded_options_parser_init.cpp',
+        'logical_session_cache_factory_embedded.cpp',
+        'periodic_runner_embedded.cpp',
+        'replication_coordinator_embedded.cpp',
+        'service_entry_point_embedded.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/catalog/catalog_impl',
+        '$BUILD_DIR/mongo/db/command_can_run_here',
+        '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/commands/fsync_locked',
+        '$BUILD_DIR/mongo/db/commands/mongod_fcv',
+        '$BUILD_DIR/mongo/db/commands/standalone',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        '$BUILD_DIR/mongo/db/logical_session_cache',
+        '$BUILD_DIR/mongo/db/logical_session_cache_impl',
+        '$BUILD_DIR/mongo/db/op_observer_impl',
+        '$BUILD_DIR/mongo/db/repair_database_and_check_version',
+        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface',
+        '$BUILD_DIR/mongo/db/repl/replica_set_messages',
+        '$BUILD_DIR/mongo/db/repl/storage_interface_impl',
+        '$BUILD_DIR/mongo/db/rw_concern_d',
+        '$BUILD_DIR/mongo/db/s/sharding_api_d',
+        '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
+        '$BUILD_DIR/mongo/db/server_options',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/db/service_entry_point_common',
+        '$BUILD_DIR/mongo/db/service_liaison_mongod',
+        '$BUILD_DIR/mongo/db/sessions_collection_standalone',
+        '$BUILD_DIR/mongo/db/storage/mobile/storage_mobile',
+        '$BUILD_DIR/mongo/db/storage/storage_engine_common',
+        '$BUILD_DIR/mongo/db/storage/storage_engine_lock_file',
+        '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+        '$BUILD_DIR/mongo/db/storage/storage_init_d',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
+        '$BUILD_DIR/mongo/db/wire_version',
+        '$BUILD_DIR/mongo/rpc/client_metadata',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+        '$BUILD_DIR/mongo/util/version_impl',
+    ]
+)
+
+env.Library(
+    target='embedded_integration_helpers',
+    source=[
+        'embedded_options_helpers.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/util/options_parser/options_parser',
+    ],
+)
+
+def mongo_export_file_generator(target, source, env, for_signature):
+    if env.ToolchainIs('msvc'):
+        script = env.File(env.subst("${TARGET.base}.def", target=target))
+        return script.get_csig() if for_signature else "/DEF:" + str(script)
+    elif env.TargetOSIs('darwin'):
+        script = env.File(env.subst("${TARGET.base}.exported_symbols_list", target=target))
+        return script.get_csig() if for_signature else "-Wl,-exported_symbols_list," + str(script)
+    elif env.TargetOSIs('posix'):
+        script = env.File(env.subst("${TARGET.base}.version_script", target=target))
+        return script.get_csig() if for_signature else "-Wl,--version-script," + str(script)
+    else:
+        pass
+env['MONGO_EXPORT_FILE_SHLINKFLAGS'] = mongo_export_file_generator
+
+capiEnv = env.Clone()
+capiEnv.AppendUnique(
+    CPPDEFINES=[
+        'MONGO_EMBEDDED_CAPI_COMPILING',
+    ],
+)
+
+if get_option('link-model') == 'static':
+    capiEnv.AppendUnique(
+        CPPDEFINES=[
+            'MONGO_EMBEDDED_CAPI_STATIC',
+        ],
+    )
+elif get_option('link-model') == 'dynamic-sdk':
+    capiEnv['LIBDEPS_SHLIBEMITTER'] = libdeps.make_libdeps_emitter(
+        'SharedArchive',
+        libdeps.dependency_visibility_honored
+    )
+
+capiEnv.AppendUnique(
+    SHLINKFLAGS=['$MONGO_EXPORT_FILE_SHLINKFLAGS']
+)
+
+capiEnv.Library(
+    target='mongo_embedded_capi',
+    source=[
+        'capi.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/rpc/protocol',
+        '$BUILD_DIR/mongo/transport/transport_layer_mock',
+        'embedded',
+    ],
+    INSTALL_ALIAS=[
+        'embedded-dev',
+    ],
+)
+
+if get_option('install-mode') == 'hygienic':
+    env.AutoInstall(
+        'include/mongo/embedded-v1/mongo/embedded',
+        source=['capi.h'],
+        INSTALL_ALIAS=[
+            'embedded-dev',
+        ],
+    )
+
+if get_option('link-model') != 'dynamic-sdk':
+    capiTest = yamlEnv.Program(
+        target='mongo_embedded_capi_test',
+        source=[
+            'capi_test.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/base',
+            '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+            '$BUILD_DIR/mongo/db/server_options_core',
+            '$BUILD_DIR/mongo/rpc/protocol',
+            '$BUILD_DIR/mongo/unittest/unittest',
+            '$BUILD_DIR/mongo/util/net/network',
+            '$BUILD_DIR/mongo/util/options_parser/options_parser',
+            'mongo_embedded_capi',
+        ],
+        INSTALL_ALIAS=[
+            'embedded-test',
+        ],
+    )
+
+    env.RegisterUnitTest(capiTest[0])
+
+    mongoed = yamlEnv.Program(
+        target='mongoed',
+        source=[
+            'mongoed_main.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/db/commands/shell_protocol',
+            '$BUILD_DIR/mongo/db/mongod_options',
+            '$BUILD_DIR/mongo/db/server_options',
+            '$BUILD_DIR/mongo/db/repl/repl_set_status_commands',
+            '$BUILD_DIR/mongo/transport/service_entry_point',
+            '$BUILD_DIR/mongo/transport/transport_layer_manager',
+            '$BUILD_DIR/mongo/util/signal_handlers',
+            'embedded',
+            'embedded_integration_helpers',
+        ],
+        INSTALL_ALIAS=[
+            'embedded-test',
+        ],
+    )
+
+    env.Alias('all', mongoed) # This ensures it compiles and links, but doesn't copy it anywhere.
+
+    hygienic = get_option('install-mode') == 'hygienic'
+
+    if not hygienic:
+        env.Install('#/', mongoed)
+
+if not env['MONGO_HAVE_LIBMONGOC']:
+    Return()
+
+def create_mongoc_env(env):
+    mongocEnv = env.Clone()
+    if mongocEnv['MONGO_HAVE_LIBMONGOC'] == "framework":
+        mongocEnv.AppendUnique(FRAMEWORKS=['bson', 'mongoc'])
+    else:
+        mongocEnv.AppendUnique(LIBS=['bson-1.0', 'mongoc-1.0'])
+    return mongocEnv
+
+mongocClientEnv = create_mongoc_env(env)
+
+mongocClientEnv.AppendUnique(
+    CPPDEFINES=[
+        'MONGO_EMBEDDED_MONGOC_CLIENT_COMPILING',
+     ],
+)
+
+if get_option('link-model') == 'static':
+    mongocClientEnv.AppendUnique(
+        CPPDEFINES=[
+            'MONGO_EMBEDDED_MONGOC_CLIENT_STATIC',
+        ],
+    )
+
+mongocClientEnv.AppendUnique(
+    SHLINKFLAGS=['$MONGO_EXPORT_FILE_SHLINKFLAGS']
+)
+
+mongocClientEnv.Library(
+    target='mongo_embedded_mongoc_client',
+    source=[
+        'mongoc_client.cpp',
+    ],
+    LIBDEPS=[
+        # No LIBDEPS or LIBDEPS_PRIVATE to mongo libraries are allowed in this library. They would get duplicated in mongo_embedded_capi.
+        'mongo_embedded_capi',
+    ],
+    INSTALL_ALIAS=[
+        'embedded-dev',
+    ],
+)
+
+if get_option('install-mode') == 'hygienic':
+    env.AutoInstall(
+        'include/mongo/embedded-v1/mongo/embedded',
+        source=['mongoc_client.h'],
+        INSTALL_ALIAS=[
+            'embedded-dev',
+        ],
+    )
+
+if get_option('link-model') != 'dynamic-sdk':
+    mongocClientTestEnv = create_mongoc_env(yamlEnv)
+    clientTest = mongocClientTestEnv.Program(
+        target='mongo_embedded_mongoc_client_test',
+        source=[
+            'mongo_embedded_mongoc_client_test.cpp',
+            'functions_for_test.cpp',
+        ],
+        LIBDEPS=[
+            '$BUILD_DIR/mongo/base',
+            '$BUILD_DIR/mongo/db/server_options_core',
+            '$BUILD_DIR/mongo/unittest/unittest',
+            '$BUILD_DIR/mongo/util/options_parser/options_parser',
+            'mongo_embedded_mongoc_client',
+        ],
+        INSTALL_ALIAS=[
+            'embedded-test',
+        ],
+    )
+
+    env.RegisterUnitTest(clientTest[0]);

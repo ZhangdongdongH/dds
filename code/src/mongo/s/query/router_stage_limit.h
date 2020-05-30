@@ -37,17 +37,11 @@ namespace mongo {
  */
 class RouterStageLimit final : public RouterExecStage {
 public:
-    RouterStageLimit(std::unique_ptr<RouterExecStage> child, long long limit);
+    RouterStageLimit(OperationContext* opCtx,
+                     std::unique_ptr<RouterExecStage> child,
+                     long long limit);
 
-    StatusWith<ClusterQueryResult> next() final;
-
-    void kill() final;
-
-    bool remotesExhausted() final;
-
-    Status setAwaitDataTimeout(Milliseconds awaitDataTimeout) final;
-
-    void setOperationContext(OperationContext* txn) final;
+    StatusWith<ClusterQueryResult> next(ExecContext) final;
 
 private:
     long long _limit;

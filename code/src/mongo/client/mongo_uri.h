@@ -1,7 +1,7 @@
 /**
  *    Copyright (C) 2015 MongoDB Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
+ *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the GNU Affero General Public License, version 3,
  *    as published by the Free Software Foundation.
  *
@@ -29,28 +29,60 @@
 #pragma once
 
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
+/**
+ * Encode a string for embedding in a URI.
+ * Replaces reserved bytes with %xx sequences.
+ *
+ * Optionally allows passthrough characters to remain unescaped.
+ */
+void uriEncode(std::ostream& ss, StringData str, StringData passthrough = ""_sd);
+
+inline std::string uriEncode(StringData str, StringData passthrough = ""_sd) {
+    std::ostringstream ss;
+    uriEncode(ss, str, passthrough);
+    return ss.str();
+}
+
+/**
+ * Decode a URI encoded string.
+ * Replaces + and %xx sequences with their original byte.
+ */
+StatusWith<std::string> uriDecode(StringData str);
 
 /**
  * MongoURI handles parsing of URIs for mongodb, and falls back to old-style
  * ConnectionString parsing. It's used primarily by the shell.
- * It parses URIs with the following format:
+ * It parses URIs with the following formats:
  *
  *    mongodb://[usr:pwd@]host1[:port1]...[,hostN[:portN]]][/[db][?options]]
+ *    mongodb+srv://[usr:pwd@]host[/[db][?options]]
+ *
+ * `mongodb+srv://` URIs will perform DNS SRV and TXT lookups and expand per the DNS Seedlist
+ * specification.
+ *
+ * While this format is generally RFC 3986 compliant, some exceptions do exist:
+ *   1. The 'host' field, as defined by section 3.2.2 is expanded in the following ways:
+ *     a. Multiple hosts may be specified as a comma separated list.
+ *     b. Hosts may take the form of absolute paths for unix domain sockets.
+ *       i. Sockets must end in the suffix '.sock'
+ *   2. The 'fragment' field, as defined by section 3.5 is not permitted.
  *
  * For a complete list of URI string options, see
- * https://wiki.mongodb.com/display/DH/Connection+String+Format
+ * https://docs.mongodb.com/manual/reference/connection-string/#connection-string-options
  *
  * Examples:
  *
@@ -68,11 +100,29 @@ namespace mongo {
  */
 class MongoURI {
 public:
+    // Note that, because this map is used for DNS TXT record injection on options, there is a
+    // requirement on its behavior for `insert`: insert must not replace or update existing values
+    // -- this gives the desired behavior that user-specified values override TXT record specified
+    // values.  `std::map` and `std::unordered_map` satisfy this requirement.  Make sure that
+    // whichever map type is used provides that guarantee.
     using OptionsMap = std::map<std::string, std::string>;
 
     static StatusWith<MongoURI> parse(const std::string& url);
 
-    DBClientBase* connect(StringData applicationName, std::string& errmsg) const;
+    /*
+     * Returns true if str starts with one of the uri schemes (e.g. mongodb:// or mongodb+srv://)
+     */
+    static bool isMongoURI(StringData str);
+
+    /*
+     * Returns a copy of the input url as a string with the password and connection options
+     * removed. This may uassert or return a mal-formed string if the input is not a valid URI
+     */
+    static std::string redact(StringData url);
+
+    DBClientBase* connect(StringData applicationName,
+                          std::string& errmsg,
+                          boost::optional<double> socketTimeoutSecs = boost::none) const;
 
     const std::string& getUser() const {
         return _user;
@@ -106,34 +156,69 @@ public:
         return _connectString.getServers();
     }
 
+
+    const boost::optional<std::string> getAppName() const;
+
+    boost::optional<bool> getRetryWrites() const {
+        return _retryWrites;
+    }
+
+    // If you are trying to clone a URI (including its options/auth information) for a single
+    // server (say a member of a replica-set), you can pass in its HostAndPort information to
+    // get a new URI with the same info, except type() will be MASTER and getServers() will
+    // be the single host you pass in.
+    MongoURI cloneURIForServer(HostAndPort hostAndPort) const {
+        return MongoURI(ConnectionString(std::move(hostAndPort)),
+                        _user,
+                        _password,
+                        _database,
+                        _retryWrites,
+                        _options);
+    }
+
     ConnectionString::ConnectionType type() const {
         return _connectString.type();
     }
 
-    explicit MongoURI(const ConnectionString connectString)
-        : _connectString(std::move(connectString)){};
+    explicit MongoURI(const ConnectionString& connectString) : _connectString(connectString){};
 
     MongoURI() = default;
+
+    friend std::ostream& operator<<(std::ostream&, const MongoURI&);
+
+    friend StringBuilder& operator<<(StringBuilder&, const MongoURI&);
 
 private:
     MongoURI(ConnectionString connectString,
              const std::string& user,
              const std::string& password,
              const std::string& database,
+             boost::optional<bool> retryWrites,
              OptionsMap options)
         : _connectString(std::move(connectString)),
           _user(user),
           _password(password),
           _database(database),
-          _options(std::move(options)){};
+          _retryWrites(std::move(retryWrites)),
+          _options(std::move(options)) {}
 
     BSONObj _makeAuthObjFromOptions(int maxWireVersion) const;
+
+    static MongoURI parseImpl(const std::string& url);
 
     ConnectionString _connectString;
     std::string _user;
     std::string _password;
     std::string _database;
+    boost::optional<bool> _retryWrites;
     OptionsMap _options;
 };
 
+inline std::ostream& operator<<(std::ostream& ss, const MongoURI& uri) {
+    return ss << uri._connectString;
+}
+
+inline StringBuilder& operator<<(StringBuilder& sb, const MongoURI& uri) {
+    return sb << uri._connectString;
+}
 }  // namespace mongo

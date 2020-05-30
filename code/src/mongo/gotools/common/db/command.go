@@ -1,10 +1,17 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package db
 
 import (
 	"fmt"
+	"strings"
+
 	"gopkg.in/mgo.v2"
 	"gopkg.in/mgo.v2/bson"
-	"strings"
 )
 
 // Query flags
@@ -125,6 +132,28 @@ func (sp *SessionProvider) IsMongos() (bool, error) {
 	return nodeType == Mongos, nil
 }
 
+// SupportsCollectionUUID returns true if the connected server identifies
+// collections with UUIDs
+func (sp *SessionProvider) SupportsCollectionUUID() (bool, error) {
+	session, err := sp.GetSession()
+	if err != nil {
+		return false, err
+	}
+	defer session.Close()
+
+	collInfo, err := GetCollectionInfo(session.DB("admin").C("system.version"))
+	if err != nil {
+		return false, err
+	}
+
+	// On FCV 3.6+, admin.system.version will have a UUID
+	if collInfo != nil && collInfo.GetUUID() != "" {
+		return true, nil
+	}
+
+	return false, nil
+}
+
 // SupportsRepairCursor takes in an example db and collection name and
 // returns true if the connected server supports the repairCursor command.
 // It returns false and the error that occurred if it is not supported.
@@ -198,7 +227,7 @@ func (sp *SessionProvider) FindOne(db, collection string, skip int, query interf
 // ApplyFlags applies flags to the given query session.
 func ApplyFlags(q *mgo.Query, session *mgo.Session, flags int) *mgo.Query {
 	if flags&Snapshot > 0 {
-		q = q.Snapshot()
+		q = q.Hint("_id")
 	}
 	if flags&LogReplay > 0 {
 		q = q.LogReplay()

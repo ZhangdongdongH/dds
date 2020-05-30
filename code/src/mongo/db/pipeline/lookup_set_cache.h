@@ -35,16 +35,13 @@
 #include <boost/multi_index/sequenced_index.hpp>
 #include <boost/multi_index_container.hpp>
 #include <boost/optional.hpp>
-#include <iostream>
 #include <vector>
 
 #include "mongo/base/string_data_comparator_interface.h"
-#include "mongo/bson/bsonmisc.h"
-#include "mongo/bson/bsonobj.h"
+#include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/value.h"
 #include "mongo/db/pipeline/value_comparator.h"
 #include "mongo/stdx/functional.h"
-#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -62,13 +59,12 @@ using boost::multi_index::indexed_by;
  */
 class LookupSetCache {
 public:
-    using Cached = std::pair<Value, std::vector<BSONObj>>;
+    using Cached = std::pair<Value, std::vector<Document>>;
 
     // boost::multi_index_container provides a system for implementing a cache. Here, we create
-    // a container of std::pair<Value, std::vector<BSONObj>>BSONObjSet, that is both sequenced, and
-    // has a unique
-    // index on the Value. From this, we are able to evict the least-recently-used member, and
-    // maintain key uniqueness.
+    // a container of std::pair<Value, std::vector<Document>>, that is both sequenced, and has a
+    // unique index on the Value. From this, we are able to evict the least-recently-used member,
+    // and maintain key uniqueness.
     using IndexedContainer =
         multi_index_container<Cached,
                               indexed_by<sequenced<>,
@@ -81,9 +77,12 @@ public:
      * ValueComparator. This requires instantiating the multi_index_container with comparison and
      * hasher functions obtained from the comparator.
      */
-    LookupSetCache(ValueComparator valueComparator)
-        : _valueComparator(std::move(valueComparator)),
-          _container(makeIndexedContainer(_valueComparator)) {}
+    explicit LookupSetCache(const ValueComparator& comparator)
+        : _container(boost::make_tuple(IndexedContainer::nth_index<0>::type::ctor_args(),
+                                       boost::make_tuple(0,
+                                                         member<Cached, Value, &Cached::first>(),
+                                                         comparator.getHasher(),
+                                                         comparator.getEqualTo()))) {}
 
     /**
      * Insert "value" into the set with key "key". If "key" is already present in the cache, move it
@@ -96,25 +95,30 @@ public:
      * important to keep in the cache (i.e., that we should put it at the front), but it's also
      * likely we don't want to evict it (i.e., we want to make sure it isn't at the back).
      */
-    void insert(Value key, BSONObj value) {
+    void insert(Value key, Document doc) {
         // Get an iterator to the middle of the container.
         size_t middle = size() / 2;
         auto it = _container.begin();
         std::advance(it, middle);
+        const auto keySize = key.getApproximateSize();
+        const auto docSize = doc.getApproximateSize();
 
-        auto result = _container.insert(it, {key, {value}});
-
-        if (!result.second) {
-            // We did not insert due to a duplicate key.
-            auto cached = *result.first;
-            // Update the cached value, moving it to the middle of the cache.
-            cached.second.push_back(value);
-            _container.replace(result.first, cached);
-            _container.relocate(it, result.first);
+        // Find the cache entry, or create one if it doesn't exist yet.
+        auto insertionResult = _container.insert(it, {std::move(key), {}});
+        if (insertionResult.second) {
+            _memoryUsage += keySize;
         } else {
-            _memoryUsage += key.getApproximateSize();
+            // We did not insert due to a duplicate key. Update the cached doc, moving it to the
+            // middle of the cache.
+            _container.relocate(it, insertionResult.first);
         }
-        _memoryUsage += static_cast<size_t>(value.objsize());
+
+        // Add the doc to the cache entry.
+        _container.modify(insertionResult.first,
+                          [&doc](std::pair<Value, std::vector<Document>>& entry) {
+                              entry.second.push_back(std::move(doc));
+                          });
+        _memoryUsage += docSize;
     }
 
     /**
@@ -132,7 +136,7 @@ public:
         _memoryUsage -= keySize;
 
         for (auto&& elem : pair.second) {
-            size_t valueSize = static_cast<size_t>(elem.objsize());
+            size_t valueSize = static_cast<size_t>(elem.getApproximateSize());
             invariant(valueSize <= _memoryUsage);
             _memoryUsage -= valueSize;
         }
@@ -173,42 +177,20 @@ public:
     }
 
     /**
-     * Retrieve the vector of values with key "key". If not found, returns boost::none.
+     * Retrieve the vector of values with key "key". Returns nullptr if not found.
      */
-    boost::optional<std::vector<BSONObj>> operator[](Value key) {
+    const std::vector<Document>* operator[](const Value& key) {
         auto it = boost::multi_index::get<1>(_container).find(key);
         if (it != boost::multi_index::get<1>(_container).end()) {
             boost::multi_index::get<0>(_container)
                 .relocate(boost::multi_index::get<0>(_container).begin(),
                           boost::multi_index::project<0>(_container, it));
-            return (*it).second;
+            return &it->second;
         }
-        return boost::none;
-    }
-
-    /**
-     * Binds the cache to a new comparator that should be used to make all subsequent Value
-     * comparisons.
-     *
-     * TODO SERVER-25535: Remove this method.
-     */
-    void setValueComparator(ValueComparator valueComparator) {
-        _valueComparator = std::move(valueComparator);
-        _container = makeIndexedContainer(_valueComparator);
+        return nullptr;
     }
 
 private:
-    IndexedContainer makeIndexedContainer(const ValueComparator& valueComparator) const {
-        return IndexedContainer(
-            boost::make_tuple(IndexedContainer::nth_index<0>::type::ctor_args(),
-                              boost::make_tuple(0,
-                                                member<Cached, Value, &Cached::first>(),
-                                                valueComparator.getHasher(),
-                                                valueComparator.getEqualTo())));
-    }
-
-    ValueComparator _valueComparator;
-
     IndexedContainer _container;
 
     size_t _memoryUsage = 0;

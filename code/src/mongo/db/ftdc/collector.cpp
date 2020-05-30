@@ -65,8 +65,12 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
     // All collectors should be ok seeing the inconsistent states in the middle of replication
     // batches. This is desirable because we want to be able to collect data in the middle of
     // batches that are taking a long time.
-    auto txn = client->makeOperationContext();
-    txn->lockState()->setShouldConflictWithSecondaryBatchApplication(false);
+    auto opCtx = client->makeOperationContext();
+    ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(opCtx->lockState());
+    opCtx->lockState()->setShouldAcquireTicket(false);
+
+    // Explicitly start future read transactions without a timestamp.
+    opCtx->recoveryUnit()->setTimestampReadSource(RecoveryUnit::ReadSource::kNoTimestamp);
 
     for (auto& collector : _collectors) {
         BSONObjBuilder subObjBuilder(builder.subobjStart(collector->name()));
@@ -83,10 +87,7 @@ std::tuple<BSONObj, Date_t> FTDCCollectorCollection::collect(Client* client) {
 
         subObjBuilder.appendDate(kFTDCCollectStartField, now);
 
-        {
-            ScopedTransaction st(txn.get(), MODE_IS);
-            collector->collect(txn.get(), subObjBuilder);
-        }
+        collector->collect(opCtx.get(), subObjBuilder);
 
         end = client->getServiceContext()->getPreciseClockSource()->now();
         subObjBuilder.appendDate(kFTDCCollectEndField, end);

@@ -69,21 +69,13 @@ public:
      * Verifies that the writeConcern is of type Object (BSON type).
      */
     static StatusWith<WriteConcernOptions> extractWCFromCommand(
-        const BSONObj& cmdObj,
-        const std::string& dbName,
-        const WriteConcernOptions& defaultWC = WriteConcernOptions());
+        const BSONObj& cmdObj, const WriteConcernOptions& defaultWC = WriteConcernOptions());
 
     /**
      * Return true if the server needs to wait for other secondary nodes to satisfy this
      * write concern setting. Errs on the false positive for non-empty wMode.
      */
     bool shouldWaitForOtherNodes() const;
-
-    /**
-     * Returns true if this is a {w:majority} write concern, which is the only valid write concern
-     * to use against a config server.
-     */
-    bool validForConfigServers() const;
 
     void reset() {
         syncMode = SyncMode::UNSET;

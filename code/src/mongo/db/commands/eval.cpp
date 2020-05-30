@@ -43,8 +43,11 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/s/stale_exception.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -58,7 +61,7 @@ namespace {
 
 const int edebug = 0;
 
-bool dbEval(OperationContext* txn,
+bool dbEval(OperationContext* opCtx,
             const string& dbName,
             const BSONObj& cmd,
             BSONObjBuilder& result,
@@ -92,7 +95,7 @@ bool dbEval(OperationContext* txn,
     }
 
     unique_ptr<Scope> s(getGlobalScriptEngine()->newScope());
-    s->registerOperation(txn);
+    s->registerOperation(opCtx);
 
     ScriptingFunction f = s->createFunction(code);
     if (f == 0) {
@@ -100,7 +103,7 @@ bool dbEval(OperationContext* txn,
         return false;
     }
 
-    s->localConnectForDbEval(txn, dbName.c_str());
+    s->localConnectForDbEval(opCtx, dbName.c_str());
 
     if (e.type() == CodeWScope) {
         s->init(e.codeWScopeScopeDataUnsafe());
@@ -149,44 +152,65 @@ bool dbEval(OperationContext* txn,
 }
 
 
-class CmdEval : public Command {
+class CmdEval : public ErrmsgCommandDeprecated {
 public:
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "DEPRECATED\n"
-             << "Evaluate javascript at the server.\n"
-             << "http://dochub.mongodb.org/core/serversidecodeexecution";
+    std::string help() const override {
+        return "DEPRECATED\n"
+               "Evaluate javascript at the server.\n"
+               "http://dochub.mongodb.org/core/serversidecodeexecution";
     }
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         RoleGraph::generateUniversalPrivileges(out);
     }
 
-    CmdEval() : Command("eval", false, "$eval") {}
+    CmdEval() : ErrmsgCommandDeprecated("eval", "$eval") {}
 
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        if (cmdObj["nolock"].trueValue()) {
-            return dbEval(txn, dbname, cmdObj, result, errmsg);
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& dbname,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
+        // Note: 'eval' is not allowed to touch sharded namespaces, but we can't check the
+        // shardVersions of the namespaces accessed in the script until the script is evaluated.
+        // Instead, we enforce that the script does not access sharded namespaces by ensuring the
+        // shardVersion is set to UNSHARDED on the OperationShardingState. The "namespace" used does
+        // not matter, because if a shardVersion is set on the OperationShardingState, a check for a
+        // different namespace will default to UNSHARDED.
+        auto& oss = OperationShardingState::get(opCtx);
+        uassert(ErrorCodes::IllegalOperation,
+                "can't send a shardVersion with the 'eval' command, since you can't use sharded "
+                "collections from 'eval'",
+                !oss.hasShardVersion());
+        oss.setGlobalUnshardedShardVersion();
+
+        try {
+            if (cmdObj["nolock"].trueValue()) {
+                return dbEval(opCtx, dbname, cmdObj, result, errmsg);
+            }
+
+            Lock::GlobalWrite lk(opCtx);
+
+            OldClientContext ctx(opCtx, dbname, false /* no shard version checking here */);
+
+            return dbEval(opCtx, dbname, cmdObj, result, errmsg);
+        } catch (const AssertionException& ex) {
+            // Convert a stale shardVersion error to a stronger error to prevent this node or the
+            // sending node from believing it needs to refresh its routing table.
+            if (ex.code() == ErrorCodes::StaleConfig) {
+                uasserted(ErrorCodes::BadValue,
+                          str::stream() << "can't use sharded collection from db.eval");
+            }
+            throw;
         }
-
-        ScopedTransaction transaction(txn, MODE_X);
-        Lock::GlobalWrite lk(txn->lockState());
-
-        OldClientContext ctx(txn, dbname, false /* no shard version checking */);
-
-        return dbEval(txn, dbname, cmdObj, result, errmsg);
     }
 
 } cmdeval;

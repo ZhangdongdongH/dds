@@ -30,18 +30,16 @@
 
 #include "mongo/db/views/resolved_view.h"
 
+#include "mongo/base/init.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/pipeline/aggregation_request.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 
 namespace mongo {
 
-bool ResolvedView::isResolvedViewErrorResponse(BSONObj commandResponseObj) {
-    auto status = getStatusFromCommandResult(commandResponseObj);
-    return ErrorCodes::CommandOnShardedViewNotSupportedOnMongod == status;
-}
+MONGO_INIT_REGISTER_ERROR_EXTRA_INFO(ResolvedView);
 
-ResolvedView ResolvedView::fromBSON(BSONObj commandResponseObj) {
+ResolvedView ResolvedView::fromBSON(const BSONObj& commandResponseObj) {
     uassert(40248,
             "command response expected to have a 'resolvedView' field",
             commandResponseObj.hasField("resolvedView"));
@@ -62,58 +60,64 @@ ResolvedView ResolvedView::fromBSON(BSONObj commandResponseObj) {
         pipeline.push_back(item.Obj().getOwned());
     }
 
-    return {ResolvedView(NamespaceString(viewDef["ns"].valueStringData()), pipeline)};
+    BSONObj collationSpec;
+    if (auto collationElt = viewDef["collation"]) {
+        uassert(40639,
+                "View definition 'collation' field must be an object",
+                collationElt.type() == BSONType::Object);
+        collationSpec = collationElt.embeddedObject().getOwned();
+    }
+
+    return {NamespaceString(viewDef["ns"].valueStringData()),
+            std::move(pipeline),
+            std::move(collationSpec)};
 }
 
-StatusWith<BSONObj> ResolvedView::asExpandedViewAggregation(
+void ResolvedView::serialize(BSONObjBuilder* builder) const {
+    BSONObjBuilder subObj(builder->subobjStart("resolvedView"));
+    subObj.append("ns", _namespace.ns());
+    subObj.append("pipeline", _pipeline);
+    if (!_defaultCollation.isEmpty()) {
+        subObj.append("collation", _defaultCollation);
+    }
+}
+
+std::shared_ptr<const ErrorExtraInfo> ResolvedView::parse(const BSONObj& cmdReply) {
+    return std::make_shared<ResolvedView>(fromBSON(cmdReply));
+}
+
+AggregationRequest ResolvedView::asExpandedViewAggregation(
     const AggregationRequest& request) const {
-    BSONObjBuilder aggregationBuilder;
-    // Perform the aggregation on the resolved namespace.
-    aggregationBuilder.append("aggregate", _namespace.coll());
+    // Perform the aggregation on the resolved namespace.  The new pipeline consists of two parts:
+    // first, 'pipeline' in this ResolvedView; then, the pipeline in 'request'.
+    std::vector<BSONObj> resolvedPipeline;
+    resolvedPipeline.reserve(_pipeline.size() + request.getPipeline().size());
+    resolvedPipeline.insert(resolvedPipeline.end(), _pipeline.begin(), _pipeline.end());
+    resolvedPipeline.insert(
+        resolvedPipeline.end(), request.getPipeline().begin(), request.getPipeline().end());
 
-    // The new pipeline consists of two parts: first, 'pipeline' in this ResolvedView;
-    // then, the pipeline in 'request'.
-    BSONArrayBuilder pipelineBuilder(aggregationBuilder.subarrayStart("pipeline"));
-    for (auto&& item : _pipeline) {
-        pipelineBuilder.append(item);
-    }
+    AggregationRequest expandedRequest{_namespace, resolvedPipeline};
 
-    for (auto&& item : request.getPipeline()) {
-        pipelineBuilder.append(item);
-    }
-    pipelineBuilder.doneFast();
-
-    // The cursor option is always specified regardless of the presence of batchSize.
-    if (request.getBatchSize()) {
-        BSONObjBuilder batchSizeBuilder(aggregationBuilder.subobjStart("cursor"));
-        batchSizeBuilder.append(AggregationRequest::kBatchSizeName, *request.getBatchSize());
-        batchSizeBuilder.doneFast();
+    if (request.getExplain()) {
+        expandedRequest.setExplain(request.getExplain());
     } else {
-        aggregationBuilder.append("cursor", BSONObj());
+        expandedRequest.setBatchSize(request.getBatchSize());
     }
 
-    if (request.isExplain()) {
-        aggregationBuilder.append("explain", true);
-    }
+    expandedRequest.setHint(request.getHint());
+    expandedRequest.setComment(request.getComment());
+    expandedRequest.setMaxTimeMS(request.getMaxTimeMS());
+    expandedRequest.setReadConcern(request.getReadConcern());
+    expandedRequest.setUnwrappedReadPref(request.getUnwrappedReadPref());
+    expandedRequest.setBypassDocumentValidation(request.shouldBypassDocumentValidation());
+    expandedRequest.setAllowDiskUse(request.shouldAllowDiskUse());
 
-    if (request.shouldBypassDocumentValidation()) {
-        aggregationBuilder.append("bypassDocumentValidation", true);
-    }
+    // Operations on a view must always use the default collation of the view. We must have already
+    // checked that if the user's request specifies a collation, it matches the collation of the
+    // view.
+    expandedRequest.setCollation(_defaultCollation);
 
-    if (request.shouldAllowDiskUse()) {
-        aggregationBuilder.append("allowDiskUse", true);
-    }
-
-    return aggregationBuilder.obj();
-}
-
-StatusWith<BSONObj> ResolvedView::asExpandedViewAggregation(const BSONObj& aggCommand) const {
-    auto aggRequest = AggregationRequest::parseFromBSON(_namespace, aggCommand);
-    if (!aggRequest.isOK()) {
-        return aggRequest.getStatus();
-    }
-
-    return asExpandedViewAggregation(aggRequest.getValue());
+    return expandedRequest;
 }
 
 }  // namespace mongo

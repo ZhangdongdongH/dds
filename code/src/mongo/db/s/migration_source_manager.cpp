@@ -33,22 +33,27 @@
 #include "mongo/db/s/migration_source_manager.h"
 
 #include "mongo/bson/bsonobjbuilder.h"
-#include "mongo/db/db_raii.h"
+#include "mongo/db/catalog_raii.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/logical_clock.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/s/migration_chunk_cloner_source_legacy.h"
 #include "mongo/db/s/migration_util.h"
-#include "mongo/db/s/operation_sharding_state.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
+#include "mongo/db/s/shard_metadata_util.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/s/sharding_state_recovery.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/db/s/sharding_statistics.h"
+#include "mongo/executor/task_executor.h"
+#include "mongo/executor/task_executor_pool.h"
 #include "mongo/s/catalog/type_chunk.h"
-#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/catalog/type_shard_collection.h"
+#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/commit_chunk_migration_request_type.h"
+#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/s/shard_key_pattern.h"
-#include "mongo/s/stale_exception.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/elapsed_tracker.h"
 #include "mongo/util/exit.h"
@@ -58,7 +63,11 @@
 
 namespace mongo {
 
+using namespace shardmetadatautil;
+
 namespace {
+
+const auto msmForCsr = CollectionShardingRuntime::declareDecoration<MigrationSourceManager*>();
 
 // Wait at most this much time for the recipient to catch up sufficiently so critical section can be
 // entered
@@ -70,68 +79,113 @@ const WriteConcernOptions kMajorityWriteConcern(WriteConcernOptions::kMajority,
                                                 WriteConcernOptions::SyncMode::UNSET,
                                                 Seconds(15));
 
+/**
+ * Best-effort attempt to ensure the recipient shard has refreshed its routing table to
+ * 'newCollVersion'. Fires and forgets an asychronous remote setShardVersion command.
+ */
+void refreshRecipientRoutingTable(OperationContext* opCtx,
+                                  const NamespaceString& nss,
+                                  ShardId toShard,
+                                  const HostAndPort& toShardHost,
+                                  const ChunkVersion& newCollVersion) {
+    SetShardVersionRequest ssv = SetShardVersionRequest::makeForVersioningNoPersist(
+        Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString(),
+        toShard,
+        ConnectionString(toShardHost),
+        nss,
+        newCollVersion,
+        false);
+
+    const executor::RemoteCommandRequest request(
+        toShardHost,
+        NamespaceString::kAdminDb.toString(),
+        ssv.toBSON(),
+        ReadPreferenceSetting{ReadPreference::PrimaryOnly}.toContainingBSON(),
+        opCtx,
+        executor::RemoteCommandRequest::kNoTimeout);
+
+    executor::TaskExecutor* const executor =
+        Grid::get(opCtx)->getExecutorPool()->getFixedExecutor();
+    auto noOp = [](const executor::TaskExecutor::RemoteCommandCallbackArgs&) {};
+    executor->scheduleRemoteCommand(request, noOp).getStatus().ignore();
+}
+
+Status checkCollectionEpochMatches(const ScopedCollectionMetadata& metadata, OID expectedEpoch) {
+    if (metadata->isSharded() && metadata->getCollVersion().epoch() == expectedEpoch)
+        return Status::OK();
+
+    return {ErrorCodes::IncompatibleShardingMetadata,
+            str::stream() << "The collection was dropped or recreated since the migration began. "
+                          << "Expected collection epoch: "
+                          << expectedEpoch.toString()
+                          << ", but found: "
+                          << (metadata->isSharded() ? metadata->getCollVersion().epoch().toString()
+                                                    : "unsharded collection.")};
+}
+
 }  // namespace
 
-MONGO_FP_DECLARE(migrationCommitNetworkError);
-MONGO_FP_DECLARE(failMigrationCommit);
-MONGO_FP_DECLARE(hangBeforeLeavingCriticalSection);
+MONGO_FAIL_POINT_DEFINE(doNotRefreshRecipientAfterCommit);
+MONGO_FAIL_POINT_DEFINE(failMigrationCommit);
+MONGO_FAIL_POINT_DEFINE(hangBeforeLeavingCriticalSection);
+MONGO_FAIL_POINT_DEFINE(migrationCommitNetworkError);
 
-MigrationSourceManager::MigrationSourceManager(OperationContext* txn,
+MigrationSourceManager* MigrationSourceManager::get(CollectionShardingRuntime& csr) {
+    return msmForCsr(csr);
+}
+
+MigrationSourceManager::MigrationSourceManager(OperationContext* opCtx,
                                                MoveChunkRequest request,
                                                ConnectionString donorConnStr,
                                                HostAndPort recipientHost)
     : _args(std::move(request)),
       _donorConnStr(std::move(donorConnStr)),
       _recipientHost(std::move(recipientHost)),
-      _startTime() {
-    invariant(!txn->lockState()->isLocked());
+      _stats(ShardingStatistics::get(opCtx)) {
+    invariant(!opCtx->lockState()->isLocked());
 
     // Disallow moving a chunk to ourselves
     uassert(ErrorCodes::InvalidOptions,
             "Destination shard cannot be the same as source",
             _args.getFromShardId() != _args.getToShardId());
 
-    const auto& oss = OperationShardingState::get(txn);
-    uassert(ErrorCodes::InvalidOptions, "collection version is missing", oss.hasShardVersion());
-
-    // Even though the moveChunk command transmits a value in the operation's shardVersion field,
-    // this value does not actually contain the shard version, but the global collection version.
-    const ChunkVersion expectedCollectionVersion = oss.getShardVersion(getNss());
-
     log() << "Starting chunk migration " << redact(_args.toString())
-          << " with expected collection version " << expectedCollectionVersion;
+          << " with expected collection version epoch " << _args.getVersionEpoch();
 
-    // Now that the collection is locked, snapshot the metadata and fetch the latest versions
-    ShardingState* const shardingState = ShardingState::get(txn);
-
-    ChunkVersion shardVersion;
-
-    Status refreshStatus = shardingState->refreshMetadataNow(txn, getNss(), &shardVersion);
-    if (!refreshStatus.isOK()) {
-        uasserted(refreshStatus.code(),
-                  str::stream() << "cannot start migrate of chunk " << _args.toString()
-                                << " due to "
-                                << refreshStatus.toString());
-    }
-
-    if (shardVersion.majorVersion() == 0) {
-        // If the major version is zero, this means we do not have any chunks locally to migrate in
-        // the first place
-        uasserted(ErrorCodes::IncompatibleShardingMetadata,
-                  str::stream() << "cannot start migrate of chunk " << _args.toString()
-                                << " with zero shard version");
-    }
+    // Force refresh of the metadata to ensure we have the latest
+    forceShardFilteringMetadataRefresh(opCtx, getNss());
 
     // Snapshot the committed metadata from the time the migration starts
-    {
-        ScopedTransaction scopedXact(txn, MODE_IS);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IS);
+    const auto collectionMetadataAndUUID = [&] {
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IS);
+        uassert(ErrorCodes::InvalidOptions,
+                "cannot move chunks for a collection that doesn't exist",
+                autoColl.getCollection());
 
-        _collectionMetadata = CollectionShardingState::get(txn, getNss())->getMetadata();
-        _keyPattern = _collectionMetadata->getKeyPattern();
-    }
+        boost::optional<UUID> collectionUUID;
+        if (autoColl.getCollection()->uuid()) {
+            collectionUUID = autoColl.getCollection()->uuid().value();
+        }
 
-    const ChunkVersion collectionVersion = _collectionMetadata->getCollVersion();
+        auto metadata = CollectionShardingState::get(opCtx, getNss())->getMetadata(opCtx);
+        uassert(ErrorCodes::IncompatibleShardingMetadata,
+                str::stream() << "cannot move chunks for an unsharded collection",
+                metadata->isSharded());
+
+        return std::make_tuple(std::move(metadata), std::move(collectionUUID));
+    }();
+
+    const auto& collectionMetadata = std::get<0>(collectionMetadataAndUUID);
+
+    const auto collectionVersion = collectionMetadata->getCollVersion();
+    const auto shardVersion = collectionMetadata->getShardVersion();
+
+    // If the shard major version is zero, this means we do not have any chunks locally to migrate
+    uassert(ErrorCodes::IncompatibleShardingMetadata,
+            str::stream() << "cannot move chunk " << _args.toString()
+                          << " because the shard doesn't contain any chunks",
+            shardVersion.majorVersion() > 0);
 
     uassert(ErrorCodes::StaleEpoch,
             str::stream() << "cannot move chunk " << _args.toString()
@@ -139,67 +193,72 @@ MigrationSourceManager::MigrationSourceManager(OperationContext* txn,
                           << "current epoch: "
                           << collectionVersion.epoch()
                           << ", cmd epoch: "
-                          << expectedCollectionVersion.epoch(),
-            expectedCollectionVersion.epoch() == collectionVersion.epoch());
-
-    // With nonzero shard version, we must have a coll version >= our shard version
-    invariant(collectionVersion >= shardVersion);
-
-    // With nonzero shard version, we must have a shard key
-    invariant(!_collectionMetadata->getKeyPattern().isEmpty());
+                          << _args.getVersionEpoch(),
+            _args.getVersionEpoch() == collectionVersion.epoch());
 
     ChunkType chunkToMove;
     chunkToMove.setMin(_args.getMinKey());
     chunkToMove.setMax(_args.getMaxKey());
-    if (_args.hasChunkVersion()) {
-        chunkToMove.setVersion(_args.getChunkVersion());
-    }
 
-    Status chunkValidateStatus = _collectionMetadata->checkChunkIsValid(chunkToMove);
-    if (!chunkValidateStatus.isOK()) {
-        uasserted(chunkValidateStatus.code(),
-                  str::stream() << "Unable to move chunk with arguments '" << _args.toString()
-                                << "' due to error "
-                                << chunkValidateStatus.reason());
-    }
+    uassertStatusOKWithContext(collectionMetadata->checkChunkIsValid(chunkToMove),
+                               str::stream() << "Unable to move chunk with arguments '"
+                                             << redact(_args.toString()));
+
+    _collectionEpoch = collectionVersion.epoch();
+    _collectionUuid = std::get<1>(collectionMetadataAndUUID);
 }
 
 MigrationSourceManager::~MigrationSourceManager() {
     invariant(!_cloneDriver);
+    _stats.totalDonorMoveChunkTimeMillis.addAndFetch(_entireOpTimer.millis());
 }
 
 NamespaceString MigrationSourceManager::getNss() const {
     return _args.getNss();
 }
 
-Status MigrationSourceManager::startClone(OperationContext* txn) {
-    invariant(!txn->lockState()->isLocked());
+Status MigrationSourceManager::startClone(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
     invariant(_state == kCreated);
-    auto scopedGuard = MakeGuard([&] { cleanupOnError(txn); });
+    auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
+    _stats.countDonorMoveChunkStarted.addAndFetch(1);
 
-    grid.catalogClient(txn)->logChange(txn,
-                                       "moveChunk.start",
-                                       getNss().ns(),
-                                       BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey()
-                                                  << "from"
-                                                  << _args.getFromShardId()
-                                                  << "to"
-                                                  << _args.getToShardId()),
-                                       ShardingCatalogClient::kMajorityWriteConcern);
+    Grid::get(opCtx)
+        ->catalogClient()
+        ->logChange(opCtx,
+                    "moveChunk.start",
+                    getNss().ns(),
+                    BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
+                               << _args.getFromShardId()
+                               << "to"
+                               << _args.getToShardId()),
+                    ShardingCatalogClient::kMajorityWriteConcern)
+        .ignore();
 
-    _cloneDriver = stdx::make_unique<MigrationChunkClonerSourceLegacy>(
-        _args, _collectionMetadata->getKeyPattern(), _donorConnStr, _recipientHost);
+    _cloneAndCommitTimer.reset();
 
     {
         // Register for notifications from the replication subsystem
-        ScopedTransaction scopedXact(txn, MODE_IX);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IX, MODE_X);
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IX, MODE_X);
+        auto* const css = CollectionShardingRuntime::get(opCtx, getNss());
 
-        auto css = CollectionShardingState::get(txn, getNss().ns());
-        css->setMigrationSourceManager(txn, this);
+        const auto metadata = css->getMetadata(opCtx);
+        Status status = checkCollectionEpochMatches(metadata, _collectionEpoch);
+        if (!status.isOK())
+            return status;
+
+        // Having the metadata manager registered on the collection sharding state is what indicates
+        // that a chunk on that collection is being migrated. With an active migration, write
+        // operations require the cloner to be present in order to track changes to the chunk which
+        // needs to be transmitted to the recipient.
+        _cloneDriver = stdx::make_unique<MigrationChunkClonerSourceLegacy>(
+            _args, metadata->getKeyPattern(), _donorConnStr, _recipientHost);
+
+        invariant(nullptr == std::exchange(msmForCsr(css), this));
     }
 
-    Status startCloneStatus = _cloneDriver->startClone(txn);
+    Status startCloneStatus = _cloneDriver->startClone(opCtx);
     if (!startCloneStatus.isOK()) {
         return startCloneStatus;
     }
@@ -209,14 +268,16 @@ Status MigrationSourceManager::startClone(OperationContext* txn) {
     return Status::OK();
 }
 
-Status MigrationSourceManager::awaitToCatchUp(OperationContext* txn) {
-    invariant(!txn->lockState()->isLocked());
+Status MigrationSourceManager::awaitToCatchUp(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
     invariant(_state == kCloning);
-    auto scopedGuard = MakeGuard([&] { cleanupOnError(txn); });
+    auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
+    _stats.totalDonorChunkCloneTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
+    _cloneAndCommitTimer.reset();
 
     // Block until the cloner deems it appropriate to enter the critical section.
     Status catchUpStatus = _cloneDriver->awaitUntilCriticalSectionIsAppropriate(
-        txn, kMaxWaitToEnterCriticalSectionTimeout);
+        opCtx, kMaxWaitToEnterCriticalSectionTimeout);
     if (!catchUpStatus.isOK()) {
         return catchUpStatus;
     }
@@ -226,55 +287,73 @@ Status MigrationSourceManager::awaitToCatchUp(OperationContext* txn) {
     return Status::OK();
 }
 
-Status MigrationSourceManager::enterCriticalSection(OperationContext* txn) {
-    invariant(!txn->lockState()->isLocked());
+Status MigrationSourceManager::enterCriticalSection(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
     invariant(_state == kCloneCaughtUp);
-    auto scopedGuard = MakeGuard([&] { cleanupOnError(txn); });
+    auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
+    _stats.totalDonorChunkCloneTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
+    _cloneAndCommitTimer.reset();
 
-    // Mark the shard as running critical operation, which requires recovery on crash
-    Status status = ShardingStateRecovery::startMetadataOp(txn);
+    {
+        const auto metadata = [&] {
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            AutoGetCollection autoColl(opCtx, _args.getNss(), MODE_IS);
+            return CollectionShardingState::get(opCtx, _args.getNss())->getMetadata(opCtx);
+        }();
+
+        Status status = checkCollectionEpochMatches(metadata, _collectionEpoch);
+        if (!status.isOK())
+            return status;
+
+        _notifyChangeStreamsOnRecipientFirstChunk(opCtx, metadata);
+    }
+
+    // Mark the shard as running critical operation, which requires recovery on crash.
+    //
+    // NOTE: The 'migrateChunkToNewShard' oplog message written by the above call to
+    // '_notifyChangeStreamsOnRecipientFirstChunk' depends on this majority write to carry its local
+    // write to majority committed.
+    Status status = ShardingStateRecovery::startMetadataOp(opCtx);
     if (!status.isOK()) {
         return status;
     }
 
-    {
-        // The critical section must be entered with collection X lock in order to ensure there are
-        // no writes which could have entered and passed the version check just before we entered
-        // the crticial section, but managed to complete after we left it.
-        ScopedTransaction scopedXact(txn, MODE_IX);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IX, MODE_X);
+    _critSec.emplace(opCtx, _args.getNss());
 
-        auto css = CollectionShardingState::get(txn, getNss().ns());
-        auto metadata = css->getMetadata();
-        if (!metadata ||
-            !metadata->getCollVersion().equals(_collectionMetadata->getCollVersion())) {
-            return {ErrorCodes::IncompatibleShardingMetadata,
-                    str::stream()
-                        << "Sharding metadata changed while holding distributed lock. Expected: "
-                        << _collectionMetadata->getCollVersion().toString()
-                        << ", but found: "
-                        << (metadata ? metadata->getCollVersion().toString()
-                                     : "unsharded collection.")};
-        }
+    _state = kCriticalSection;
 
-        // IMPORTANT: After this line, the critical section is in place and needs to be signaled
-        _critSecSignal = std::make_shared<Notification<void>>();
+    // Persist a signal to secondaries that we've entered the critical section. This is will cause
+    // secondaries to refresh their routing table when next accessed, which will block behind the
+    // critical section. This ensures causal consistency by preventing a stale mongos with a cluster
+    // time inclusive of the migration config commit update from accessing secondary data.
+    // Note: this write must occur after the critSec flag is set, to ensure the secondary refresh
+    // will stall behind the flag.
+    Status signalStatus =
+        updateShardCollectionsEntry(opCtx,
+                                    BSON(ShardCollectionType::ns() << getNss().ns()),
+                                    BSONObj(),
+                                    BSON(ShardCollectionType::enterCriticalSectionCounter() << 1),
+                                    false /*upsert*/);
+    if (!signalStatus.isOK()) {
+        return {
+            ErrorCodes::OperationFailed,
+            str::stream() << "Failed to persist critical section signal for secondaries due to: "
+                          << signalStatus.toString()};
     }
 
     log() << "Migration successfully entered critical section";
 
-    _state = kCriticalSection;
     scopedGuard.Dismiss();
     return Status::OK();
 }
 
-Status MigrationSourceManager::commitChunkOnRecipient(OperationContext* txn) {
-    invariant(!txn->lockState()->isLocked());
+Status MigrationSourceManager::commitChunkOnRecipient(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
     invariant(_state == kCriticalSection);
-    auto scopedGuard = MakeGuard([&] { cleanupOnError(txn); });
+    auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
 
     // Tell the recipient shard to fetch the latest changes.
-    Status commitCloneStatus = _cloneDriver->commitClone(txn);
+    auto commitCloneStatus = _cloneDriver->commitClone(opCtx);
 
     if (MONGO_FAIL_POINT(failMigrationCommit) && commitCloneStatus.isOK()) {
         commitCloneStatus = {ErrorCodes::InternalError,
@@ -282,52 +361,71 @@ Status MigrationSourceManager::commitChunkOnRecipient(OperationContext* txn) {
     }
 
     if (!commitCloneStatus.isOK()) {
-        return {commitCloneStatus.code(),
-                str::stream() << "commit clone failed due to " << commitCloneStatus.toString()};
+        return commitCloneStatus.getStatus().withContext("commit clone failed");
     }
+
+    _recipientCloneCounts = commitCloneStatus.getValue()["counts"].Obj().getOwned();
 
     _state = kCloneCompleted;
     scopedGuard.Dismiss();
     return Status::OK();
 }
 
-Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* txn) {
-    invariant(!txn->lockState()->isLocked());
+Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opCtx) {
+    invariant(!opCtx->lockState()->isLocked());
     invariant(_state == kCloneCompleted);
-    auto scopedGuard = MakeGuard([&] { cleanupOnError(txn); });
-
-    ChunkType migratedChunkType;
-    migratedChunkType.setMin(_args.getMinKey());
-    migratedChunkType.setMax(_args.getMaxKey());
+    auto scopedGuard = MakeGuard([&] { cleanupOnError(opCtx); });
 
     // If we have chunks left on the FROM shard, bump the version of one of them as well. This will
     // change the local collection major version, which indicates to other processes that the chunk
     // metadata has changed and they should refresh.
-    boost::optional<ChunkType> controlChunkType = boost::none;
-    if (_collectionMetadata->getNumChunks() > 1) {
+    BSONObjBuilder builder;
+
+    {
+        const auto metadata = [&] {
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            AutoGetCollection autoColl(opCtx, _args.getNss(), MODE_IS);
+            return CollectionShardingState::get(opCtx, _args.getNss())->getMetadata(opCtx);
+        }();
+
+        Status status = checkCollectionEpochMatches(metadata, _collectionEpoch);
+        if (!status.isOK())
+            return status;
+
+        boost::optional<ChunkType> controlChunkType = boost::none;
         ChunkType differentChunk;
-        invariant(_collectionMetadata->getDifferentChunk(_args.getMinKey(), &differentChunk));
-        invariant(differentChunk.getMin().woCompare(_args.getMinKey()) != 0);
-        controlChunkType = std::move(differentChunk);
-    } else {
-        log() << "Moving last chunk for the collection out";
+        if (metadata->getDifferentChunk(_args.getMinKey(), &differentChunk)) {
+            controlChunkType = std::move(differentChunk);
+        } else {
+            log() << "Moving last chunk for the collection out";
+        }
+
+        ChunkType migratedChunkType;
+        migratedChunkType.setMin(_args.getMinKey());
+        migratedChunkType.setMax(_args.getMaxKey());
+
+        CommitChunkMigrationRequest::appendAsCommand(
+            &builder,
+            getNss(),
+            _args.getFromShardId(),
+            _args.getToShardId(),
+            migratedChunkType,
+            controlChunkType,
+            metadata->getCollVersion(),
+            LogicalClock::get(opCtx)->getClusterTime().asTimestamp());
+
+        builder.append(kWriteConcernField, kMajorityWriteConcern.toBSON());
     }
 
-    BSONObjBuilder builder;
-    CommitChunkMigrationRequest::appendAsCommand(&builder,
-                                                 getNss(),
-                                                 _args.getFromShardId(),
-                                                 _args.getToShardId(),
-                                                 migratedChunkType,
-                                                 controlChunkType,
-                                                 _collectionMetadata->getCollVersion(),
-                                                 _args.getTakeDistLock());
+    // Read operations must begin to wait on the critical section just before we send the commit
+    // operation to the config server
+    _critSec->enterCommitPhase();
 
-    builder.append(kWriteConcernField, kMajorityWriteConcern.toBSON());
+    Timer t;
 
     auto commitChunkMigrationResponse =
-        grid.shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
-            txn,
+        Grid::get(opCtx)->shardRegistry()->getConfigShard()->runCommandWithFixedRetryAttempts(
+            opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
             "admin",
             builder.obj(),
@@ -338,9 +436,13 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* txn
             ErrorCodes::InternalError, "Failpoint 'migrationCommitNetworkError' generated error");
     }
 
-    const Status migrationCommitStatus =
-        (commitChunkMigrationResponse.isOK() ? commitChunkMigrationResponse.getValue().commandStatus
-                                             : commitChunkMigrationResponse.getStatus());
+    Status migrationCommitStatus = commitChunkMigrationResponse.getStatus();
+    if (migrationCommitStatus.isOK()) {
+        migrationCommitStatus = commitChunkMigrationResponse.getValue().commandStatus;
+        if (migrationCommitStatus.isOK()) {
+            migrationCommitStatus = commitChunkMigrationResponse.getValue().writeConcernStatus;
+        }
+    }
 
     if (!migrationCommitStatus.isOK()) {
         // Need to get the latest optime in case the refresh request goes to a secondary --
@@ -350,8 +452,8 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* txn
                  "against the config server to obtain its latest optime"
               << causedBy(redact(migrationCommitStatus));
 
-        Status status = grid.catalogClient(txn)->logChange(
-            txn,
+        Status status = Grid::get(opCtx)->catalogClient()->logChange(
+            opCtx,
             "moveChunk.validating",
             getNss().ns(),
             BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
@@ -363,133 +465,272 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* txn
         if ((ErrorCodes::isInterruption(status.code()) ||
              ErrorCodes::isShutdownError(status.code()) ||
              status == ErrorCodes::CallbackCanceled) &&
-            inShutdown()) {
+            globalInShutdownDeprecated()) {
             // Since the server is already doing a clean shutdown, this call will just join the
             // previous shutdown call
             shutdown(waitForShutdown());
         }
 
-        fassertStatusOK(
-            40137,
-            {status.code(),
-             str::stream() << "Failed to commit migration for chunk " << _args.toString()
-                           << " due to "
-                           << redact(migrationCommitStatus)
-                           << ". Updating the optime with a write before refreshing the "
-                           << "metadata also failed with "
-                           << redact(status)});
+        // If we failed to get the latest config optime because we stepped down as primary, then it
+        // is safe to fail without crashing because the new primary will fetch the latest optime
+        // when it recovers the sharding state recovery document, as long as we also clear the
+        // metadata for this collection, forcing subsequent callers to do a full refresh. Check if
+        // this node can accept writes for this collection as a proxy for it being primary.
+        if (!status.isOK()) {
+            UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+            AutoGetCollection autoColl(opCtx, getNss(), MODE_IX, MODE_X);
+            if (!repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, getNss())) {
+                CollectionShardingRuntime::get(opCtx, getNss())->refreshMetadata(opCtx, nullptr);
+                uassertStatusOK(status.withContext(
+                    str::stream() << "Unable to verify migration commit for chunk: "
+                                  << redact(_args.toString())
+                                  << " because the node's replication role changed. Metadata "
+                                     "was cleared for: "
+                                  << getNss().ns()
+                                  << ", so it will get a full refresh when accessed again."));
+            }
+        }
+
+        fassert(40137,
+                status.withContext(
+                    str::stream() << "Failed to commit migration for chunk " << _args.toString()
+                                  << " due to "
+                                  << redact(migrationCommitStatus)
+                                  << ". Updating the optime with a write before refreshing the "
+                                  << "metadata also failed"));
     }
 
-    // Do a best effort attempt to incrementally refresh the metadata. If this fails, just clear it
-    // up so that subsequent requests will try to do a full refresh.
-    ChunkVersion unusedShardVersion;
-    Status refreshStatus =
-        ShardingState::get(txn)->refreshMetadataNow(txn, getNss(), &unusedShardVersion);
-
-    if (refreshStatus.isOK()) {
-        ScopedTransaction scopedXact(txn, MODE_IS);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IS);
-
-        auto refreshedMetadata = CollectionShardingState::get(txn, getNss())->getMetadata();
-
-        if (!refreshedMetadata) {
-            return {ErrorCodes::NamespaceNotSharded,
-                    str::stream() << "Chunk move failed because collection '" << getNss().ns()
-                                  << "' is no longer sharded. The migration commit error was: "
-                                  << migrationCommitStatus.toString()};
+    // Do a best effort attempt to incrementally refresh the metadata before leaving the critical
+    // section. It is okay if the refresh fails because that will cause the metadata to be cleared
+    // and subsequent callers will try to do a full refresh.
+    const auto refreshStatus = [&] {
+        try {
+            forceShardFilteringMetadataRefresh(opCtx, getNss(), true);
+            return Status::OK();
+        } catch (const DBException& ex) {
+            return ex.toStatus();
         }
+    }();
 
-        if (refreshedMetadata->keyBelongsToMe(_args.getMinKey())) {
-            // The chunk modification was not applied, so report the original error
-            return {migrationCommitStatus.code(),
-                    str::stream() << "Chunk move was not successful due to "
-                                  << migrationCommitStatus.reason()};
-        }
+    if (!refreshStatus.isOK()) {
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IX, MODE_X);
 
-        // Migration succeeded
-        log() << "Migration succeeded and updated collection version to "
-              << refreshedMetadata->getCollVersion();
-    } else {
-        ScopedTransaction scopedXact(txn, MODE_IX);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IX, MODE_X);
+        CollectionShardingRuntime::get(opCtx, getNss())->refreshMetadata(opCtx, nullptr);
 
-        CollectionShardingState::get(txn, getNss())->refreshMetadata(txn, nullptr);
-
-        log() << "Failed to refresh metadata after a failed commit attempt. Metadata was cleared "
-                 "so it will get a full refresh when accessed again"
+        log() << "Failed to refresh metadata after a "
+              << (migrationCommitStatus.isOK() ? "failed commit attempt" : "successful commit")
+              << ". Metadata was cleared so it will get a full refresh when accessed again."
               << causedBy(redact(refreshStatus));
 
-        // We don't know whether migration succeeded or failed
-        return {migrationCommitStatus.code(),
-                str::stream() << "Failed to refresh metadata after migration commit due to "
-                              << refreshStatus.toString()};
+        // migrationCommitStatus may be OK or an error. The migration is considered a success at
+        // this point if the commit succeeded. The metadata refresh either occurred or the metadata
+        // was safely cleared.
+        return migrationCommitStatus.withContext(
+            str::stream() << "Orphaned range not cleaned up. Failed to refresh metadata after"
+                             " migration commit due to '"
+                          << refreshStatus.toString()
+                          << "' after commit failed");
     }
+
+    auto refreshedMetadata = [&] {
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IS);
+        return CollectionShardingState::get(opCtx, getNss())->getMetadata(opCtx);
+    }();
+
+    if (!refreshedMetadata->isSharded()) {
+        return {ErrorCodes::NamespaceNotSharded,
+                str::stream() << "Chunk move failed because collection '" << getNss().ns()
+                              << "' is no longer sharded. The migration commit error was: "
+                              << migrationCommitStatus.toString()};
+    }
+
+    if (refreshedMetadata->keyBelongsToMe(_args.getMinKey())) {
+        // This condition may only happen if the migration commit has failed for any reason
+        if (migrationCommitStatus.isOK()) {
+            severe() << "The migration commit succeeded, but the new chunk placement was not "
+                        "reflected after metadata refresh, which is an indication of an "
+                        "afterOpTime bug.";
+            severe() << "The current config server opTime is " << Grid::get(opCtx)->configOpTime();
+            severe() << "The commit response came from "
+                     << redact(commitChunkMigrationResponse.getValue().hostAndPort->toString())
+                     << " and contained:";
+            severe() << "  metadata: "
+                     << redact(commitChunkMigrationResponse.getValue().metadata.toString());
+            severe() << "  response: "
+                     << redact(commitChunkMigrationResponse.getValue().response.toString());
+
+            fassertFailed(50878);
+        }
+
+        // The chunk modification was not applied, so report the original error
+        return migrationCommitStatus.withContext("Chunk move was not successful");
+    }
+
+    // Migration succeeded
+    log() << "Migration succeeded and updated collection version to "
+          << refreshedMetadata->getCollVersion();
 
     MONGO_FAIL_POINT_PAUSE_WHILE_SET(hangBeforeLeavingCriticalSection);
 
     scopedGuard.Dismiss();
-    _cleanup(txn);
 
-    grid.catalogClient(txn)->logChange(txn,
-                                       "moveChunk.commit",
-                                       getNss().ns(),
-                                       BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey()
-                                                  << "from"
-                                                  << _args.getFromShardId()
-                                                  << "to"
-                                                  << _args.getToShardId()),
-                                       ShardingCatalogClient::kMajorityWriteConcern);
+    _stats.totalCriticalSectionCommitTimeMillis.addAndFetch(t.millis());
+
+    // Exit the critical section and ensure that all the necessary state is fully persisted before
+    // scheduling orphan cleanup.
+    _cleanup(opCtx);
+
+    Grid::get(opCtx)
+        ->catalogClient()
+        ->logChange(opCtx,
+                    "moveChunk.commit",
+                    getNss().ns(),
+                    BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
+                               << _args.getFromShardId()
+                               << "to"
+                               << _args.getToShardId()
+                               << "counts"
+                               << _recipientCloneCounts),
+                    ShardingCatalogClient::kMajorityWriteConcern)
+        .ignore();
+
+    const ChunkRange range(_args.getMinKey(), _args.getMaxKey());
+
+    auto notification = [&] {
+        auto const whenToClean = _args.getWaitForDelete() ? CollectionShardingRuntime::kNow
+                                                          : CollectionShardingRuntime::kDelayed;
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IS);
+        return CollectionShardingRuntime::get(opCtx, getNss())->cleanUpRange(range, whenToClean);
+    }();
+
+    if (!MONGO_FAIL_POINT(doNotRefreshRecipientAfterCommit)) {
+        // Best-effort make the recipient refresh its routing table to the new collection version.
+        refreshRecipientRoutingTable(opCtx,
+                                     getNss(),
+                                     _args.getToShardId(),
+                                     _recipientHost,
+                                     refreshedMetadata->getCollVersion());
+    }
+
+    if (_args.getWaitForDelete()) {
+        log() << "Waiting for cleanup of " << getNss().ns() << " range "
+              << redact(range.toString());
+        return notification.waitStatus(opCtx);
+    }
+
+    if (notification.ready() && !notification.waitStatus(opCtx).isOK()) {
+        warning() << "Failed to initiate cleanup of " << getNss().ns() << " range "
+                  << redact(range.toString())
+                  << " due to: " << redact(notification.waitStatus(opCtx));
+    } else {
+        log() << "Leaving cleanup of " << getNss().ns() << " range " << redact(range.toString())
+              << " to complete in background";
+        notification.abandon();
+    }
 
     return Status::OK();
 }
 
-void MigrationSourceManager::cleanupOnError(OperationContext* txn) {
+void MigrationSourceManager::cleanupOnError(OperationContext* opCtx) {
     if (_state == kDone) {
         return;
     }
 
-    grid.catalogClient(txn)->logChange(txn,
-                                       "moveChunk.error",
-                                       getNss().ns(),
-                                       BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey()
-                                                  << "from"
-                                                  << _args.getFromShardId()
-                                                  << "to"
-                                                  << _args.getToShardId()),
-                                       ShardingCatalogClient::kMajorityWriteConcern);
+    Grid::get(opCtx)
+        ->catalogClient()
+        ->logChange(opCtx,
+                    "moveChunk.error",
+                    getNss().ns(),
+                    BSON("min" << _args.getMinKey() << "max" << _args.getMaxKey() << "from"
+                               << _args.getFromShardId()
+                               << "to"
+                               << _args.getToShardId()),
+                    ShardingCatalogClient::kMajorityWriteConcern)
+        .ignore();
 
-    _cleanup(txn);
+    try {
+        _cleanup(opCtx);
+    } catch (const ExceptionForCat<ErrorCategory::NotMasterError>& ex) {
+        warning() << "Failed to clean up migration: " << redact(_args.toString())
+                  << "due to: " << redact(ex);
+    }
 }
 
-void MigrationSourceManager::_cleanup(OperationContext* txn) {
+void MigrationSourceManager::_notifyChangeStreamsOnRecipientFirstChunk(
+    OperationContext* opCtx, const ScopedCollectionMetadata& metadata) {
+    // If this is not the first donation, there is nothing to be done
+    if (metadata->getChunkManager()->getVersion(_args.getToShardId()).isSet())
+        return;
+
+    const std::string dbgMessage = str::stream()
+        << "Migrating chunk from shard " << _args.getFromShardId() << " to shard "
+        << _args.getToShardId() << " with no chunks for this collection";
+
+    // The message expected by change streams
+    const auto o2Message = BSON("type"
+                                << "migrateChunkToNewShard"
+                                << "from"
+                                << _args.getFromShardId()
+                                << "to"
+                                << _args.getToShardId());
+
+    auto const serviceContext = opCtx->getClient()->getServiceContext();
+
+    UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+    AutoGetCollection autoColl(opCtx, NamespaceString::kRsOplogNamespace, MODE_IX);
+    writeConflictRetry(
+        opCtx, "migrateChunkToNewShard", NamespaceString::kRsOplogNamespace.ns(), [&] {
+            WriteUnitOfWork uow(opCtx);
+            serviceContext->getOpObserver()->onInternalOpMessage(
+                opCtx, getNss(), _collectionUuid, BSON("msg" << dbgMessage), o2Message);
+            uow.commit();
+        });
+}
+
+void MigrationSourceManager::_cleanup(OperationContext* opCtx) {
     invariant(_state != kDone);
 
-    {
-        // Unregister from the collection's sharding state
-        ScopedTransaction scopedXact(txn, MODE_IX);
-        AutoGetCollection autoColl(txn, getNss(), MODE_IX, MODE_X);
+    auto cloneDriver = [&]() {
+        // Unregister from the collection's sharding state and exit the migration critical section.
+        UninterruptibleLockGuard noInterrupt(opCtx->lockState());
+        AutoGetCollection autoColl(opCtx, getNss(), MODE_IX, MODE_X);
+        auto* const css = CollectionShardingRuntime::get(opCtx, getNss());
 
-        auto css = CollectionShardingState::get(txn, getNss().ns());
+        invariant(this == std::exchange(msmForCsr(css), nullptr));
+        _critSec.reset();
+        return std::move(_cloneDriver);
+    }();
 
-        // The migration source manager is not visible anymore after it is unregistered from the
-        // collection
-        css->clearMigrationSourceManager(txn);
+    // The cleanup operations below are potentially blocking or acquire other locks, so perform them
+    // outside of the collection X lock
 
-        // Leave the critical section.
-        if (_critSecSignal) {
-            _critSecSignal->set();
-        }
+    if (cloneDriver) {
+        cloneDriver->cancelClone(opCtx);
     }
 
-    // Decrement the metadata op counter outside of the collection lock in order to hold it for as
-    // short as possible.
     if (_state == kCriticalSection || _state == kCloneCompleted) {
-        ShardingStateRecovery::endMetadataOp(txn);
-    }
+        _stats.totalCriticalSectionTimeMillis.addAndFetch(_cloneAndCommitTimer.millis());
 
-    if (_cloneDriver) {
-        _cloneDriver->cancelClone(txn);
-        _cloneDriver.reset();
+        // NOTE: The order of the operations below is important and the comments explain the
+        // reasoning behind it
+
+        // Wait for the updates to the cache of the routing table to be fully written to disk before
+        // clearing the 'minOpTime recovery' document. This way, we ensure that all nodes from a
+        // shard, which donated a chunk will always be at the shard version of the last migration it
+        // performed.
+        //
+        // If the metadata is not persisted before clearing the 'inMigration' flag below, it is
+        // possible that the persisted metadata is rolled back after step down, but the write which
+        // cleared the 'inMigration' flag is not, a secondary node will report itself at an older
+        // shard version.
+        CatalogCacheLoader::get(opCtx).waitForCollectionFlush(opCtx, getNss());
+
+        // Clear the 'minOpTime recovery' document so that the next time a node from this shard
+        // becomes a primary, it won't have to recover the config server optime.
+        ShardingStateRecovery::endMetadataOp(opCtx);
     }
 
     _state = kDone;

@@ -49,7 +49,7 @@
 #include "mongo/db/storage/mmap_v1/logfile.h"
 #include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
-#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/platform/random.h"
 #include "mongo/util/checksum.h"
@@ -162,7 +162,7 @@ bool JSectFooter::checkHash(const void* begin, int len) const {
 }
 
 namespace {
-SecureRandom* mySecureRandom = NULL;
+std::unique_ptr<SecureRandom> mySecureRandom;
 stdx::mutex mySecureRandomMutex;
 int64_t getMySecureRandomNumber() {
     stdx::lock_guard<stdx::mutex> lk(mySecureRandomMutex);
@@ -417,7 +417,7 @@ void checkFreeSpace() {
         log() << "Please make at least " << spaceNeeded / (1024 * 1024) << "MB available in "
               << getJournalDir().string() << " or use --smallfiles" << endl;
         log() << endl;
-        throw UserException(15926, "Insufficient free space for journals");
+        uasserted(15926, "Insufficient free space for journals");
     }
 }
 
@@ -725,7 +725,7 @@ void Journal::removeUnneededJournalFiles() {
 }
 
 void Journal::_rotate(unsigned long long lsnOfCurrentJournalEntry) {
-    if (inShutdown() || !_curLogFile)
+    if (globalInShutdownDeprecated() || !_curLogFile)
         return;
 
     j.updateLSNFile(lsnOfCurrentJournalEntry);

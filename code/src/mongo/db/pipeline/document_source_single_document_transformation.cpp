@@ -45,8 +45,12 @@ using boost::intrusive_ptr;
 DocumentSourceSingleDocumentTransformation::DocumentSourceSingleDocumentTransformation(
     const intrusive_ptr<ExpressionContext>& pExpCtx,
     std::unique_ptr<TransformerInterface> parsedTransform,
-    std::string name)
-    : DocumentSource(pExpCtx), _parsedTransform(std::move(parsedTransform)), _name(name) {}
+    std::string name,
+    bool isIndependentOfAnyCollection)
+    : DocumentSource(pExpCtx),
+      _parsedTransform(std::move(parsedTransform)),
+      _name(std::move(name)),
+      _isIndependentOfAnyCollection(isIndependentOfAnyCollection) {}
 
 const char* DocumentSourceSingleDocumentTransformation::getSourceName() const {
     return _name.c_str();
@@ -70,21 +74,27 @@ intrusive_ptr<DocumentSource> DocumentSourceSingleDocumentTransformation::optimi
     return this;
 }
 
-void DocumentSourceSingleDocumentTransformation::dispose() {
-    _parsedTransform.reset();
+void DocumentSourceSingleDocumentTransformation::doDispose() {
+    if (_parsedTransform) {
+        // Cache the stage options document in case this stage is serialized after disposing.
+        _cachedStageOptions = _parsedTransform->serializeStageOptions(pExpCtx->explain);
+        _parsedTransform.reset();
+    }
 }
 
-Value DocumentSourceSingleDocumentTransformation::serialize(bool explain) const {
-    return Value(Document{{getSourceName(), _parsedTransform->serialize(explain)}});
+Value DocumentSourceSingleDocumentTransformation::serialize(
+    boost::optional<ExplainOptions::Verbosity> explain) const {
+    return Value(Document{{getSourceName(),
+                           _parsedTransform ? _parsedTransform->serializeStageOptions(explain)
+                                            : _cachedStageOptions}});
 }
 
 Pipeline::SourceContainer::iterator DocumentSourceSingleDocumentTransformation::doOptimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
     invariant(*itr == this);
     auto nextSkip = dynamic_cast<DocumentSourceSkip*>((*std::next(itr)).get());
-    auto nextLimit = dynamic_cast<DocumentSourceLimit*>((*std::next(itr)).get());
 
-    if (nextSkip || nextLimit) {
+    if (nextSkip) {
         std::swap(*itr, *std::next(itr));
         return itr == container->begin() ? itr : std::prev(itr);
     }
@@ -96,10 +106,6 @@ DocumentSource::GetDepsReturn DocumentSourceSingleDocumentTransformation::getDep
     // Each parsed transformation is responsible for adding its own dependencies, and returning
     // the correct dependency return type for that transformation.
     return _parsedTransform->addDependencies(deps);
-}
-
-void DocumentSourceSingleDocumentTransformation::doInjectExpressionContext() {
-    _parsedTransform->injectExpressionContext(pExpCtx);
 }
 
 DocumentSource::GetModPathsReturn DocumentSourceSingleDocumentTransformation::getModifiedPaths()

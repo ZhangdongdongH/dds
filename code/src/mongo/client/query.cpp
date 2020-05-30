@@ -53,8 +53,7 @@ Query& Query::hint(const string& jsonKeyPatt) {
 Query& Query::where(const string& jscode, BSONObj scope) {
     /* use where() before sort() and hint() and explain(), else this will assert. */
     verify(!isComplex());
-    BSONObjBuilder b;
-    b.appendElements(obj);
+    BSONObjBuilder b(std::move(obj));
     b.appendWhere(jscode, scope);
     obj = b.obj();
     return *this;
@@ -80,11 +79,6 @@ Query& Query::hint(BSONObj keyPattern) {
 
 Query& Query::explain() {
     appendComplex("$explain", true);
-    return *this;
-}
-
-Query& Query::snapshot() {
-    appendComplex("$snapshot", true);
     return *this;
 }
 
@@ -115,7 +109,8 @@ bool Query::isComplex(const BSONObj& obj, bool* hasDollar) {
 }
 
 Query& Query::readPref(ReadPreference pref, const BSONArray& tags) {
-    appendComplex(ReadPrefField.name().c_str(), ReadPreferenceSetting(pref, TagSet(tags)).toBSON());
+    appendComplex(ReadPrefField.name().c_str(),
+                  ReadPreferenceSetting(pref, TagSet(tags)).toInnerBSON());
     return *this;
 }
 

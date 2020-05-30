@@ -66,7 +66,7 @@ public:
     bool isEOF() final;
     StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_SORT_MERGE;
@@ -96,7 +96,7 @@ private:
     bool _dedup;
 
     // Which RecordIds have we seen?
-    unordered_set<RecordId, RecordId::Hasher> _seen;
+    stdx::unordered_set<RecordId, RecordId::Hasher> _seen;
 
     // In order to pick the next smallest value, we need each child work(...) until it produces
     // a result.  This is the queue of children that haven't given us a result yet.

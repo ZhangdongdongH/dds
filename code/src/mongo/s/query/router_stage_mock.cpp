@@ -50,7 +50,7 @@ void RouterStageMock::markRemotesExhausted() {
     _remotesExhausted = true;
 }
 
-StatusWith<ClusterQueryResult> RouterStageMock::next() {
+StatusWith<ClusterQueryResult> RouterStageMock::next(RouterExecStage::ExecContext execContext) {
     if (_resultsQueue.empty()) {
         return {ClusterQueryResult()};
     }
@@ -60,7 +60,7 @@ StatusWith<ClusterQueryResult> RouterStageMock::next() {
     return out;
 }
 
-void RouterStageMock::kill() {
+void RouterStageMock::kill(OperationContext* opCtx) {
     // No child to kill.
 }
 
@@ -68,13 +68,9 @@ bool RouterStageMock::remotesExhausted() {
     return _remotesExhausted;
 }
 
-Status RouterStageMock::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
+Status RouterStageMock::doSetAwaitDataTimeout(Milliseconds awaitDataTimeout) {
     _awaitDataTimeout = awaitDataTimeout;
     return Status::OK();
-}
-
-void RouterStageMock::setOperationContext(OperationContext* txn) {
-    // Do nothing
 }
 
 StatusWith<Milliseconds> RouterStageMock::getAwaitDataTimeout() {

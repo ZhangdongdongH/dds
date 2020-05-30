@@ -37,11 +37,10 @@
 #include "mongo/db/query/query_request.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/sharding_test_fixture.h"
+#include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/net/hostandport.h"
 
@@ -52,12 +51,12 @@ using executor::RemoteCommandRequest;
 using std::vector;
 using unittest::assertGet;
 
-const BSONObj kReplSecondaryOkMetadata{[] {
+BSONObj getReplSecondaryOkMetadata() {
     BSONObjBuilder o;
-    o.appendElements(rpc::ServerSelectionMetadata(true, boost::none).toBSON());
+    ReadPreferenceSetting(ReadPreference::Nearest).toContainingBSON(&o);
     o.append(rpc::kReplSetMetadataFieldName, 1);
     return o.obj();
-}()};
+}
 
 class BalancerConfigurationTestFixture : public ShardingTestFixture {
 protected:
@@ -67,7 +66,7 @@ protected:
      */
     void expectSettingsQuery(StringData key, StatusWith<boost::optional<BSONObj>> result) {
         onFindCommand([&](const RemoteCommandRequest& request) {
-            ASSERT_BSONOBJ_EQ(kReplSecondaryOkMetadata,
+            ASSERT_BSONOBJ_EQ(getReplSecondaryOkMetadata(),
                               rpc::TrackingMetadata::removeTrackingData(request.metadata));
 
             const NamespaceString nss(request.dbname, request.cmdObj.firstElement().String());
@@ -75,7 +74,7 @@ protected:
 
             auto query = assertGet(QueryRequest::makeFromFindCommand(nss, request.cmdObj, false));
 
-            ASSERT_EQ(query->ns(), "config.settings");
+            ASSERT_EQ(query->nss().ns(), "config.settings");
             ASSERT_BSONOBJ_EQ(query->getFilter(), BSON("_id" << key));
 
             checkReadConcern(request.cmdObj, Timestamp(0, 0), repl::OpTime::kUninitializedTerm);

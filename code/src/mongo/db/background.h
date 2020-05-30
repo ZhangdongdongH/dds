@@ -36,6 +36,7 @@
 #include <iosfwd>
 #include <map>
 #include <set>
+#include <vector>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
@@ -57,6 +58,7 @@ class BackgroundOperation {
 
 public:
     static bool inProgForDb(StringData db);
+    static int numInProgForDb(StringData db);
     static bool inProgForNs(StringData ns);
     static void assertNoBgOpInProgForDb(StringData db);
     static void assertNoBgOpInProgForNs(StringData ns);

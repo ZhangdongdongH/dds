@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -33,27 +33,23 @@ file_create(const char *name)
 {
 	WT_SESSION *session;
 	int ret;
-	char *p, *end, config[128];
+	char config[128];
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	p = config;
-	end = config + sizeof(config);
-	p += snprintf(p, (size_t)(end - p),
+	testutil_check(__wt_snprintf(config, sizeof(config),
 	    "key_format=%s,"
 	    "internal_page_max=%d,"
-	    "leaf_page_max=%d,",
-	    ftype == ROW ? "u" : "r", 16 * 1024, 128 * 1024);
-	if (ftype == FIX)
-		(void)snprintf(p, (size_t)(end - p), ",value_format=3t");
+	    "leaf_page_max=%d,"
+	    "%s",
+	    ftype == ROW ? "u" : "r", 16 * 1024, 128 * 1024,
+	    ftype == FIX ? ",value_format=3t" : ""));
 
 	if ((ret = session->create(session, name, config)) != 0)
 		if (ret != EEXIST)
 			testutil_die(ret, "session.create");
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }
 
 void
@@ -62,57 +58,53 @@ load(const char *name)
 	WT_CURSOR *cursor;
 	WT_ITEM *key, _key, *value, _value;
 	WT_SESSION *session;
+	size_t len;
+	uint64_t keyno;
 	char keybuf[64], valuebuf[64];
-	u_int keyno;
-	int ret;
 
 	file_create(name);
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret =
-	    session->open_cursor(session, name, NULL, "bulk", &cursor)) != 0)
-		testutil_die(ret, "cursor.open");
+	testutil_check(
+	    session->open_cursor(session, name, NULL, "bulk", &cursor));
 
 	key = &_key;
 	value = &_value;
 	for (keyno = 1; keyno <= nkeys; ++keyno) {
 		if (ftype == ROW) {
+			testutil_check(__wt_snprintf_len_set(
+			    keybuf, sizeof(keybuf),
+			    &len, "%017" PRIu64, keyno));
 			key->data = keybuf;
-			key->size = (uint32_t)
-			    snprintf(keybuf, sizeof(keybuf), "%017u", keyno);
+			key->size = (uint32_t)len;
 			cursor->set_key(cursor, key);
 		} else
-			cursor->set_key(cursor, (uint32_t)keyno);
-		value->data = valuebuf;
+			cursor->set_key(cursor, keyno);
 		if (ftype == FIX)
 			cursor->set_value(cursor, 0x01);
 		else {
-			value->size = (uint32_t)
-			    snprintf(valuebuf, sizeof(valuebuf), "%37u", keyno);
+			testutil_check(__wt_snprintf_len_set(
+			    valuebuf, sizeof(valuebuf),
+			    &len, "%37" PRIu64, keyno));
+			value->data = valuebuf;
+			value->size = (uint32_t)len;
 			cursor->set_value(cursor, value);
 		}
-		if ((ret = cursor->insert(cursor)) != 0)
-			testutil_die(ret, "cursor.insert");
+		testutil_check(cursor->insert(cursor));
 	}
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }
 
 void
 verify(const char *name)
 {
 	WT_SESSION *session;
-	int ret;
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret = session->verify(session, name, NULL)) != 0)
-		testutil_die(ret, "session.create");
+	testutil_check(session->verify(session, name, NULL));
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }

@@ -6,6 +6,7 @@
  * and tries to perform another task in parallel while the background index task is
  * active. The problem is that this is timing dependent and the current test setup
  * tries to achieve this by inserting insane amount of documents.
+ * @tags: [requires_replication]
  */
 
 // Index drop race
@@ -49,21 +50,13 @@ var bulk = masterDB.getCollection(collection).initializeUnorderedBulkOp();
 for (i = 0; i < size; ++i) {
     bulk.insert({i: Random.rand()});
 }
-assert.writeOK(bulk.execute());
+assert.writeOK(bulk.execute({w: 2, wtimeout: replTest.kDefaultTimeoutMS}));
 
 jsTest.log("Starting background indexing for test of: " + tojson(dc));
 // Add another index to be sure the drop command works.
 masterDB.getCollection(collection).ensureIndex({b: 1});
 
 masterDB.getCollection(collection).ensureIndex({i: 1}, {background: true});
-assert.eq(3, masterDB.getCollection(collection).getIndexes().length);
-
-// Wait for the secondary to get the index entry
-assert.soon(function() {
-    return 3 == secondDB.getCollection(collection).getIndexes().length;
-}, "index not created on secondary (prior to drop)", 240000);
-
-jsTest.log("Index created and index entry exists on secondary");
 
 // make sure the index build has started on secondary
 assert.soon(function() {
@@ -71,7 +64,7 @@ assert.soon(function() {
     printjson(curOp);
     for (var i = 0; i < curOp.inprog.length; i++) {
         try {
-            if (curOp.inprog[i].insert.background) {
+            if (curOp.inprog[i].command.background) {
                 return true;
             }
         } catch (e) {

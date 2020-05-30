@@ -37,11 +37,12 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/collection_cloner.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
@@ -53,7 +54,8 @@ namespace repl {
 
 class BaseCloner;
 
-class BaseClonerTest : public executor::ThreadPoolExecutorTest {
+class BaseClonerTest : public executor::ThreadPoolExecutorTest,
+                       public ScopedGlobalServiceContextForTest {
 public:
     typedef executor::NetworkInterfaceMock::NetworkOperationIterator NetworkOperationIterator;
 
@@ -75,6 +77,8 @@ public:
                                         const char* batchFieldName);
 
     static BSONObj createCursorResponse(CursorId cursorId, const BSONArray& docs);
+
+    static BSONObj createFinalCursorResponse(const BSONArray& docs);
 
     /**
      * Creates a listCollections response with given array of index specs.
@@ -126,7 +130,7 @@ protected:
     void tearDown() override;
 
     std::unique_ptr<StorageInterfaceMock> storageInterface;
-    std::unique_ptr<OldThreadPool> dbWorkThreadPool;
+    std::unique_ptr<ThreadPool> dbWorkThreadPool;
 
 private:
     // Protects member data of this base cloner fixture.

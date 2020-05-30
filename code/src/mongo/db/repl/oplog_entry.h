@@ -30,48 +30,128 @@
 
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/logical_session_id.h"
+#include "mongo/db/repl/oplog_entry_gen.h"
 #include "mongo/db/repl/optime.h"
 
 namespace mongo {
 namespace repl {
 
 /**
- * A parsed oplog entry.
- *
- * This only includes the fields used by the code using this object at the time this was
- * written. As more code uses this, more fields should be added.
- *
- * All unowned members (such as StringDatas and BSONElements) point into the raw BSON.
- * All StringData members are guaranteed to be NUL terminated.
+ * A parsed oplog entry that inherits from the OplogEntryBase parsed by the IDL.
+ * This class is immutable.
  */
-struct OplogEntry {
+class OplogEntry : public OplogEntryBase {
+public:
+    enum class CommandType {
+        kNotCommand,
+        kCreate,
+        kRenameCollection,
+        kDbCheck,
+        kDrop,
+        kCollMod,
+        kApplyOps,
+        kDropDatabase,
+        kEmptyCapped,
+        kConvertToCapped,
+        kCreateIndexes,
+        kDropIndexes
+    };
+
     // Current oplog version, should be the value of the v field in all oplog entries.
     static const int kOplogVersion;
 
+    // Helpers to generate ReplOperation.
+    static ReplOperation makeInsertOperation(const NamespaceString& nss,
+                                             boost::optional<UUID> uuid,
+                                             const BSONObj& docToInsert);
+    static ReplOperation makeUpdateOperation(const NamespaceString nss,
+                                             boost::optional<UUID> uuid,
+                                             const BSONObj& update,
+                                             const BSONObj& criteria);
+    static ReplOperation makeDeleteOperation(const NamespaceString& nss,
+                                             boost::optional<UUID> uuid,
+                                             const BSONObj& docToDelete);
+
+    // Get the in-memory size in bytes of a ReplOperation.
+    static size_t getReplOperationSize(const ReplOperation& op);
+
+    static StatusWith<OplogEntry> parse(const BSONObj& object);
+
+    OplogEntry(OpTime opTime,
+               long long hash,
+               OpTypeEnum opType,
+               const NamespaceString& nss,
+               const boost::optional<UUID>& uuid,
+               const boost::optional<bool>& fromMigrate,
+               int version,
+               const BSONObj& oField,
+               const boost::optional<BSONObj>& o2Field,
+               const OperationSessionInfo& sessionInfo,
+               const boost::optional<bool>& isUpsert,
+               const boost::optional<mongo::Date_t>& wallClockTime,
+               const boost::optional<StmtId>& statementId,
+               const boost::optional<OpTime>& prevWriteOpTimeInTransaction,
+               const boost::optional<OpTime>& preImageOpTime,
+               const boost::optional<OpTime>& postImageOpTime);
+
+    // DEPRECATED: This constructor can throw. Use static parse method instead.
     explicit OplogEntry(BSONObj raw);
+
+    OplogEntry() = delete;
 
     // This member is not parsed from the BSON and is instead populated by fillWriterVectors.
     bool isForCappedCollection = false;
 
+    /**
+     * Returns if the oplog entry is for a command operation.
+     */
     bool isCommand() const;
+
+    /**
+     * Returns if the oplog entry is for a CRUD operation.
+     */
+    static bool isCrudOpType(OpTypeEnum opType);
     bool isCrudOpType() const;
-    bool hasNamespace() const;
-    int getVersion() const;
+
+    /**
+     * Returns the _id of the document being modified. Must be called on CRUD ops.
+     */
     BSONElement getIdElement() const;
+
+    /**
+     * Returns the document representing the operation to apply.
+     * For commands and insert/delete operations, this will be the document in the 'o' field.
+     * For update operations, this will be the document in the 'o2' field.
+     * An empty document returned by this function indicates that we have a malformed OplogEntry.
+     */
+    BSONObj getOperationToApply() const;
+
+    /**
+     * Returns the type of command of the oplog entry. Must be called on a command op.
+     */
+    CommandType getCommandType() const;
+
+    /**
+     * Returns the size of the original document used to create this OplogEntry.
+     */
+    int getRawObjSizeBytes() const;
+
+    /**
+     * Returns the OpTime of the oplog entry.
+     */
     OpTime getOpTime() const;
-    Seconds getTimestampSecs() const;
-    StringData getCollectionName() const;
+
+    /**
+     * Serializes the oplog entry to a string.
+     */
     std::string toString() const;
 
+    // TODO (SERVER-29200): make `raw` private. Do not add more direct uses of `raw`.
     BSONObj raw;  // Owned.
 
-    StringData ns = "";
-    StringData opType = "";
-
-    BSONElement version;
-    BSONElement o;
-    BSONElement o2;
-    BSONElement ts;
+private:
+    CommandType _commandType;
 };
 
 std::ostream& operator<<(std::ostream& s, const OplogEntry& o);
@@ -79,6 +159,8 @@ std::ostream& operator<<(std::ostream& s, const OplogEntry& o);
 inline bool operator==(const OplogEntry& lhs, const OplogEntry& rhs) {
     return SimpleBSONObjComparator::kInstance.evaluate(lhs.raw == rhs.raw);
 }
+
+std::ostream& operator<<(std::ostream& s, const ReplOperation& o);
 
 }  // namespace repl
 }  // namespace mongo

@@ -28,7 +28,9 @@
 
 #pragma once
 
-#include "mongo/base/owned_pointer_vector.h"
+#include <memory>
+#include <vector>
+
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
@@ -64,15 +66,18 @@ typedef std::vector<std::pair<BSONObj, BSONObj>> BoundList;
 class ShardKeyPattern {
 public:
     // Maximum size of shard key
-    static const int kMaxShardKeySizeBytes;
-
-    // Maximum number of intervals produced by $in queries.
-    static const unsigned int kMaxFlattenedInCombinations;
+    static constexpr int kMaxShardKeySizeBytes = 512;
 
     /**
      * Helper to check shard key size and generate an appropriate error message.
      */
     static Status checkShardKeySize(const BSONObj& shardKey);
+
+    /**
+     * Validates whether the specified shard key is valid to be written as part of the sharding
+     * metadata.
+     */
+    static Status checkShardKeyIsValidForMetadataStorage(const BSONObj& shardKey);
 
     /**
      * Constructs a shard key pattern from a BSON pattern document.  If the document is not a
@@ -85,11 +90,16 @@ public:
      */
     explicit ShardKeyPattern(const KeyPattern& keyPattern);
 
-    bool isValid() const;
+    /**
+     * Returns whether the provided element is hashed.
+     */
+    static bool isHashedPatternEl(const BSONElement& el);
 
     bool isHashedPattern() const;
 
     const KeyPattern& getKeyPattern() const;
+
+    const std::vector<std::unique_ptr<FieldRef>>& getKeyPatternFields() const;
 
     const BSONObj& toBSON() const;
 
@@ -164,7 +174,7 @@ public:
      *   { a : { b : { $eq : "hi" } } } --> returns {} because the query language treats this as
      *                                                 a : { $eq : { b : ... } }
      */
-    StatusWith<BSONObj> extractShardKeyFromQuery(OperationContext* txn,
+    StatusWith<BSONObj> extractShardKeyFromQuery(OperationContext* opCtx,
                                                  const BSONObj& basicQuery) const;
     BSONObj extractShardKeyFromQuery(const CanonicalQuery& query) const;
 
@@ -221,10 +231,20 @@ public:
      */
     BoundList flattenBounds(const IndexBounds& indexBounds) const;
 
-private:
-    // Ordered, parsed paths
-    const OwnedPointerVector<FieldRef> _keyPatternPaths;
+    /**
+     * Returns true if the key pattern has an "_id" field of any flavor.
+     */
+    bool hasId() const {
+        return _hasId;
+    };
 
-    const KeyPattern _keyPattern;
+private:
+    KeyPattern _keyPattern;
+
+    // Ordered, parsed paths
+    std::vector<std::unique_ptr<FieldRef>> _keyPatternPaths;
+
+    bool _hasId;
 };
-}
+
+}  // namespace mongo

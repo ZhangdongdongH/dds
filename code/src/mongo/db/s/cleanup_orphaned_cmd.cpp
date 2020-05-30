@@ -30,34 +30,28 @@
 
 #include "mongo/platform/basic.h"
 
+#include <boost/optional.hpp>
 #include <string>
-#include <vector>
 
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/range_arithmetic.h"
-#include "mongo/db/range_deleter_service.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/s/chunk_move_write_concern_options.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
+#include "mongo/db/s/shard_filtering_metadata_refresh.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
-#include "mongo/s/migration_secondary_throttle_options.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-using std::string;
-using str::stream;
-
 namespace {
 
 enum CleanupResult { CleanupResult_Done, CleanupResult_Continue, CleanupResult_Error };
@@ -72,68 +66,68 @@ enum CleanupResult { CleanupResult_Done, CleanupResult_Continue, CleanupResult_E
  *
  * If the collection is not sharded, returns CleanupResult_Done.
  */
-CleanupResult cleanupOrphanedData(OperationContext* txn,
+CleanupResult cleanupOrphanedData(OperationContext* opCtx,
                                   const NamespaceString& ns,
                                   const BSONObj& startingFromKeyConst,
                                   const WriteConcernOptions& secondaryThrottle,
                                   BSONObj* stoppedAtKey,
-                                  string* errMsg) {
+                                  std::string* errMsg) {
     BSONObj startingFromKey = startingFromKeyConst;
+    boost::optional<ChunkRange> targetRange;
+    CollectionShardingRuntime::CleanupNotification notifn;
 
-    ScopedCollectionMetadata metadata;
     {
-        AutoGetCollection autoColl(txn, ns, MODE_IS);
-        metadata = CollectionShardingState::get(txn, ns.toString())->getMetadata();
-    }
+        AutoGetCollection autoColl(opCtx, ns, MODE_IX);
+        auto* const css = CollectionShardingRuntime::get(opCtx, ns);
 
-    if (!metadata || metadata->getKeyPattern().isEmpty()) {
-        warning() << "skipping orphaned data cleanup for " << ns.toString()
+        auto metadata = css->getMetadata(opCtx);
+        if (!metadata->isSharded()) {
+            log() << "skipping orphaned data cleanup for " << ns.toString()
                   << ", collection is not sharded";
-
-        return CleanupResult_Done;
-    }
-
-    BSONObj keyPattern = metadata->getKeyPattern();
-    if (!startingFromKey.isEmpty()) {
-        if (!metadata->isValidKey(startingFromKey)) {
-            *errMsg = stream() << "could not cleanup orphaned data, start key "
-                               << redact(startingFromKey) << " does not match shard key pattern "
-                               << keyPattern;
-
-            warning() << *errMsg;
-            return CleanupResult_Error;
+            return CleanupResult_Done;
         }
-    } else {
-        startingFromKey = metadata->getMinKey();
+
+        BSONObj keyPattern = metadata->getKeyPattern();
+        if (!startingFromKey.isEmpty()) {
+            if (!metadata->isValidKey(startingFromKey)) {
+                *errMsg = str::stream() << "could not cleanup orphaned data, start key "
+                                        << startingFromKey << " does not match shard key pattern "
+                                        << keyPattern;
+
+                log() << *errMsg;
+                return CleanupResult_Error;
+            }
+        } else {
+            startingFromKey = metadata->getMinKey();
+        }
+
+        targetRange = css->getNextOrphanRange(startingFromKey);
+        if (!targetRange) {
+            LOG(1) << "cleanupOrphaned requested for " << ns.toString() << " starting from "
+                   << redact(startingFromKey) << ", no orphan ranges remain";
+
+            return CleanupResult_Done;
+        }
+
+        *stoppedAtKey = targetRange->getMax();
+
+        notifn = css->cleanUpRange(*targetRange, CollectionShardingRuntime::kNow);
     }
 
-    KeyRange orphanRange;
-    if (!metadata->getNextOrphanRange(startingFromKey, &orphanRange)) {
-        LOG(1) << "cleanupOrphaned requested for " << ns.toString() << " starting from "
-               << redact(startingFromKey) << ", no orphan ranges remain";
+    // Sleep waiting for our own deletion. We don't actually care about any others, so there is no
+    // need to call css::waitForClean() here.
 
-        return CleanupResult_Done;
-    }
-    orphanRange.ns = ns.ns();
-    *stoppedAtKey = orphanRange.maxKey;
+    LOG(1) << "cleanupOrphaned requested for " << ns.toString() << " starting from "
+           << redact(startingFromKey) << ", removing next orphan range "
+           << redact(targetRange->toString()) << "; waiting...";
 
-    LOG(0) << "cleanupOrphaned requested for " << ns.toString() << " starting from "
-           << redact(startingFromKey) << ", removing next orphan range"
-           << " [" << redact(orphanRange.minKey) << "," << redact(orphanRange.maxKey) << ")";
+    Status result = notifn.waitStatus(opCtx);
 
-    // Metadata snapshot may be stale now, but deleter checks metadata again in write lock
-    // before delete.
-    RangeDeleterOptions deleterOptions(orphanRange);
-    deleterOptions.writeConcern = secondaryThrottle;
-    deleterOptions.onlyRemoveOrphanedDocs = true;
-    deleterOptions.fromMigrate = true;
-    // Must wait for cursors since there can be existing cursors with an older
-    // CollectionMetadata.
-    deleterOptions.waitForOpenCursors = true;
-    deleterOptions.removeSaverReason = "cleanup-cmd";
+    LOG(1) << "Finished waiting for last " << ns.toString() << " orphan range cleanup";
 
-    if (!getDeleter()->deleteNow(txn, deleterOptions, errMsg)) {
-        warning() << redact(*errMsg);
+    if (!result.isOK()) {
+        log() << redact(result.reason());
+        *errMsg = result.reason();
         return CleanupResult_Error;
     }
 
@@ -168,23 +162,21 @@ CleanupResult cleanupOrphanedData(OperationContext* txn,
  *      writeConcern: { <writeConcern options> }
  * }
  */
-class CleanupOrphanedCommand : public Command {
+class CleanupOrphanedCommand : public ErrmsgCommandDeprecated {
 public:
-    CleanupOrphanedCommand() : Command("cleanupOrphaned") {}
+    CleanupOrphanedCommand() : ErrmsgCommandDeprecated("cleanupOrphaned") {}
 
-    virtual bool slaveOk() const {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
-    virtual bool adminOnly() const {
+
+    bool adminOnly() const override {
         return true;
     }
-    virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
-        return false;
-    }
 
-    virtual Status checkAuthForCommand(Client* client,
-                                       const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+    Status checkAuthForCommand(Client* client,
+                               const std::string& dbname,
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::cleanupOrphaned)) {
             return Status(ErrorCodes::Unauthorized, "Not authorized for cleanupOrphaned command.");
@@ -192,37 +184,31 @@ public:
         return Status::OK();
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return true;
     }
 
     // Input
-    static BSONField<string> nsField;
+    static BSONField<std::string> nsField;
     static BSONField<BSONObj> startingFromKeyField;
 
     // Output
     static BSONField<BSONObj> stoppedAtKeyField;
 
-    bool run(OperationContext* txn,
-             string const& db,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        string ns;
+    bool errmsgRun(OperationContext* opCtx,
+                   std::string const& db,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
+        std::string ns;
         if (!FieldParser::extract(cmdObj, nsField, &ns, &errmsg)) {
             return false;
         }
 
-        if (ns == "") {
-            errmsg = "no collection name specified";
-            return false;
-        }
-
-        if (!NamespaceString(ns).isValid()) {
-            errmsg = "invalid namespace";
-            return false;
-        }
+        const NamespaceString nss(ns);
+        uassert(ErrorCodes::InvalidNamespace,
+                str::stream() << "Invalid namespace: " << nss.ns(),
+                nss.isValid());
 
         BSONObj startingFromKey;
         if (!FieldParser::extract(cmdObj, startingFromKeyField, &startingFromKey, &errmsg)) {
@@ -232,9 +218,9 @@ public:
         const auto secondaryThrottle =
             uassertStatusOK(MigrationSecondaryThrottleOptions::createFromCommand(cmdObj));
         const auto writeConcern = uassertStatusOK(
-            ChunkMoveWriteConcernOptions::getEffectiveWriteConcern(txn, secondaryThrottle));
+            ChunkMoveWriteConcernOptions::getEffectiveWriteConcern(opCtx, secondaryThrottle));
 
-        ShardingState* const shardingState = ShardingState::get(txn);
+        ShardingState* const shardingState = ShardingState::get(opCtx);
 
         if (!shardingState->enabled()) {
             errmsg = str::stream() << "server is not part of a sharded cluster or "
@@ -242,21 +228,11 @@ public:
             return false;
         }
 
-        ChunkVersion shardVersion;
-        Status status = shardingState->refreshMetadataNow(txn, NamespaceString(ns), &shardVersion);
-        if (!status.isOK()) {
-            if (status.code() == ErrorCodes::RemoteChangeDetected) {
-                warning() << "Shard version in transition detected while refreshing "
-                          << "metadata for " << ns << " at version " << shardVersion;
-            } else {
-                errmsg = str::stream() << "failed to refresh shard metadata: " << redact(status);
-                return false;
-            }
-        }
+        forceShardFilteringMetadataRefresh(opCtx, nss, true /* forceRefreshFromThisThread */);
 
         BSONObj stoppedAtKey;
-        CleanupResult cleanupResult = cleanupOrphanedData(
-            txn, NamespaceString(ns), startingFromKey, writeConcern, &stoppedAtKey, &errmsg);
+        CleanupResult cleanupResult =
+            cleanupOrphanedData(opCtx, nss, startingFromKey, writeConcern, &stoppedAtKey, &errmsg);
 
         if (cleanupResult == CleanupResult_Error) {
             return false;
@@ -273,7 +249,7 @@ public:
 
 } cleanupOrphanedCmd;
 
-BSONField<string> CleanupOrphanedCommand::nsField("cleanupOrphaned");
+BSONField<std::string> CleanupOrphanedCommand::nsField("cleanupOrphaned");
 BSONField<BSONObj> CleanupOrphanedCommand::startingFromKeyField("startingFromKey");
 BSONField<BSONObj> CleanupOrphanedCommand::stoppedAtKeyField("stoppedAtKey");
 

@@ -41,10 +41,17 @@ class DocumentSourceSampleFromRandomCursor final : public DocumentSource {
 public:
     GetNextResult getNext() final;
     const char* getSourceName() const final;
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
     GetDepsReturn getDependencies(DepsTracker* deps) const final;
 
-    void doInjectExpressionContext() final;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kFirst,
+                HostTypeRequirement::kAnyShard,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kNotAllowed,
+                TransactionRequirement::kAllowed};
+    }
 
     static boost::intrusive_ptr<DocumentSourceSampleFromRandomCursor> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -71,9 +78,8 @@ private:
     std::string _idField;
 
     // Keeps track of the documents that have been returned, since a random cursor is allowed to
-    // return duplicates. We use boost::optional to defer initialization until the ExpressionContext
-    // containing the correct comparator is injected.
-    boost::optional<ValueUnorderedSet> _seenDocs;
+    // return duplicates.
+    ValueUnorderedSet _seenDocs;
 
     // The approximate number of documents in the collection (includes orphans).
     const long long _nDocsInColl;

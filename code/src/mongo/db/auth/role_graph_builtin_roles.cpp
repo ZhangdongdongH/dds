@@ -62,6 +62,7 @@ const std::string BUILTIN_ROLE_CLUSTER_MANAGEMENT = "clusterManager";
 const std::string BUILTIN_ROLE_BACKUP = "backup";
 const std::string BUILTIN_ROLE_RESTORE = "restore";
 const std::string BUILTIN_ROLE_ENABLE_SHARDING = "enableSharding";
+const std::string BUILTIN_ROLE_QUERYABLE_BACKUP = "__queryableBackup";
 
 /// Actions that the "read" role may perform on a normal resources of a specific database, and
 /// that the "readAnyDatabase" role may perform on normal resources of any database.
@@ -114,6 +115,7 @@ void operator+=(ActionSet& target, const ActionSet& source) {
 MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
     // Read role
     readRoleActions
+        << ActionType::changeStream
         << ActionType::collStats
         << ActionType::dbHash
         << ActionType::dbStats
@@ -147,6 +149,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::dropRole
         << ActionType::grantRole
         << ActionType::revokeRole
+        << ActionType::setAuthenticationRestriction
         << ActionType::viewUser
         << ActionType::viewRole;
 
@@ -179,19 +182,23 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
 
     // clusterMonitor role actions that target the cluster resource
     clusterMonitorRoleClusterActions
+        << ActionType::checkFreeMonitoringStatus
         << ActionType::connPoolStats
         << ActionType::getCmdLineOpts
         << ActionType::getLog
         << ActionType::getParameter
         << ActionType::getShardMap
         << ActionType::hostInfo
+        << ActionType::listCursors // clusterManager gets this also
         << ActionType::listDatabases
+        << ActionType::listSessions // clusterManager gets this also
         << ActionType::listShards  // clusterManager gets this also
         << ActionType::netstat
         << ActionType::replSetGetConfig  // clusterManager gets this also
         << ActionType::replSetGetStatus  // clusterManager gets this also
         << ActionType::serverStatus 
         << ActionType::top
+        << ActionType::useUUID
         << ActionType::inprog
         << ActionType::shardingState;
 
@@ -199,6 +206,7 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
     clusterMonitorRoleDatabaseActions 
         << ActionType::collStats  // dbAdmin gets this also
         << ActionType::dbStats  // dbAdmin gets this also
+        << ActionType::getDatabaseVersion
         << ActionType::getShardVersion
         << ActionType::indexStats;
 
@@ -212,11 +220,13 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::shutdown
         << ActionType::touch
         << ActionType::unlock
-        << ActionType::diagLogging
         << ActionType::flushRouterConfig  // clusterManager gets this also
         << ActionType::fsync
         << ActionType::invalidateUserCache // userAdminAnyDatabase gets this also
+        << ActionType::killAnyCursor
+        << ActionType::killAnySession
         << ActionType::killop
+        << ActionType::replSetResizeOplog
         << ActionType::resync;  // clusterManager gets this also
 
     // hostManager role actions that target the database resource
@@ -236,9 +246,13 @@ MONGO_INITIALIZER(AuthorizationBuiltinRoles)(InitializerContext* context) {
         << ActionType::resync  // hostManager gets this also
         << ActionType::addShard 
         << ActionType::removeShard
+        << ActionType::listCursors // clusterManager gets this also
+        << ActionType::listSessions  // clusterMonitor gets this also
         << ActionType::listShards  // clusterMonitor gets this also
         << ActionType::flushRouterConfig  // hostManager gets this also
-        << ActionType::cleanupOrphaned;
+        << ActionType::cleanupOrphaned
+        << ActionType::setFeatureCompatibilityVersion
+        << ActionType::setFreeMonitoring;
 
     clusterManagerRoleDatabaseActions
         << ActionType::splitChunk
@@ -352,6 +366,8 @@ void addUserAdminAnyDbPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forClusterResource(), ActionType::invalidateUserCache));
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forClusterResource(), ActionType::viewUser));
 
 
     ActionSet readRoleAndIndexActions;
@@ -465,13 +481,6 @@ void addClusterManagerPrivileges(PrivilegeVector* privileges) {
         privileges, Privilege(ResourcePattern::forDatabaseName("config"), writeActions));
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forDatabaseName("local"), writeActions));
-
-    // Fake collection used for setFeatureCompatibilityVersion permissions.
-    Privilege::addPrivilegeToPrivilegeVector(
-        privileges,
-        Privilege(ResourcePattern::forExactNamespace(
-                      NamespaceString("$setFeatureCompatibilityVersion", "version")),
-                  writeActions));
 }
 
 void addClusterAdminPrivileges(PrivilegeVector* privileges) {
@@ -482,7 +491,8 @@ void addClusterAdminPrivileges(PrivilegeVector* privileges) {
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), ActionType::dropDatabase));
 }
 
-void addBackupPrivileges(PrivilegeVector* privileges) {
+
+void addQueryableBackupPrivileges(PrivilegeVector* privileges) {
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyResource(), ActionType::collStats));
     Privilege::addPrivilegeToPrivilegeVector(
@@ -494,7 +504,7 @@ void addBackupPrivileges(PrivilegeVector* privileges) {
 
     ActionSet clusterActions;
     clusterActions << ActionType::getParameter  // To check authSchemaVersion
-                   << ActionType::listDatabases << ActionType::appendOplogNote;  // For BRS
+                   << ActionType::listDatabases << ActionType::useUUID;
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
 
@@ -547,19 +557,33 @@ void addBackupPrivileges(PrivilegeVector* privileges) {
             ResourcePattern::forExactNamespace(AuthorizationManager::versionCollectionNamespace),
             ActionType::find));
 
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
+                  ActionType::find));
+}
+
+void addBackupPrivileges(PrivilegeVector* privileges) {
+    ActionSet clusterActions;
+    clusterActions << ActionType::appendOplogNote;  // For BRS
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges, Privilege(ResourcePattern::forClusterResource(), clusterActions));
+
     ActionSet configSettingsActions;
-    configSettingsActions << ActionType::insert << ActionType::update << ActionType::find;
+    configSettingsActions << ActionType::insert << ActionType::update;
     Privilege::addPrivilegeToPrivilegeVector(
         privileges,
         Privilege(ResourcePattern::forExactNamespace(NamespaceString("config", "settings")),
                   configSettingsActions));
+
+    addQueryableBackupPrivileges(privileges);
 }
 
 void addRestorePrivileges(PrivilegeVector* privileges) {
     ActionSet actions;
     actions << ActionType::bypassDocumentValidation << ActionType::collMod
-            << ActionType::createCollection << ActionType::createIndex << ActionType::dropCollection
-            << ActionType::insert;
+            << ActionType::convertToCapped << ActionType::createCollection
+            << ActionType::createIndex << ActionType::dropCollection << ActionType::insert;
 
     Privilege::addPrivilegeToPrivilegeVector(
         privileges, Privilege(ResourcePattern::forAnyNormalResource(), actions));
@@ -630,6 +654,12 @@ void addRestorePrivileges(PrivilegeVector* privileges) {
         Privilege(
             ResourcePattern::forExactNamespace(AuthorizationManager::rolesCollectionNamespace),
             ActionType::createIndex));
+
+    // Need to be able to force UUID consistency in sharded restores
+    Privilege::addPrivilegeToPrivilegeVector(
+        privileges,
+        Privilege(ResourcePattern::forClusterResource(),
+                  {ActionType::forceUUID, ActionType::useUUID}));
 }
 
 void addRootRolePrivileges(PrivilegeVector* privileges) {
@@ -680,6 +710,8 @@ bool RoleGraph::addPrivilegesForBuiltinRole(const RoleName& roleName, PrivilegeV
         addClusterManagerPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_CLUSTER_ADMIN) {
         addClusterAdminPrivileges(result);
+    } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_QUERYABLE_BACKUP) {
+        addQueryableBackupPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_BACKUP) {
         addBackupPrivileges(result);
     } else if (isAdminDB && roleName.getRole() == BUILTIN_ROLE_RESTORE) {
@@ -691,6 +723,8 @@ bool RoleGraph::addPrivilegesForBuiltinRole(const RoleName& roleName, PrivilegeV
     } else {
         return false;
     }
+
+    // One of the roles has matched, otherwise we would have returned already.
     return true;
 }
 
@@ -745,6 +779,8 @@ bool RoleGraph::isBuiltinRole(const RoleName& role) {
         return true;
     } else if (isAdminDB && role.getRole() == BUILTIN_ROLE_INTERNAL) {
         return true;
+    } else if (isAdminDB && role.getRole() == BUILTIN_ROLE_QUERYABLE_BACKUP) {
+        return true;
     }
     return false;
 }
@@ -770,6 +806,7 @@ void RoleGraph::_createBuiltinRolesForDBIfNeeded(const std::string& dbname) {
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_RESTORE, dbname));
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_ROOT, dbname));
         _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_INTERNAL, dbname));
+        _createBuiltinRoleIfNeeded(RoleName(BUILTIN_ROLE_QUERYABLE_BACKUP, dbname));
     }
 }
 

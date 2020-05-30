@@ -35,31 +35,31 @@
 
 namespace mongo {
 
-class CmdShutdown : public Command {
+class CmdShutdown : public BasicCommand {
 public:
-    CmdShutdown() : Command("shutdown") {}
+    CmdShutdown() : BasicCommand("shutdown") {}
 
-    virtual bool requiresAuth() {
+    bool requiresAuth() const override {
         return true;
     }
     virtual bool adminOnly() const {
         return true;
     }
-    virtual bool localHostOnlyIfNoAuth(const BSONObj& cmdObj) {
+    bool localHostOnlyIfNoAuth() const override {
         return true;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out);
+                                       std::vector<Privilege>* out) const;
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
 protected:
-    static void shutdownHelper();
+    static void shutdownHelper(const BSONObj& cmdObj);
 };
 
 }  // namespace mongo

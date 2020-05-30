@@ -31,12 +31,22 @@
 #include "mongo/db/query/find_common.h"
 
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/curop.h"
 #include "mongo/db/query/query_request.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
 
-MONGO_FP_DECLARE(keepCursorPinnedDuringGetMore);
+MONGO_FAIL_POINT_DEFINE(waitInFindBeforeMakingBatch);
+
+MONGO_FAIL_POINT_DEFINE(disableAwaitDataForGetMoreCmd);
+
+MONGO_FAIL_POINT_DEFINE(waitAfterPinningCursorBeforeGetMoreBatch);
+
+MONGO_FAIL_POINT_DEFINE(waitBeforeUnpinningOrDeletingCursorAfterGetMoreBatch);
+
+const OperationContext::Decoration<AwaitDataState> awaitDataState =
+    OperationContext::declareDecoration<AwaitDataState>();
 
 bool FindCommon::enoughForFirstBatch(const QueryRequest& qr, long long numDocs) {
     if (!qr.getEffectiveBatchSize()) {
@@ -76,5 +86,4 @@ BSONObj FindCommon::transformSortSpec(const BSONObj& sortSpec) {
 
     return comparatorBob.obj();
 }
-
 }  // namespace mongo

@@ -49,11 +49,12 @@ void AccumulatorLast::processInternal(const Value& input, bool merging) {
     _memUsageBytes = sizeof(*this) + _last.getApproximateSize() - sizeof(Value);
 }
 
-Value AccumulatorLast::getValue(bool toBeMerged) const {
+Value AccumulatorLast::getValue(bool toBeMerged) {
     return _last;
 }
 
-AccumulatorLast::AccumulatorLast() {
+AccumulatorLast::AccumulatorLast(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+    : Accumulator(expCtx) {
     _memUsageBytes = sizeof(*this);
 }
 
@@ -62,7 +63,8 @@ void AccumulatorLast::reset() {
     _last = Value();
 }
 
-intrusive_ptr<Accumulator> AccumulatorLast::create() {
-    return new AccumulatorLast();
+intrusive_ptr<Accumulator> AccumulatorLast::create(
+    const boost::intrusive_ptr<ExpressionContext>& expCtx) {
+    return new AccumulatorLast(expCtx);
 }
 }

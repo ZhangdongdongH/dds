@@ -41,8 +41,17 @@ class BSONObj;
  */
 class Timestamp {
 public:
+    // Timestamp to signal that the storage engine should take unstable checkpoints.
+    static const Timestamp kAllowUnstableCheckpointsSentinel;
+
     // Maximum Timestamp value.
     static Timestamp max();
+
+    // Returns the minimum timestamp. Used in the context of selecting and ordering storage engine
+    // snapshots.
+    static Timestamp min() {
+        return Timestamp();
+    }
 
     /**
      * DEPRECATED Constructor that builds a Timestamp from a Date_t by using the
@@ -85,8 +94,6 @@ public:
     bool isNull() const {
         return secs == 0;
     }
-
-    std::string toStringLong() const;
 
     std::string toStringPretty() const;
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -57,7 +57,7 @@ class test_lsm01(wttest.WiredTigerTestCase):
     scenarios = wtscenario.make_scenarios(
         chunk_size_scenarios, merge_max_scenarios, bloom_scenarios,
         bloom_bit_scenarios, bloom_hash_scenarios, record_count_scenarios,
-        prune=500)
+        prune=100, prunelong=500)
 
     # Test drop of an object.
     def test_lsm(self):

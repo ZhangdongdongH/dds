@@ -35,8 +35,11 @@
 #include "mongo/db/catalog/database_catalog_entry.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index/multikey_paths.h"
+#include "mongo/db/index_names.h"
 #include "mongo/db/operation_context_noop.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/db/storage/devnull/devnull_kv_engine.h"
+#include "mongo/db/storage/kv/kv_database_catalog_entry_mock.h"
 #include "mongo/db/storage/kv/kv_engine.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
 #include "mongo/unittest/death_test.h"
@@ -46,10 +49,12 @@
 namespace mongo {
 namespace {
 
-class KVCollectionCatalogEntryTest : public unittest::Test {
+class KVCollectionCatalogEntryTest : public ServiceContextTest {
 public:
     KVCollectionCatalogEntryTest()
-        : _nss("unittests.kv_collection_catalog_entry"), _storageEngine(new DevNullKVEngine()) {
+        : _nss("unittests.kv_collection_catalog_entry"),
+          _storageEngine(
+              new DevNullKVEngine(), KVStorageEngineOptions(), kvDatabaseCatalogEntryMockFactory) {
         _storageEngine.finishInit();
     }
 
@@ -93,7 +98,9 @@ public:
 
         {
             WriteUnitOfWork wuow(opCtx.get());
-            ASSERT_OK(getCollectionCatalogEntry()->prepareForIndexBuild(opCtx.get(), &desc));
+            const bool isSecondaryBackgroundIndexBuild = false;
+            ASSERT_OK(getCollectionCatalogEntry()->prepareForIndexBuild(
+                opCtx.get(), &desc, isSecondaryBackgroundIndexBuild));
             wuow.commit();
         }
 

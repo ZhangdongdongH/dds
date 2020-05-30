@@ -31,9 +31,11 @@
 #endif
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/concurrency/mutex.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -46,8 +48,27 @@ public:
 
     bool tryAcquire();
 
-    void waitForTicket();
+    /**
+     * Attempts to acquire a ticket. Blocks until a ticket is acquired or the OperationContext
+     * 'opCtx' is killed, throwing an AssertionException.
+     * If 'opCtx' is not provided or equal to nullptr, the wait is not interruptible.
+     */
+    void waitForTicket(OperationContext* opCtx);
+    void waitForTicket() {
+        waitForTicket(nullptr);
+    }
 
+    /**
+     * Attempts to acquire a ticket within a deadline, 'until'. Returns 'true' if a ticket is
+     * acquired and 'false' if the deadline is reached, but the operation is retryable. Throws an
+     * AssertionException if the OperationContext 'opCtx' is killed and no waits for tickets can
+     * proceed.
+     * If 'opCtx' is not provided or equal to nullptr, the wait is not interruptible.
+     */
+    bool waitForTicketUntil(OperationContext* opCtx, Date_t until);
+    bool waitForTicketUntil(Date_t until) {
+        return waitForTicketUntil(nullptr, until);
+    }
     void release();
 
     Status resize(int newSize);
@@ -121,4 +142,4 @@ public:
 private:
     TicketHolder* _holder;
 };
-}
+}  // namespace mongo

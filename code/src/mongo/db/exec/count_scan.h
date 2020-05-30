@@ -35,7 +35,7 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -67,7 +67,7 @@ struct CountScanParams {
  */
 class CountScan final : public PlanStage {
 public:
-    CountScan(OperationContext* txn, const CountScanParams& params, WorkingSet* workingSet);
+    CountScan(OperationContext* opCtx, const CountScanParams& params, WorkingSet* workingSet);
 
     StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;
@@ -75,7 +75,7 @@ public:
     void doRestoreState() final;
     void doDetachFromOperationContext() final;
     void doReattachToOperationContext() final;
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_COUNT_SCAN;
@@ -99,7 +99,7 @@ private:
 
     // Could our index have duplicates?  If so, we use _returned to dedup.
     bool _shouldDedup;
-    unordered_set<RecordId, RecordId::Hasher> _returned;
+    stdx::unordered_set<RecordId, RecordId::Hasher> _returned;
 
     CountScanParams _params;
 

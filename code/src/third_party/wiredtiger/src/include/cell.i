@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -233,8 +233,8 @@ __wt_cell_pack_data_match(
     WT_CELL *page_cell, WT_CELL *val_cell, const uint8_t *val_data,
     bool *matchp)
 {
-	const uint8_t *a, *b;
 	uint64_t av, bv;
+	const uint8_t *a, *b;
 	bool rle;
 
 	*matchp = 0;				/* Default to no-match */
@@ -361,14 +361,12 @@ __wt_cell_pack_leaf_key(WT_CELL *cell, uint8_t prefix, size_t size)
 			cell->__chunk[0] = (uint8_t)
 			    ((byte << WT_CELL_SHORT_SHIFT) | WT_CELL_KEY_SHORT);
 			return (1);
-		} else {
-			byte = (uint8_t)size;		/* Type + length */
-			cell->__chunk[0] = (uint8_t)
-			    ((byte << WT_CELL_SHORT_SHIFT) |
-			    WT_CELL_KEY_SHORT_PFX);
-			cell->__chunk[1] = prefix;	/* Prefix */
-			return (2);
 		}
+		byte = (uint8_t)size;		/* Type + length */
+		cell->__chunk[0] = (uint8_t)
+		    ((byte << WT_CELL_SHORT_SHIFT) | WT_CELL_KEY_SHORT_PFX);
+		cell->__chunk[1] = prefix;	/* Prefix */
+		return (2);
 	}
 
 	if (prefix == 0) {
@@ -569,9 +567,9 @@ __wt_cell_unpack_safe(
 	 */
 #define	WT_CELL_LEN_CHK(t, len) do {					\
 	if (start != NULL &&						\
-	    ((uint8_t *)t < (uint8_t *)start ||				\
-	    (((uint8_t *)t) + (len)) > (uint8_t *)end))			\
-		return (WT_ERROR);					\
+	    ((uint8_t *)(t) < (uint8_t *)start ||			\
+	    (((uint8_t *)(t)) + (len)) > (uint8_t *)end))		\
+		return (WT_ERROR);	        			\
 } while (0)
 
 restart:
@@ -694,7 +692,7 @@ restart:
 		unpack->__len = WT_PTRDIFF32(p, cell);
 		break;
 	default:
-		return (WT_ERROR);			/* Unknown cell type. */
+		return (WT_ERROR);		/* Unknown cell type. */
 	}
 
 	/*
@@ -719,6 +717,22 @@ done:	WT_CELL_LEN_CHK(cell, unpack->__len);
 static inline void
 __wt_cell_unpack(WT_CELL *cell, WT_CELL_UNPACK *unpack)
 {
+	/*
+	 * Row-store doesn't store zero-length values on pages, but this allows
+	 * us to pretend.
+	 */
+	if (cell == NULL) {
+		unpack->cell = NULL;
+		unpack->v = 0;
+		unpack->data = "";
+		unpack->size = 0;
+		unpack->__len = 0;
+		unpack->prefix = 0;
+		unpack->raw = unpack->type = WT_CELL_VALUE;
+		unpack->ovfl = 0;
+		return;
+	}
+
 	(void)__wt_cell_unpack_safe(cell, unpack, NULL, NULL);
 }
 
@@ -731,6 +745,7 @@ __cell_data_ref(WT_SESSION_IMPL *session,
     WT_PAGE *page, int page_type, WT_CELL_UNPACK *unpack, WT_ITEM *store)
 {
 	WT_BTREE *btree;
+	bool decoded;
 	void *huffman;
 
 	btree = S2BT(session);
@@ -751,20 +766,22 @@ __cell_data_ref(WT_SESSION_IMPL *session,
 		huffman = btree->huffman_value;
 		break;
 	case WT_CELL_KEY_OVFL:
-		WT_RET(__wt_ovfl_read(session, page, unpack, store));
-		if (page_type == WT_PAGE_ROW_INT)
+		WT_RET(__wt_ovfl_read(session, page, unpack, store, &decoded));
+		if (page_type == WT_PAGE_ROW_INT || decoded)
 			return (0);
 
 		huffman = btree->huffman_key;
 		break;
 	case WT_CELL_VALUE_OVFL:
-		WT_RET(__wt_ovfl_read(session, page, unpack, store));
+		WT_RET(__wt_ovfl_read(session, page, unpack, store, &decoded));
+		if (decoded)
+			return (0);
 		huffman = btree->huffman_value;
 		break;
-	WT_ILLEGAL_VALUE(session);
+	WT_ILLEGAL_VALUE(session, unpack->type);
 	}
 
-	return (huffman == NULL ? 0 :
+	return (huffman == NULL || store->size == 0 ? 0 :
 	    __wt_huffman_decode(
 	    session, huffman, store->data, store->size, store));
 }

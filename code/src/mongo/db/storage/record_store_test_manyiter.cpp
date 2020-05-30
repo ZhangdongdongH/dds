@@ -38,18 +38,18 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/unittest/unittest.h"
 
+namespace mongo {
+namespace {
+
 using std::set;
 using std::string;
 using std::stringstream;
 using std::vector;
-
-namespace mongo {
-
 using std::unique_ptr;
 
 // Create multiple iterators over an empty record store.
 TEST(RecordStoreTestHarness, GetManyIteratorsEmpty) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -68,7 +68,7 @@ TEST(RecordStoreTestHarness, GetManyIteratorsEmpty) {
 
 // Create multiple iterators over a nonempty record store.
 TEST(RecordStoreTestHarness, GetManyIteratorsNonEmpty) {
-    unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newRecordStoreHarnessHelper());
     unique_ptr<RecordStore> rs(harnessHelper->newNonCappedRecordStore());
 
     {
@@ -87,7 +87,7 @@ TEST(RecordStoreTestHarness, GetManyIteratorsNonEmpty) {
 
             WriteUnitOfWork uow(opCtx.get());
             StatusWith<RecordId> res =
-                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, false);
+                rs->insertRecord(opCtx.get(), data.c_str(), data.size() + 1, Timestamp(), false);
             ASSERT_OK(res.getStatus());
             locs[i] = res.getValue();
             uow.commit();
@@ -113,4 +113,5 @@ TEST(RecordStoreTestHarness, GetManyIteratorsNonEmpty) {
     }
 }
 
+}  // namespace
 }  // namespace mongo

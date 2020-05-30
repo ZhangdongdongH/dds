@@ -30,19 +30,18 @@
 
 #include <deque>
 
+#include "mongo/db/db_raii.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/document_source_limit.h"
+#include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/plan_summary_stats.h"
 
 namespace mongo {
 
-class PlanExecutor;
-
 /**
- * Constructs and returns Documents from the BSONObj objects produced by a supplied
- * PlanExecutor.
- *
- * An object of this type may only be used by one thread, see SERVER-6123.
+ * Constructs and returns Documents from the BSONObj objects produced by a supplied PlanExecutor.
  */
 class DocumentSourceCursor final : public DocumentSource {
 public:
@@ -52,30 +51,31 @@ public:
     BSONObjSet getOutputSorts() final {
         return _outputSorts;
     }
-    /**
-     * Attempts to combine with any subsequent $limit stages by setting the internal '_limit' field.
-     */
-    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
-    Value serialize(bool explain = false) const final;
-    bool isValidInitialSource() const final {
-        return true;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kAnyShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kAllowed);
+
+        constraints.requiresInputDocSource = false;
+        return constraints;
     }
-    void dispose() final;
 
     void detachFromOperationContext() final;
 
     void reattachToOperationContext(OperationContext* opCtx) final;
 
     /**
-     * Create a document source based on a passed-in PlanExecutor.
-     *
-     * This is usually put at the beginning of a chain of document sources
-     * in order to fetch data from the database.
+     * Create a document source based on a passed-in PlanExecutor. 'exec' must be a yielding
+     * PlanExecutor, and must be registered with the associated collection's CursorManager.
      */
     static boost::intrusive_ptr<DocumentSourceCursor> create(
-        const std::string& ns,
-        std::unique_ptr<PlanExecutor> exec,
+        Collection* collection,
+        std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
         const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
     /*
@@ -114,10 +114,17 @@ public:
      * @param projection The projection that has been passed down to the query system.
      * @param deps The output of DepsTracker::toParsedDeps.
      */
-    void setProjection(const BSONObj& projection, const boost::optional<ParsedDeps>& deps);
+    void setProjection(const BSONObj& projection, const boost::optional<ParsedDeps>& deps) {
+        _projection = projection;
+        _dependencies = deps;
+    }
 
-    /// returns -1 for no limit
-    long long getLimit() const;
+    /**
+     * Returns the limit associated with this cursor, or -1 if there is no limit.
+     */
+    long long getLimit() const {
+        return _limit ? _limit->getLimit() : -1;
+    }
 
     /**
      * If subsequent sources need no information from the cursor, the cursor can simply output empty
@@ -127,21 +134,55 @@ public:
         _shouldProduceEmptyDocs = true;
     }
 
-    const std::string& getPlanSummaryStr() const;
+    Timestamp getLatestOplogTimestamp() const {
+        if (_exec) {
+            return _exec->getLatestOplogTimestamp();
+        }
+        return Timestamp();
+    }
 
-    const PlanSummaryStats& getPlanSummaryStats() const;
+    const std::string& getPlanSummaryStr() const {
+        return _planSummary;
+    }
+
+    const PlanSummaryStats& getPlanSummaryStats() const {
+        return _planSummaryStats;
+    }
 
 protected:
-    void doInjectExpressionContext() final;
+    /**
+     * Disposes of '_exec' if it hasn't been disposed already. This involves taking a collection
+     * lock.
+     */
+    void doDispose() final;
+
+    /**
+     * Attempts to combine with any subsequent $limit stages by setting the internal '_limit' field.
+     */
+    Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
+                                                     Pipeline::SourceContainer* container) final;
 
 private:
-    DocumentSourceCursor(const std::string& ns,
-                         std::unique_ptr<PlanExecutor> exec,
+    DocumentSourceCursor(Collection* collection,
+                         std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec,
                          const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+    ~DocumentSourceCursor();
 
+    /**
+     * Acquires the appropriate locks, then destroys and de-registers '_exec'. '_exec' must be
+     * non-null.
+     */
+    void cleanupExecutor();
+
+    /**
+     * Destroys and de-registers '_exec'. '_exec' must be non-null.
+     */
+    void cleanupExecutor(const AutoGetCollectionForRead& readLock);
+
+    /**
+     * Reads a batch of data from '_exec'.
+     */
     void loadBatch();
-
-    void recordPlanSummaryStr();
 
     void recordPlanSummaryStats();
 
@@ -156,11 +197,23 @@ private:
     boost::intrusive_ptr<DocumentSourceLimit> _limit;
     long long _docsAddedToBatches;  // for _limit enforcement
 
-    const std::string _ns;
-    std::unique_ptr<PlanExecutor> _exec;
+    // The underlying query plan which feeds this pipeline. Must be destroyed while holding the
+    // collection lock.
+    std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> _exec;
+
+    // Status of the underlying executor, _exec. Used for explain queries if _exec produces an
+    // error. Since _exec may not finish running (if there is a limit, for example), we store OK as
+    // the default.
+    Status _execStatus = Status::OK();
+
     BSONObjSet _outputSorts;
     std::string _planSummary;
     PlanSummaryStats _planSummaryStats;
+
+    // Used only for explain() queries. Stores the stats of the winning plan when _exec's root
+    // stage is a MultiPlanStage. When the query is executed (with exec->executePlan()), it will
+    // wipe out its own copy of the winning plan's statistics, so they need to be saved here.
+    std::unique_ptr<PlanStageStats> _winningPlanTrialStats;
 };
 
 }  // namespace mongo

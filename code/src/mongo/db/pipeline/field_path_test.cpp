@@ -28,175 +28,164 @@
 
 #include "mongo/platform/basic.h"
 
+#include "mongo/bson/bson_depth.h"
 #include "mongo/db/pipeline/field_path.h"
-#include "mongo/dbtests/dbtests.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
+namespace {
+
 using std::string;
 using std::vector;
 
 /** FieldPath constructed from empty string. */
-class Empty {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path(""), UserException);
-    }
-};
+TEST(FieldPathTest, Empty) {
+    ASSERT_THROWS(FieldPath path(""), AssertionException);
+}
 
 /** FieldPath constructed from a simple string (without dots). */
-class Simple {
-public:
-    void run() {
-        FieldPath path("foo");
-        ASSERT_EQUALS(1U, path.getPathLength());
-        ASSERT_EQUALS("foo", path.getFieldName(0));
-        ASSERT_EQUALS("foo", path.fullPath());
-        ASSERT_EQUALS("$foo", path.fullPathWithPrefix());
-    }
-};
+TEST(FieldPathTest, Simple) {
+    FieldPath path("foo");
+    ASSERT_EQUALS(1U, path.getPathLength());
+    ASSERT_EQUALS("foo", path.getFieldName(0));
+    ASSERT_EQUALS("foo", path.fullPath());
+    ASSERT_EQUALS("$foo", path.fullPathWithPrefix());
+}
 
 /** FieldPath consisting of a '$' character. */
-class DollarSign {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("$"), UserException);
-    }
-};
+TEST(FieldPathTest, DollarSign) {
+    ASSERT_THROWS(FieldPath path("$"), AssertionException);
+}
 
 /** FieldPath with a '$' prefix. */
-class DollarSignPrefix {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("$a"), UserException);
-    }
-};
+TEST(FieldPathTest, DollarSignPrefix) {
+    ASSERT_THROWS(FieldPath path("$a"), AssertionException);
+}
 
 /** FieldPath constructed from a string with one dot. */
-class Dotted {
-public:
-    void run() {
-        FieldPath path("foo.bar");
-        ASSERT_EQUALS(2U, path.getPathLength());
-        ASSERT_EQUALS("foo", path.getFieldName(0));
-        ASSERT_EQUALS("bar", path.getFieldName(1));
-        ASSERT_EQUALS("foo.bar", path.fullPath());
-        ASSERT_EQUALS("$foo.bar", path.fullPathWithPrefix());
-    }
-};
+TEST(FieldPathTest, Dotted) {
+    FieldPath path("foo.bar");
+    ASSERT_EQUALS(2U, path.getPathLength());
+    ASSERT_EQUALS("foo", path.getFieldName(0));
+    ASSERT_EQUALS("bar", path.getFieldName(1));
+    ASSERT_EQUALS("foo.bar", path.fullPath());
+    ASSERT_EQUALS("$foo.bar", path.fullPathWithPrefix());
+}
 
 /** FieldPath with a '$' prefix in the second field. */
-class DollarSignPrefixSecondField {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("a.$b"), UserException);
-    }
-};
+TEST(FieldPathTest, DollarSignPrefixSecondField) {
+    ASSERT_THROWS(FieldPath path("a.$b"), AssertionException);
+}
 
 /** FieldPath constructed from a string with two dots. */
-class TwoDotted {
-public:
-    void run() {
-        FieldPath path("foo.bar.baz");
-        ASSERT_EQUALS(3U, path.getPathLength());
-        ASSERT_EQUALS("foo", path.getFieldName(0));
-        ASSERT_EQUALS("bar", path.getFieldName(1));
-        ASSERT_EQUALS("baz", path.getFieldName(2));
-        ASSERT_EQUALS("foo.bar.baz", path.fullPath());
-    }
-};
+TEST(FieldPathTest, TwoDotted) {
+    FieldPath path("foo.bar.baz");
+    ASSERT_EQUALS(3U, path.getPathLength());
+    ASSERT_EQUALS("foo", path.getFieldName(0));
+    ASSERT_EQUALS("bar", path.getFieldName(1));
+    ASSERT_EQUALS("baz", path.getFieldName(2));
+    ASSERT_EQUALS("foo.bar.baz", path.fullPath());
+}
 
 /** FieldPath constructed from a string ending in a dot. */
-class TerminalDot {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("foo."), UserException);
-    }
-};
+TEST(FieldPathTest, TerminalDot) {
+    ASSERT_THROWS(FieldPath path("foo."), AssertionException);
+}
 
 /** FieldPath constructed from a string beginning with a dot. */
-class PrefixDot {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path(".foo"), UserException);
-    }
-};
+TEST(FieldPathTest, PrefixDot) {
+    ASSERT_THROWS(FieldPath path(".foo"), AssertionException);
+}
 
 /** FieldPath constructed from a string with adjacent dots. */
-class AdjacentDots {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("foo..bar"), UserException);
-    }
-};
+TEST(FieldPathTest, AdjacentDots) {
+    ASSERT_THROWS(FieldPath path("foo..bar"), AssertionException);
+}
 
 /** FieldPath constructed with only dots. */
-class OnlyDots {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path("..."), UserException);
-    }
-};
+TEST(FieldPathTest, OnlyDots) {
+    ASSERT_THROWS(FieldPath path("..."), AssertionException);
+}
 
 /** FieldPath constructed from a string with one letter between two dots. */
-class LetterBetweenDots {
-public:
-    void run() {
-        FieldPath path("foo.a.bar");
-        ASSERT_EQUALS(3U, path.getPathLength());
-        ASSERT_EQUALS("foo.a.bar", path.fullPath());
-    }
-};
+TEST(FieldPathTest, LetterBetweenDots) {
+    FieldPath path("foo.a.bar");
+    ASSERT_EQUALS(3U, path.getPathLength());
+    ASSERT_EQUALS("foo.a.bar", path.fullPath());
+}
 
 /** FieldPath containing a null character. */
-class NullCharacter {
-public:
-    void run() {
-        ASSERT_THROWS(FieldPath path(string("foo.b\0r", 7)), UserException);
-    }
-};
+TEST(FieldPathTest, NullCharacter) {
+    ASSERT_THROWS(FieldPath path(string("foo.b\0r", 7)), AssertionException);
+}
 
 /** Tail of a FieldPath. */
-class Tail {
-public:
-    void run() {
-        FieldPath path = FieldPath("foo.bar").tail();
-        ASSERT_EQUALS(1U, path.getPathLength());
-        ASSERT_EQUALS("bar", path.fullPath());
-    }
-};
+TEST(FieldPathTest, Tail) {
+    FieldPath path = FieldPath("foo.bar").tail();
+    ASSERT_EQUALS(1U, path.getPathLength());
+    ASSERT_EQUALS("bar", path.fullPath());
+}
 
 /** Tail of a FieldPath with three fields. */
-class TailThreeFields {
-public:
-    void run() {
-        FieldPath path = FieldPath("foo.bar.baz").tail();
-        ASSERT_EQUALS(2U, path.getPathLength());
-        ASSERT_EQUALS("bar.baz", path.fullPath());
-    }
-};
+TEST(FieldPathTest, TailThreeFields) {
+    FieldPath path = FieldPath("foo.bar.baz").tail();
+    ASSERT_EQUALS(2U, path.getPathLength());
+    ASSERT_EQUALS("bar.baz", path.fullPath());
+}
 
-class All : public Suite {
-public:
-    All() : Suite("field_path") {}
-    void setupTests() {
-        add<Empty>();
-        add<Simple>();
-        add<DollarSign>();
-        add<DollarSignPrefix>();
-        add<Dotted>();
-        add<DollarSignPrefixSecondField>();
-        add<TwoDotted>();
-        add<TerminalDot>();
-        add<PrefixDot>();
-        add<AdjacentDots>();
-        add<OnlyDots>();
-        add<LetterBetweenDots>();
-        add<NullCharacter>();
-        add<Tail>();
-        add<TailThreeFields>();
+/**
+ * Creates a FieldPath that represents a document nested 'depth' levels deep.
+ */
+FieldPath makeFieldPathOfDepth(size_t depth) {
+    StringBuilder builder;
+    builder << "a";
+    for (size_t i = 0; i < depth - 1; i++) {
+        builder << ".a";
     }
-};
-SuiteInstance<All> myall;
+    return FieldPath(builder.str());
+}
+
+// Tests that long field paths at or under the depth limit can be created successfully.
+TEST(FieldPathTest, CanConstructFieldPathAtOrUnderDepthLimit) {
+    ASSERT_EQUALS(makeFieldPathOfDepth(BSONDepth::getMaxAllowableDepth() - 1).getPathLength(),
+                  BSONDepth::getMaxAllowableDepth() - 1);
+    ASSERT_EQUALS(makeFieldPathOfDepth(BSONDepth::getMaxAllowableDepth()).getPathLength(),
+                  BSONDepth::getMaxAllowableDepth());
+}
+
+// Tests that a FieldPath can't be constructed if the path is too deeply nested.
+TEST(FieldPathTest, ConstructorAssertsOnDeeplyNestedPath) {
+    ASSERT_THROWS_CODE(FieldPath(makeFieldPathOfDepth(BSONDepth::getMaxAllowableDepth() + 1)),
+                       AssertionException,
+                       ErrorCodes::Overflow);
+}
+
+/**
+ * Creates a FieldPath that represents an array nested 'depth' levels deep.
+ */
+FieldPath makeArrayFieldPathOfDepth(size_t depth) {
+    StringBuilder builder;
+    builder << "a";
+    for (size_t i = 0; i < depth - 1; i++) {
+        builder << ".0";
+    }
+    return FieldPath(builder.str());
+}
+
+// Tests that long array field paths at or under the depth limit can be created successfully.
+TEST(FieldPathTest, CanConstructArrayFieldPathAtOrUnderDepthLimit) {
+    ASSERT_EQUALS(makeArrayFieldPathOfDepth(BSONDepth::getMaxAllowableDepth() - 1).getPathLength(),
+                  BSONDepth::getMaxAllowableDepth() - 1);
+    ASSERT_EQUALS(makeArrayFieldPathOfDepth(BSONDepth::getMaxAllowableDepth()).getPathLength(),
+                  BSONDepth::getMaxAllowableDepth());
+}
+
+// Tests that a FieldPath can't be constructed if an array path is too deeply nested.
+TEST(FieldPathTest, ConstructorAssertsOnDeeplyNestedArrayPath) {
+    ASSERT_THROWS_CODE(makeArrayFieldPathOfDepth(BSONDepth::getMaxAllowableDepth() + 1),
+                       AssertionException,
+                       ErrorCodes::Overflow);
+}
+}  // namespace
 }  // namespace mongo

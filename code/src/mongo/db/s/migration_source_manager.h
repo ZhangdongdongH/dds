@@ -28,19 +28,18 @@
 
 #pragma once
 
-#include <string>
+#include <boost/optional.hpp>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/s/metadata_manager.h"
-#include "mongo/s/move_chunk_request.h"
-#include "mongo/s/shard_key_pattern.h"
-#include "mongo/util/concurrency/notification.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
+#include "mongo/db/s/migration_chunk_cloner_source.h"
+#include "mongo/s/request_types/move_chunk_request.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
-class MigrationChunkClonerSource;
 class OperationContext;
+struct ShardingStatistics;
 
 /**
  * The donor-side migration state machine. This object must be created and owned by a single thread,
@@ -71,6 +70,11 @@ class MigrationSourceManager {
     MONGO_DISALLOW_COPYING(MigrationSourceManager);
 
 public:
+    static MigrationSourceManager* get(CollectionShardingRuntime& csr);
+    static MigrationSourceManager* get(CollectionShardingRuntime* csr) {
+        return get(*csr);
+    }
+
     /**
      * Instantiates a new migration source manager with the specified migration parameters. Must be
      * called with the distributed lock acquired in advance (not asserted).
@@ -80,10 +84,10 @@ public:
      *
      * May throw any exception. Known exceptions are:
      *  - InvalidOptions if the operation context is missing shard version
-     *  - SendStaleConfigException if the expected collection version does not match what we find it
+     *  - StaleConfigException if the expected collection version does not match what we find it
      *      to be after acquiring the distributed lock.
      */
-    MigrationSourceManager(OperationContext* txn,
+    MigrationSourceManager(OperationContext* opCtx,
                            MoveChunkRequest request,
                            ConnectionString donorConnStr,
                            HostAndPort recipientHost);
@@ -101,7 +105,7 @@ public:
      * Expected state: kCreated
      * Resulting state: kCloning on success, kDone on failure
      */
-    Status startClone(OperationContext* txn);
+    Status startClone(OperationContext* opCtx);
 
     /**
      * Waits for the cloning to catch up sufficiently so we won't have to stay in the critical
@@ -111,7 +115,7 @@ public:
      * Expected state: kCloning
      * Resulting state: kCloneCaughtUp on success, kDone on failure
      */
-    Status awaitToCatchUp(OperationContext* txn);
+    Status awaitToCatchUp(OperationContext* opCtx);
 
     /**
      * Waits for the active clone operation to catch up and enters critical section. Once this call
@@ -122,7 +126,7 @@ public:
      * Expected state: kCloneCaughtUp
      * Resulting state: kCriticalSection on success, kDone on failure
      */
-    Status enterCriticalSection(OperationContext* txn);
+    Status enterCriticalSection(OperationContext* opCtx);
 
     /**
      * Tells the recipient of the chunk to commit the chunk contents, which it received.
@@ -130,7 +134,7 @@ public:
      * Expected state: kCriticalSection
      * Resulting state: kCloneCompleted on success, kDone on failure
      */
-    Status commitChunkOnRecipient(OperationContext* txn);
+    Status commitChunkOnRecipient(OperationContext* opCtx);
 
     /**
      * Tells the recipient shard to fetch the latest portion of data from the donor and to commit it
@@ -144,7 +148,7 @@ public:
      * Expected state: kCloneCompleted
      * Resulting state: kDone
      */
-    Status commitChunkMetadataOnConfig(OperationContext* txn);
+    Status commitChunkMetadataOnConfig(OperationContext* opCtx);
 
     /**
      * May be called at any time. Unregisters the migration source manager from the collection,
@@ -154,14 +158,7 @@ public:
      * Expected state: Any
      * Resulting state: kDone
      */
-    void cleanupOnError(OperationContext* txn);
-
-    /**
-     * Returns the key pattern object for the stored committed metadata.
-     */
-    BSONObj getKeyPattern() const {
-        return _keyPattern;
-    }
+    void cleanupOnError(OperationContext* opCtx);
 
     /**
      * Returns the cloner which is being used for this migration. This value is available only if
@@ -172,16 +169,6 @@ public:
      */
     MigrationChunkClonerSource* getCloner() const {
         return _cloneDriver.get();
-    }
-
-    /**
-     * Retrieves a critical section object to wait on. Will return nullptr if the migration is not
-     * yet in critical section.
-     *
-     * Must be called with some form of lock on the collection namespace.
-     */
-    std::shared_ptr<Notification<void>> getMigrationCriticalSectionSignal() const {
-        return _critSecSignal;
     }
 
     /**
@@ -197,10 +184,18 @@ private:
     enum State { kCreated, kCloning, kCloneCaughtUp, kCriticalSection, kCloneCompleted, kDone };
 
     /**
+     * If this donation moves the first chunk to the recipient (i.e., the recipient didn't have any
+     * chunks), this function writes a no-op message to the oplog, so that change stream will notice
+     * that and close the cursor in order to notify mongos to target the new shard as well.
+     */
+    void _notifyChangeStreamsOnRecipientFirstChunk(OperationContext* opCtx,
+                                                   const ScopedCollectionMetadata& metadata);
+
+    /**
      * Called when any of the states fails. May only be called once and will put the migration
      * manager into the kDone state.
      */
-    void _cleanup(OperationContext* txn);
+    void _cleanup(OperationContext* opCtx);
 
     // The parameters to the moveChunk command
     const MoveChunkRequest _args;
@@ -211,17 +206,25 @@ private:
     // The resolved primary of the recipient shard
     const HostAndPort _recipientHost;
 
-    // Gets initialized at creation time and will time the entire move chunk operation
-    const Timer _startTime;
+    // Stores a reference to the process sharding statistics object which needs to be updated
+    ShardingStatistics& _stats;
+
+    // Times the entire moveChunk operation
+    const Timer _entireOpTimer;
+
+    // Starts counting from creation time and is used to time various parts from the lifetime of the
+    // move chunk sequence
+    Timer _cloneAndCommitTimer;
 
     // The current state. Used only for diagnostics and validation.
     State _state{kCreated};
 
-    // The cached collection metadata at the time the migration started.
-    ScopedCollectionMetadata _collectionMetadata;
+    // The version of the collection at the time migration started.
+    OID _collectionEpoch;
 
-    // The key pattern of the collection whose chunks are being moved.
-    BSONObj _keyPattern;
+    // The UUID of the the collection whose chunks are being moved. Default to empty if the
+    // collection doesn't have UUID.
+    boost::optional<UUID> _collectionUuid;
 
     // The chunk cloner source. Only available if there is an active migration going on. To set and
     // remove it, global S lock needs to be acquired first in order to block all logOp calls and
@@ -229,10 +232,10 @@ private:
     // completed.
     std::unique_ptr<MigrationChunkClonerSource> _cloneDriver;
 
-    // Whether the source manager is in a critical section. Tracked as a shared pointer so that
-    // callers don't have to hold collection lock in order to wait on it. Available after the
-    // critical section stage has completed.
-    std::shared_ptr<Notification<void>> _critSecSignal;
+    // The statistics about a chunk migration to be included in moveChunk.commit
+    BSONObj _recipientCloneCounts;
+
+    boost::optional<CollectionCriticalSection> _critSec;
 };
 
 }  // namespace mongo

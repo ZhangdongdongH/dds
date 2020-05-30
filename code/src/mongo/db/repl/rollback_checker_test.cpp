@@ -31,12 +31,12 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/client.h"
-#include "mongo/db/repl/replication_executor_test_fixture.h"
 #include "mongo/db/repl/rollback_checker.h"
 #include "mongo/executor/network_interface_mock.h"
-#include "mongo/util/log.h"
-
+#include "mongo/executor/thread_pool_task_executor_test_fixture.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/log.h"
 
 namespace {
 
@@ -47,7 +47,7 @@ using executor::RemoteCommandResponse;
 
 using LockGuard = stdx::lock_guard<stdx::mutex>;
 
-class RollbackCheckerTest : public ReplicationExecutorTest {
+class RollbackCheckerTest : public executor::ThreadPoolExecutorTest {
 public:
     RollbackChecker* getRollbackChecker() const;
 
@@ -61,9 +61,10 @@ protected:
 };
 
 void RollbackCheckerTest::setUp() {
-    ReplicationExecutorTest::setUp();
+    executor::ThreadPoolExecutorTest::setUp();
     launchExecutorThread();
-    _rollbackChecker = stdx::make_unique<RollbackChecker>(&getReplExecutor(), HostAndPort());
+    getNet()->enterNetwork();
+    _rollbackChecker = stdx::make_unique<RollbackChecker>(&getExecutor(), HostAndPort());
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     _hasRolledBackResult = {ErrorCodes::NotYetInitialized, ""};
     _hasCalledCallback = false;
@@ -77,29 +78,33 @@ TEST_F(RollbackCheckerTest, InvalidConstruction) {
     HostAndPort syncSource;
 
     // Null executor.
-    ASSERT_THROWS_CODE(RollbackChecker(nullptr, syncSource), UserException, ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(
+        RollbackChecker(nullptr, syncSource), AssertionException, ErrorCodes::BadValue);
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeStart) {
     auto callback = [](const RollbackChecker::Result&) {};
-    getReplExecutor().shutdown();
-    ASSERT(!getRollbackChecker()->reset(callback));
-    ASSERT(!getRollbackChecker()->checkForRollback(callback));
+    shutdownExecutorThread();
+    joinExecutorThread();
+    ASSERT_NOT_OK(getRollbackChecker()->reset(callback).getStatus());
+    ASSERT_NOT_OK(getRollbackChecker()->checkForRollback(callback).getStatus());
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeHasHadRollback) {
-    getReplExecutor().shutdown();
-    ASSERT_EQUALS(ErrorCodes::CallbackCanceled, getRollbackChecker()->hasHadRollback());
+    shutdownExecutorThread();
+    joinExecutorThread();
+    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, getRollbackChecker()->hasHadRollback());
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeResetSync) {
-    getReplExecutor().shutdown();
+    shutdownExecutorThread();
+    joinExecutorThread();
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, getRollbackChecker()->reset_sync());
 }
 
 TEST_F(RollbackCheckerTest, reset) {
     auto callback = [](const RollbackChecker::Result&) {};
-    auto cbh = getRollbackChecker()->reset(callback);
+    auto cbh = unittest::assertGet(getRollbackChecker()->reset(callback));
     ASSERT(cbh);
 
     auto commandResponse = BSON("ok" << 1 << "rbid" << 3);
@@ -107,8 +112,8 @@ TEST_F(RollbackCheckerTest, reset) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(cbh);
-    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID_forTest(), 3);
+    getExecutor().wait(cbh);
+    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
 }
 
 TEST_F(RollbackCheckerTest, RollbackRBID) {
@@ -118,13 +123,13 @@ TEST_F(RollbackCheckerTest, RollbackRBID) {
         _hasCalledCallback = true;
     };
     // First set the RBID to 3.
-    auto refreshCBH = getRollbackChecker()->reset(callback);
+    auto refreshCBH = unittest::assertGet(getRollbackChecker()->reset(callback));
     ASSERT(refreshCBH);
     auto commandResponse = BSON("ok" << 1 << "rbid" << 3);
     getNet()->scheduleSuccessfulResponse(commandResponse);
     getNet()->runReadyNetworkOperations();
-    getReplExecutor().wait(refreshCBH);
-    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID_forTest(), 3);
+    getExecutor().wait(refreshCBH);
+    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     {
         LockGuard lk(_mutex);
         ASSERT_TRUE(_hasCalledCallback);
@@ -133,7 +138,7 @@ TEST_F(RollbackCheckerTest, RollbackRBID) {
     }
 
     // Check for rollback
-    auto rbCBH = getRollbackChecker()->checkForRollback(callback);
+    auto rbCBH = unittest::assertGet(getRollbackChecker()->checkForRollback(callback));
     ASSERT(rbCBH);
 
     commandResponse = BSON("ok" << 1 << "rbid" << 4);
@@ -141,9 +146,9 @@ TEST_F(RollbackCheckerTest, RollbackRBID) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(rbCBH);
+    getExecutor().wait(rbCBH);
     ASSERT_EQUALS(getRollbackChecker()->getLastRBID_forTest(), 4);
-    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID_forTest(), 3);
+    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     LockGuard lk(_mutex);
     ASSERT_TRUE(_hasCalledCallback);
     ASSERT_TRUE(unittest::assertGet(_hasRolledBackResult));
@@ -156,13 +161,13 @@ TEST_F(RollbackCheckerTest, NoRollbackRBID) {
         _hasCalledCallback = true;
     };
     // First set the RBID to 3.
-    auto refreshCBH = getRollbackChecker()->reset(callback);
+    auto refreshCBH = unittest::assertGet(getRollbackChecker()->reset(callback));
     ASSERT(refreshCBH);
     auto commandResponse = BSON("ok" << 1 << "rbid" << 3);
     getNet()->scheduleSuccessfulResponse(commandResponse);
     getNet()->runReadyNetworkOperations();
-    getReplExecutor().wait(refreshCBH);
-    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID_forTest(), 3);
+    getExecutor().wait(refreshCBH);
+    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     {
         LockGuard lk(_mutex);
         ASSERT_TRUE(_hasCalledCallback);
@@ -171,7 +176,7 @@ TEST_F(RollbackCheckerTest, NoRollbackRBID) {
     }
 
     // Check for rollback
-    auto rbCBH = getRollbackChecker()->checkForRollback(callback);
+    auto rbCBH = unittest::assertGet(getRollbackChecker()->checkForRollback(callback));
     ASSERT(rbCBH);
 
     commandResponse = BSON("ok" << 1 << "rbid" << 3);
@@ -179,9 +184,9 @@ TEST_F(RollbackCheckerTest, NoRollbackRBID) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(rbCBH);
+    getExecutor().wait(rbCBH);
     ASSERT_EQUALS(getRollbackChecker()->getLastRBID_forTest(), 3);
-    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID_forTest(), 3);
+    ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     LockGuard lk(_mutex);
     ASSERT_TRUE(_hasCalledCallback);
     ASSERT_FALSE(unittest::assertGet(_hasRolledBackResult));

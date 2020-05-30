@@ -40,11 +40,7 @@ class StatusWith;
 
 class FeatureCompatibilityVersionCommandParser {
 public:
-    /**
-     * Known server release versions.
-     */
-    static constexpr StringData kVersion34 = "3.4"_sd;
-    static constexpr StringData kVersion32 = "3.2"_sd;
+    static constexpr StringData kCommandName = "setFeatureCompatibilityVersion"_sd;
 
     /**
      * Interprets the specified BSON as a command and extracts the desired compatibility version

@@ -43,10 +43,10 @@
 namespace mongo {
 namespace rpc {
 
-LegacyReply::LegacyReply(const Message* message) : _message(std::move(message)) {
+LegacyReply::LegacyReply(const Message* message) {
     invariant(message->operation() == opReply);
 
-    QueryResult::View qr = _message->singleData().view2ptr();
+    QueryResult::View qr = message->singleData().view2ptr();
 
     // should be checked by caller.
     invariant(qr.msgdata().getNetworkOp() == opReply);
@@ -75,23 +75,39 @@ LegacyReply::LegacyReply(const Message* message) : _message(std::move(message)) 
                           << causedBy(status),
             status.isOK());
 
-    std::tie(_commandReply, _metadata) =
-        uassertStatusOK(rpc::upconvertReplyMetadata(BSONObj(qr.data())));
+    _commandReply = BSONObj(qr.data());
+    _commandReply.shareOwnershipWith(message->sharedBuffer());
 
-    _outputDocs = DocumentRange{};
+    if (_commandReply.firstElementFieldName() == "$err"_sd) {
+        // Upconvert legacy errors
+        auto codeElement = _commandReply["code"];
+        int code = codeElement.numberInt();
+        if (!code) {
+            code = ErrorCodes::UnknownError;
+        }
+
+        auto errmsg = _commandReply.firstElement().String();
+        Status status(ErrorCodes::Error(code), errmsg, _commandReply);
+
+        BSONObjBuilder bob;
+        bob.append("ok", 0.0);
+        bob.append("code", status.code());
+        bob.append("errmsg", status.reason());
+        if (auto extraInfo = status.extraInfo()) {
+            extraInfo->serialize(&bob);
+        }
+        _commandReply = bob.obj();
+    }
+
     return;
 }
 
 const BSONObj& LegacyReply::getMetadata() const {
-    return _metadata;
+    return _commandReply;
 }
 
 const BSONObj& LegacyReply::getCommandReply() const {
     return _commandReply;
-}
-
-DocumentRange LegacyReply::getOutputDocs() const {
-    return _outputDocs;
 }
 
 Protocol LegacyReply::getProtocol() const {

@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -39,15 +39,14 @@ static char home_rd[HOME_SIZE + sizeof(HOME_RD_SUFFIX)];
 #define	HOME_RD2_SUFFIX	".RDNOLOCK"	/* Read-only dir no lock file */
 static char home_rd2[HOME_SIZE + sizeof(HOME_RD2_SUFFIX)];
 
-static const char *progname;		/* Program name */
 static const char *saved_argv0;		/* Program command */
 static const char * const uri = "table:main";
 
 #define	ENV_CONFIG						\
     "create,log=(file_max=10M,archive=false,enabled),"		\
-    "transaction_sync=(enabled,method=none)"
-#define	ENV_CONFIG_RD "readonly=true"
-#define	ENV_CONFIG_WR "readonly=false"
+    "operation_tracking=(enabled=false),transaction_sync=(enabled,method=none)"
+#define	ENV_CONFIG_RD "operation_tracking=(enabled=false),readonly=true"
+#define	ENV_CONFIG_WR "operation_tracking=(enabled=false),readonly=false"
 #define	MAX_VAL	4096
 #define	MAX_KV	10000
 
@@ -100,20 +99,16 @@ run_child(const char *homedir, int op, int expect)
 	/*
 	 * Make sure we can read the data.
 	 */
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "WT_CONNECTION:open_session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret =
-	    session->open_cursor(session, uri, NULL, NULL, &cursor)) != 0)
-		testutil_die(ret, "WT_SESSION.open_cursor: %s", uri);
+	testutil_check(session->open_cursor(session, uri, NULL, NULL, &cursor));
 
 	i = 0;
 	while ((ret = cursor->next(cursor)) == 0)
 		++i;
 	if (i != MAX_KV)
-		testutil_die(EPERM, "cursor walk");
-	if ((ret = conn->close(conn, NULL)) != 0)
-		testutil_die(ret, "conn_close");
+		testutil_die(ret, "cursor walk");
+	testutil_check(conn->close(conn, NULL));
 	return (0);
 }
 
@@ -166,16 +161,14 @@ main(int argc, char *argv[])
 	WT_ITEM data;
 	WT_SESSION *session;
 	uint64_t i;
-	int ch, status, op, ret;
-	bool child;
-	const char *working_dir;
-	char cmd[512];
 	uint8_t buf[MAX_VAL];
+	int ch, op, ret, status;
+	char cmd[512];
+	const char *working_dir;
+	bool child;
 
-	if ((progname = strrchr(argv[0], DIR_DELIM)) == NULL)
-		progname = argv[0];
-	else
-		++progname;
+	(void)testutil_set_progname(argv);
+
 	/*
 	 * Needed unaltered for system command later.
 	 */
@@ -201,7 +194,6 @@ main(int argc, char *argv[])
 			usage();
 		}
 	argc -= __wt_optind;
-	argv += __wt_optind;
 	if (argc != 0)
 		usage();
 
@@ -209,10 +201,12 @@ main(int argc, char *argv[])
 	 * Set up all the directory names.
 	 */
 	testutil_work_dir_from_path(home, sizeof(home), working_dir);
-	(void)snprintf(home_wr, sizeof(home_wr), "%s%s", home, HOME_WR_SUFFIX);
-	(void)snprintf(home_rd, sizeof(home_rd), "%s%s", home, HOME_RD_SUFFIX);
-	(void)snprintf(
-	    home_rd2, sizeof(home_rd2), "%s%s", home, HOME_RD2_SUFFIX);
+	testutil_check(__wt_snprintf(
+	    home_wr, sizeof(home_wr), "%s%s", home, HOME_WR_SUFFIX));
+	testutil_check(__wt_snprintf(
+	    home_rd, sizeof(home_rd), "%s%s", home, HOME_RD_SUFFIX));
+	testutil_check(__wt_snprintf(
+	    home_rd2, sizeof(home_rd2), "%s%s", home, HOME_RD2_SUFFIX));
 	if (!child) {
 		testutil_make_work_dir(home);
 		testutil_make_work_dir(home_wr);
@@ -241,16 +235,11 @@ main(int argc, char *argv[])
 	/*
 	 * Run in the home directory and create the table.
 	 */
-	if ((ret = wiredtiger_open(home, NULL, ENV_CONFIG, &conn)) != 0)
-		testutil_die(ret, "wiredtiger_open");
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "WT_CONNECTION:open_session");
-	if ((ret = session->create(session,
-	    uri, "key_format=Q,value_format=u")) != 0)
-		testutil_die(ret, "WT_SESSION.create: %s", uri);
-	if ((ret =
-	    session->open_cursor(session, uri, NULL, NULL, &cursor)) != 0)
-		testutil_die(ret, "WT_SESSION.open_cursor: %s", uri);
+	testutil_check(wiredtiger_open(home, NULL, ENV_CONFIG, &conn));
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
+	testutil_check(
+	    session->create(session, uri, "key_format=Q,value_format=u"));
+	testutil_check(session->open_cursor(session, uri, NULL, NULL, &cursor));
 
 	/*
 	 * Write data into the table and then cleanly shut down connection.
@@ -261,32 +250,30 @@ main(int argc, char *argv[])
 	for (i = 0; i < MAX_KV; ++i) {
 		cursor->set_key(cursor, i);
 		cursor->set_value(cursor, &data);
-		if ((ret = cursor->insert(cursor)) != 0)
-			testutil_die(ret, "WT_CURSOR.insert");
+		testutil_check(cursor->insert(cursor));
 	}
-	if ((ret = conn->close(conn, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
+	testutil_check(conn->close(conn, NULL));
 
 	/*
 	 * Copy the database.  Remove any lock file from one copy
 	 * and chmod the copies to be read-only permissions.
 	 */
-	(void)snprintf(cmd, sizeof(cmd),
+	testutil_check(__wt_snprintf(cmd, sizeof(cmd),
 	    "cp -rp %s/* %s; rm -f %s/WiredTiger.lock",
-	    home, home_wr, home_wr);
+	    home, home_wr, home_wr));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 
-	(void)snprintf(cmd, sizeof(cmd),
+	testutil_check(__wt_snprintf(cmd, sizeof(cmd),
 	    "cp -rp %s/* %s; chmod 0555 %s; chmod -R 0444 %s/*",
-	    home, home_rd, home_rd, home_rd);
+	    home, home_rd, home_rd, home_rd));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 
-	(void)snprintf(cmd, sizeof(cmd),
+	testutil_check(__wt_snprintf(cmd, sizeof(cmd),
 	    "cp -rp %s/* %s; rm -f %s/WiredTiger.lock; "
 	    "chmod 0555 %s; chmod -R 0444 %s/*",
-	    home, home_rd2, home_rd2, home_rd2, home_rd2);
+	    home, home_rd2, home_rd2, home_rd2, home_rd2));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 
@@ -330,8 +317,8 @@ main(int argc, char *argv[])
 	 *
 	 * The child will exit with success if its test passes.
 	 */
-	(void)snprintf(
-	    cmd, sizeof(cmd), "%s -h %s -R", saved_argv0, working_dir);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "%s -h %s -R", saved_argv0, working_dir));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 	if (WEXITSTATUS(status) != 0)
@@ -340,8 +327,8 @@ main(int argc, char *argv[])
 	/*
 	 * Scenario 2.  Run child with writable config.
 	 */
-	(void)snprintf(
-	    cmd, sizeof(cmd), "%s -h %s -W", saved_argv0, working_dir);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "%s -h %s -W", saved_argv0, working_dir));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 	if (WEXITSTATUS(status) != 0)
@@ -350,10 +337,8 @@ main(int argc, char *argv[])
 	/*
 	 * Reopen the two writable directories and rerun the child.
 	 */
-	if ((ret = conn->close(conn, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
-	if ((ret = conn2->close(conn2, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
+	testutil_check(conn->close(conn, NULL));
+	testutil_check(conn2->close(conn2, NULL));
 	if ((ret = wiredtiger_open(home, NULL, ENV_CONFIG_RD, &conn)) != 0)
 		testutil_die(ret, "wiredtiger_open original home");
 	if ((ret = wiredtiger_open(home_wr, NULL, ENV_CONFIG_RD, &conn2)) != 0)
@@ -361,8 +346,8 @@ main(int argc, char *argv[])
 	/*
 	 * Scenario 3.  Child read-only.
 	 */
-	(void)snprintf(
-	    cmd, sizeof(cmd), "%s -h %s -R", saved_argv0, working_dir);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "%s -h %s -R", saved_argv0, working_dir));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 	if (WEXITSTATUS(status) != 0)
@@ -371,8 +356,8 @@ main(int argc, char *argv[])
 	/*
 	 * Scenario 4.  Run child with writable config.
 	 */
-	(void)snprintf(
-	    cmd, sizeof(cmd), "%s -h %s -W", saved_argv0, working_dir);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "%s -h %s -W", saved_argv0, working_dir));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 	if (WEXITSTATUS(status) != 0)
@@ -381,23 +366,20 @@ main(int argc, char *argv[])
 	/*
 	 * Clean-up.
 	 */
-	if ((ret = conn->close(conn, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
-	if ((ret = conn2->close(conn2, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
-	if ((ret = conn3->close(conn3, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
-	if ((ret = conn4->close(conn4, NULL)) != 0)
-		testutil_die(ret, "WT_CONNECTION:close");
+	testutil_check(conn->close(conn, NULL));
+	testutil_check(conn2->close(conn2, NULL));
+	testutil_check(conn3->close(conn3, NULL));
+	testutil_check(conn4->close(conn4, NULL));
 	/*
 	 * We need to chmod the read-only databases back so that they can
 	 * be removed by scripts.
 	 */
-	(void)snprintf(cmd, sizeof(cmd), "chmod 0777 %s %s", home_rd, home_rd2);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "chmod 0777 %s %s", home_rd, home_rd2));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
-	(void)snprintf(cmd, sizeof(cmd), "chmod -R 0666 %s/* %s/*",
-	    home_rd, home_rd2);
+	testutil_check(__wt_snprintf(
+	    cmd, sizeof(cmd), "chmod -R 0666 %s/* %s/*", home_rd, home_rd2));
 	if ((status = system(cmd)) < 0)
 		testutil_die(status, "system: %s", cmd);
 	printf(" *** Readonly test successful ***\n");

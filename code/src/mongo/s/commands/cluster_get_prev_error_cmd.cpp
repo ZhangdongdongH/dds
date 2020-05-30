@@ -28,47 +28,40 @@
 
 #include "mongo/platform/basic.h"
 
-#include <set>
-#include <string>
-
 #include "mongo/db/commands.h"
-#include "mongo/db/lasterror.h"
-#include "mongo/s/client/shard_connection.h"
 
 namespace mongo {
 namespace {
 
-class GetPrevErrorCmd : public Command {
+class GetPrevErrorCmd : public ErrmsgCommandDeprecated {
 public:
-    GetPrevErrorCmd() : Command("getPrevError", false, "getpreverror") {}
+    GetPrevErrorCmd() : ErrmsgCommandDeprecated("getPrevError", "getpreverror") {}
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "get previous error (since last reseterror command)";
+    std::string help() const override {
+        return "get previous error (since last reseterror command)";
     }
 
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         // No auth required
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        errmsg += "getpreverror not supported for sharded environments";
-        return false;
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& dbname,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
+        uasserted(ErrorCodes::CommandNotSupported,
+                  "getPrevError is not supported in sharded environments");
     }
 
 } cmdGetPrevError;

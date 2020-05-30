@@ -41,38 +41,36 @@ namespace mongo {
 
 Status KillCursorsCmdBase::checkAuthForCommand(Client* client,
                                                const std::string& dbname,
-                                               const BSONObj& cmdObj) {
-    auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
+                                               const BSONObj& cmdObj) const {
+    const auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
     if (!statusWithRequest.isOK()) {
         return statusWithRequest.getStatus();
     }
-    auto killCursorsRequest = std::move(statusWithRequest.getValue());
+    const auto killCursorsRequest = statusWithRequest.getValue();
 
-    AuthorizationSession* as = AuthorizationSession::get(client);
-
+    const auto& nss = killCursorsRequest.nss;
     for (CursorId id : killCursorsRequest.cursorIds) {
-        Status authorizationStatus = as->checkAuthForKillCursors(killCursorsRequest.nss, id);
-
-        if (!authorizationStatus.isOK()) {
-            audit::logKillCursorsAuthzCheck(
-                client, killCursorsRequest.nss, id, ErrorCodes::Unauthorized);
-            return authorizationStatus;
+        const auto status = _checkAuth(client, nss, id);
+        if (!status.isOK()) {
+            if (status.code() == ErrorCodes::CursorNotFound) {
+                // Not found isn't an authorization issue.
+                // run() will raise it as a return value.
+                continue;
+            }
+            audit::logKillCursorsAuthzCheck(client, nss, id, status.code());
+            return status;
         }
     }
 
     return Status::OK();
 }
 
-bool KillCursorsCmdBase::run(OperationContext* txn,
+bool KillCursorsCmdBase::run(OperationContext* opCtx,
                              const std::string& dbname,
-                             BSONObj& cmdObj,
-                             int options,
-                             std::string& errmsg,
+                             const BSONObj& cmdObj,
                              BSONObjBuilder& result) {
     auto statusWithRequest = KillCursorsRequest::parseFromBSON(dbname, cmdObj);
-    if (!statusWithRequest.isOK()) {
-        return appendCommandStatus(result, statusWithRequest.getStatus());
-    }
+    uassertStatusOK(statusWithRequest.getStatus());
     auto killCursorsRequest = std::move(statusWithRequest.getValue());
 
     std::vector<CursorId> cursorsKilled;
@@ -81,7 +79,7 @@ bool KillCursorsCmdBase::run(OperationContext* txn,
     std::vector<CursorId> cursorsUnknown;
 
     for (CursorId id : killCursorsRequest.cursorIds) {
-        Status status = _killCursor(txn, killCursorsRequest.nss, id);
+        Status status = _killCursor(opCtx, killCursorsRequest.nss, id);
         if (status.isOK()) {
             cursorsKilled.push_back(id);
         } else if (status.code() == ErrorCodes::CursorNotFound) {
@@ -91,7 +89,7 @@ bool KillCursorsCmdBase::run(OperationContext* txn,
         }
 
         audit::logKillCursorsAuthzCheck(
-            txn->getClient(), killCursorsRequest.nss, id, status.code());
+            opCtx->getClient(), killCursorsRequest.nss, id, status.code());
     }
 
     KillCursorsResponse killCursorsResponse(

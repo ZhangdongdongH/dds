@@ -52,7 +52,7 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
     ASSERT_TRUE(metadata.hasReplicaSetId());
 
     BSONObjBuilder builder;
-    metadata.writeToMetadata(&builder);
+    metadata.writeToMetadata(&builder).transitional_ignore();
 
     BSONObj expectedObj(
         BSON(kReplSetMetadataFieldName
@@ -82,10 +82,24 @@ TEST(ReplResponseMetadataTest, Roundtrip) {
     ASSERT_EQ(metadata.getReplicaSetId(), clonedMetadata.getReplicaSetId());
 
     BSONObjBuilder clonedBuilder;
-    clonedMetadata.writeToMetadata(&clonedBuilder);
+    clonedMetadata.writeToMetadata(&clonedBuilder).transitional_ignore();
 
     BSONObj clonedSerializedObj = clonedBuilder.obj();
     ASSERT_BSONOBJ_EQ(expectedObj, clonedSerializedObj);
+}
+
+TEST(ReplResponseMetadataTest, MetadataCanBeConstructedWhenMissingOplogQueryMetadataFields) {
+    auto id = OID::gen();
+    BSONObj obj(BSON(kReplSetMetadataFieldName
+                     << BSON("term" << 3 << "configVersion" << 6 << "replicaSetId" << id)));
+
+    auto status = ReplSetMetadata::readFromMetadata(obj);
+    ASSERT_OK(status.getStatus());
+
+    const auto& metadata = status.getValue();
+    ASSERT_EQ(metadata.getConfigVersion(), 6);
+    ASSERT_EQ(metadata.getReplicaSetId(), id);
+    ASSERT_EQ(metadata.getTerm(), 3);
 }
 
 }  // unnamed namespace

@@ -739,7 +739,7 @@ Status JParse::array(StringData fieldName, BSONObjBuilder& builder, bool subObje
  * have the same behavior.  XXX: this may not be desired. */
 Status JParse::constructor(StringData fieldName, BSONObjBuilder& builder) {
     if (readToken("Date")) {
-        date(fieldName, builder);
+        date(fieldName, builder).transitional_ignore();
     } else {
         return parseError("\"new\" keyword not followed by Date constructor");
     }
@@ -1280,13 +1280,7 @@ bool JParse::isHexString(StringData str) const {
 
 bool JParse::isBase64String(StringData str) const {
     MONGO_JSON_DEBUG("str: " << str);
-    std::size_t i;
-    for (i = 0; i < str.size(); i++) {
-        if (!match(str[i], base64::chars)) {
-            return false;
-        }
-    }
-    return true;
+    return base64::validate(str);
 }
 
 bool JParse::isArray() {
@@ -1308,13 +1302,13 @@ BSONObj fromjson(const char* jsonString, int* len) {
     } catch (std::exception& e) {
         std::ostringstream message;
         message << "caught exception from within JSON parser: " << e.what();
-        throw MsgAssertionException(17031, message.str());
+        uasserted(17031, message.str());
     }
 
     if (ret != Status::OK()) {
         ostringstream message;
         message << "code " << ret.code() << ": " << ret.codeString() << ": " << ret.reason();
-        throw MsgAssertionException(16619, message.str());
+        uasserted(16619, message.str());
     }
     if (len)
         *len = jparse.offset();

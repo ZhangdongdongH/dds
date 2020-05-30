@@ -71,12 +71,6 @@ public:
         bool isSizeMaxed() const;
 
         /**
-         * Returns true if a shard must be relieved (if possible) of some of the chunks it hosts
-         * because it has exceeded its per-shard data size limit.
-         */
-        bool isSizeExceeded() const;
-
-        /**
          * Returns BSON representation of this shard's statistics, for reporting purposes.
          */
         BSONObj toBSON() const;
@@ -84,10 +78,10 @@ public:
         // The id of the shard for which this statistic applies
         ShardId shardId;
 
-        // The maximum size allowed for the shard
+        // The maximum storage size allowed for the shard. Zero means no maximum specified.
         uint64_t maxSizeMB{0};
 
-        // The current size of the shard
+        // The current storage size of the shard.
         uint64_t currSizeMB{0};
 
         // Whether the shard is in draining mode
@@ -106,7 +100,7 @@ public:
      * Retrieves a snapshot of the current shard utilization state. The implementation of this
      * method may block if necessary in order to refresh its state or may return a cached value.
      */
-    virtual StatusWith<std::vector<ShardStatistics>> getStats(OperationContext* txn) = 0;
+    virtual StatusWith<std::vector<ShardStatistics>> getStats(OperationContext* opCtx) = 0;
 
 protected:
     ClusterStatistics();

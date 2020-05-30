@@ -30,6 +30,7 @@
 
 #include "mongo/rpc/get_status_from_command_result.h"
 
+#include "mongo/base/error_codes.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/db/jsobj.h"
@@ -40,6 +41,7 @@ namespace mongo {
 
 namespace {
 const std::string kCmdResponseWriteConcernField = "writeConcernError";
+const std::string kCmdResponseWriteErrorsField = "writeErrors";
 }  // namespace
 
 Status getStatusFromCommandResult(const BSONObj& result) {
@@ -75,7 +77,7 @@ Status getStatusFromCommandResult(const BSONObj& result) {
         code = ErrorCodes::CommandNotFound;
     }
 
-    return Status(ErrorCodes::Error(code), errmsg);
+    return Status(ErrorCodes::Error(code), errmsg, result);
 }
 
 Status getWriteConcernStatusFromCommandResult(const BSONObj& obj) {
@@ -105,6 +107,48 @@ Status getWriteConcernStatusFromCommandResult(const BSONObj& obj) {
                                     << wcErrorInvalidMsg);
     }
     return wcError.toStatus();
+}
+
+Status getFirstWriteErrorStatusFromCommandResult(const BSONObj& cmdResponse) {
+    BSONElement writeErrorElem;
+    auto status = bsonExtractTypedField(
+        cmdResponse, kCmdResponseWriteErrorsField, BSONType::Array, &writeErrorElem);
+    if (!status.isOK()) {
+        if (status == ErrorCodes::NoSuchKey) {
+            return Status::OK();
+        } else {
+            return status;
+        }
+    }
+
+    auto firstWriteErrorElem = writeErrorElem.Obj().firstElement();
+    if (!firstWriteErrorElem) {
+        return Status::OK();
+    }
+
+    if (firstWriteErrorElem.type() != BSONType::Object) {
+        return Status(ErrorCodes::UnsupportedFormat,
+                      str::stream() << "writeErrors should be an array of objects, found "
+                                    << typeName(firstWriteErrorElem.type()));
+    }
+
+    auto firstWriteErrorObj = firstWriteErrorElem.Obj();
+
+    return Status(ErrorCodes::Error(firstWriteErrorObj["code"].Int()),
+                  firstWriteErrorObj["errmsg"].String(),
+                  firstWriteErrorObj);
+}
+
+Status getStatusFromWriteCommandReply(const BSONObj& cmdResponse) {
+    auto status = getStatusFromCommandResult(cmdResponse);
+    if (!status.isOK()) {
+        return status;
+    }
+    status = getFirstWriteErrorStatusFromCommandResult(cmdResponse);
+    if (!status.isOK()) {
+        return status;
+    }
+    return getWriteConcernStatusFromCommandResult(cmdResponse);
 }
 
 }  // namespace mongo

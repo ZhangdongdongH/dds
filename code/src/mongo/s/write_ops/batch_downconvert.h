@@ -28,20 +28,13 @@
 
 #pragma once
 
-#include <string>
-#include <vector>
-
+#include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/bsonobj.h"
-#include "mongo/bson/timestamp.h"
-#include "mongo/s/write_ops/batch_write_exec.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/rpc/write_concern_error_detail.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 
 namespace mongo {
-
-class MultiCommandDispatch;
 
 // Used for reporting legacy write concern responses
 struct LegacyWCResponse {
@@ -49,19 +42,6 @@ struct LegacyWCResponse {
     BSONObj gleResponse;
     std::string errToReport;
 };
-
-/**
- * Uses GLE and the shard hosts and opTimes last written by write commands to enforce a
- * write concern across the previously used shards.
- *
- * Returns OK with the LegacyWCResponses containing only write concern error information
- * Returns !OK if there was an error getting a GLE response
- */
-Status enforceLegacyWriteConcern(MultiCommandDispatch* dispatcher,
-                                 StringData dbName,
-                                 const BSONObj& options,
-                                 const HostOpTimeMap& hostOpTimes,
-                                 std::vector<LegacyWCResponse>* wcResponses);
 
 //
 // Below exposed for testing only

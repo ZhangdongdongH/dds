@@ -21,6 +21,7 @@ load("jstests/libs/read_committed_lib.js");  // For testReadCommittedLookup
 
     if (!startSetIfSupportsReadMajority(rst)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        rst.stopSet();
         return;
     }
 
@@ -33,10 +34,10 @@ load("jstests/libs/read_committed_lib.js");  // For testReadCommittedLookup
             {_id: 2, host: nodes[2], arbiterOnly: true},
         ]
     };
-    updateConfigIfNotDurable(config);
+
     rst.initiate(config);
 
-    let shardSecondary = rst.liveNodes.slaves[0];
+    let shardSecondary = rst._slaves[0];
 
     // Confirm read committed works on a cluster with a database that is not sharding enabled.
     let st = new ShardingTest({
@@ -60,5 +61,6 @@ load("jstests/libs/read_committed_lib.js");  // For testReadCommittedLookup
     testReadCommittedLookup(st.s.getDB("test"), shardSecondary, rst);
 
     st.stop();
+    rst.stopSet();
 
 })();

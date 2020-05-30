@@ -40,7 +40,6 @@ namespace mongo {
 
 using boost::intrusive_ptr;
 using parsed_aggregation_projection::ParsedAggregationProjection;
-using parsed_aggregation_projection::ProjectionType;
 
 REGISTER_DOCUMENT_SOURCE(project,
                          LiteParsedDocumentSourceDefault::parse,
@@ -48,9 +47,12 @@ REGISTER_DOCUMENT_SOURCE(project,
 
 intrusive_ptr<DocumentSource> DocumentSourceProject::create(
     BSONObj projectSpec, const intrusive_ptr<ExpressionContext>& expCtx) {
+    const bool isIndependentOfAnyCollection = false;
     intrusive_ptr<DocumentSource> project(new DocumentSourceSingleDocumentTransformation(
-        expCtx, ParsedAggregationProjection::create(projectSpec), "$project"));
-    project->injectExpressionContext(expCtx);
+        expCtx,
+        ParsedAggregationProjection::create(expCtx, projectSpec),
+        "$project",
+        isIndependentOfAnyCollection));
     return project;
 }
 

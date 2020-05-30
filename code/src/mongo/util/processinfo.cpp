@@ -34,6 +34,7 @@
 #include "mongo/base/init.h"
 #include "mongo/util/processinfo.h"
 
+#include <boost/filesystem/operations.hpp>
 #include <boost/filesystem/path.hpp>
 #include <fstream>
 #include <iostream>
@@ -68,6 +69,18 @@ public:
                 log() << "ERROR: Cannot write pid file to " << path.string() << ": "
                       << errAndStr.second;
             }
+        } else {
+            boost::system::error_code ec;
+            boost::filesystem::permissions(
+                path,
+                boost::filesystem::owner_read | boost::filesystem::owner_write |
+                    boost::filesystem::group_read | boost::filesystem::others_read,
+                ec);
+            if (ec) {
+                log() << "Could not set permissions on pid file " << path.string() << ": "
+                      << ec.message();
+                return false;
+            }
         }
         return out.good();
     }
@@ -79,22 +92,4 @@ private:
 bool writePidFile(const string& path) {
     return pidFileWiper.write(path);
 }
-
-ProcessInfo::SystemInfo* ProcessInfo::systemInfo = NULL;
-
-void ProcessInfo::initializeSystemInfo() {
-    if (systemInfo == NULL) {
-        systemInfo = new SystemInfo();
-    }
-}
-
-/**
- * We need this get the system page size for the secure allocator, which the enterprise modules need
- * for storage for command line parameters.
- */
-MONGO_INITIALIZER_GENERAL(SystemInfo, MONGO_NO_PREREQUISITES, MONGO_NO_DEPENDENTS)
-(InitializerContext* context) {
-    ProcessInfo::initializeSystemInfo();
-    return Status::OK();
-}
-}
+}  // namespace mongo

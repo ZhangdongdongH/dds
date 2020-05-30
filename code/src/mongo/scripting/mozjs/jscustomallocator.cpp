@@ -34,7 +34,6 @@
 
 #include "mongo/config.h"
 #include "mongo/scripting/mozjs/implscope.h"
-#include "mongo/util/concurrency/threadlocal.h"
 
 #ifdef __linux__
 #include <malloc.h>
@@ -44,6 +43,10 @@
 #include <malloc.h>
 #else
 #define MONGO_NO_MALLOC_USABLE_SIZE
+#endif
+
+#if !defined(__has_feature)
+#define __has_feature(x) 0
 #endif
 
 /**
@@ -68,8 +71,8 @@ namespace {
  * maximum number of bytes we will consider handing out. They are set by
  * MozJSImplScope on start up.
  */
-MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL size_t total_bytes;
-MONGO_TRIVIALLY_CONSTRUCTIBLE_THREAD_LOCAL size_t max_bytes;
+thread_local size_t total_bytes = 0;
+thread_local size_t max_bytes = 0;
 
 /**
  * When we don't have malloc_usable_size, we manage by adjusting our pointer by
@@ -123,9 +126,39 @@ void* wrap_alloc(T&& func, void* ptr, size_t bytes) {
     }
 
 #ifdef MONGO_NO_MALLOC_USABLE_SIZE
-    void* p = func(ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr, bytes + kMaxAlign);
+    ptr = ptr ? static_cast<char*>(ptr) - kMaxAlign : nullptr;
+#endif
+
+#ifdef MONGO_NO_MALLOC_USABLE_SIZE
+    void* p = func(ptr, bytes + kMaxAlign);
 #else
     void* p = func(ptr, bytes);
+#endif
+
+#if __has_feature(address_sanitizer)
+    {
+        auto handles = mongo::mozjs::MozJSImplScope::ASANHandles::getThreadASANHandles();
+
+        if (handles) {
+            if (bytes) {
+                if (ptr) {
+                    // realloc
+                    if (ptr != p) {
+                        // actually moved the allocation
+                        handles->removePointer(ptr);
+                        handles->addPointer(p);
+                    }
+                    // else we didn't need to realloc, don't have to register
+                } else {
+                    // malloc/calloc
+                    handles->addPointer(p);
+                }
+            } else {
+                // free
+                handles->removePointer(ptr);
+            }
+        }
+    }
 #endif
 
     if (!p) {

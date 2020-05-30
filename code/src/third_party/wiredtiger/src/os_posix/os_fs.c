@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -31,6 +31,23 @@
 /*
  * __posix_sync --
  *	Underlying support function to flush a file descriptor.
+ *
+ * Fsync calls (or fsync-style calls, for example, fdatasync) are not retried
+ * on failure, and failure halts the system.
+ *
+ * Excerpted from the LWN.net article https://lwn.net/Articles/752063/:
+ * In short, PostgreSQL assumes that a successful call to fsync() indicates
+ * that all data written since the last successful call made it safely to
+ * persistent storage. But that is not what the kernel actually does. When
+ * a buffered I/O write fails due to a hardware-level error, filesystems
+ * will respond differently, but that behavior usually includes discarding
+ * the data in the affected pages and marking them as being clean. So a read
+ * of the blocks that were just written will likely return something other
+ * than the data that was written.
+ *
+ * Given the shared history of UNIX filesystems, and the difficulty of knowing
+ * what specific error will be returned under specific circumstances, we don't
+ * retry fsync-style calls and panic if a flush operation fails.
  */
 static int
 __posix_sync(
@@ -52,25 +69,49 @@ __posix_sync(
 	 * OS X F_FULLFSYNC fcntl documentation:
 	 * "This is currently implemented on HFS, MS-DOS (FAT), and Universal
 	 * Disk Format (UDF) file systems."
+	 *
+	 * See comment in __posix_sync(): sync cannot be retried or fail.
 	 */
-	WT_SYSCALL_RETRY(fcntl(fd, F_FULLFSYNC, 0) == -1 ? -1 : 0, ret);
-	if (ret == 0)
-		return (0);
-	/*
-	 * Assume F_FULLFSYNC failed because the file system doesn't support it
-	 * and fallback to fsync.
-	 */
+	static enum { FF_NOTSET, FF_IGNORE, FF_OK } ff_status = FF_NOTSET;
+	switch (ff_status) {
+	case FF_NOTSET:
+		WT_SYSCALL(fcntl(fd, F_FULLFSYNC, 0) == -1 ? -1 : 0, ret);
+		if (ret == 0) {
+			ff_status = FF_OK;
+			return (0);
+		}
+
+		/*
+		 * If the first F_FULLFSYNC fails, assume the file system
+		 * doesn't support it and fallback to fdatasync or fsync.
+		 */
+		ff_status = FF_IGNORE;
+		__wt_err(session, ret,
+		    "fcntl(F_FULLFSYNC) failed, falling back to fdatasync "
+		    "or fsync");
+		break;
+	case FF_IGNORE:
+		break;
+	case FF_OK:
+		WT_SYSCALL(fcntl(fd, F_FULLFSYNC, 0) == -1 ? -1 : 0, ret);
+		if (ret == 0)
+			return (0);
+		WT_PANIC_RET(session,
+		    ret, "%s: %s: fcntl(F_FULLFSYNC)", name, func);
+	}
 #endif
 #if defined(HAVE_FDATASYNC)
-	WT_SYSCALL_RETRY(fdatasync(fd), ret);
+	/* See comment in __posix_sync(): sync cannot be retried or fail. */
+	WT_SYSCALL(fdatasync(fd), ret);
 	if (ret == 0)
 		return (0);
-	WT_RET_MSG(session, ret, "%s: %s: fdatasync", name, func);
+	WT_PANIC_RET(session, ret, "%s: %s: fdatasync", name, func);
 #else
-	WT_SYSCALL_RETRY(fsync(fd), ret);
+	/* See comment in __posix_sync(): sync cannot be retried or fail. */
+	WT_SYSCALL(fsync(fd), ret);
 	if (ret == 0)
 		return (0);
-	WT_RET_MSG(session, ret, "%s: %s: fsync", name, func);
+	WT_PANIC_RET(session, ret, "%s: %s: fsync", name, func);
 #endif
 }
 
@@ -97,7 +138,7 @@ __posix_directory_sync(WT_SESSION_IMPL *session, const char *path)
 	dir = tmp->mem;
 	strrchr(dir, '/')[1] = '\0';
 
-	fd = -1;			/* -Wconditional-uninitialized */
+	fd = 0;				/* -Wconditional-uninitialized */
 	WT_SYSCALL_RETRY((
 	    (fd = open(dir, O_RDONLY, 0444)) == -1 ? -1 : 0), ret);
 	if (ret != 0)
@@ -108,12 +149,15 @@ __posix_directory_sync(WT_SESSION_IMPL *session, const char *path)
 	WT_SYSCALL(close(fd), tret);
 	if (tret != 0) {
 		__wt_err(session, tret, "%s: directory-sync: close", dir);
-		if (ret == 0)
-			ret = tret;
+		WT_TRET(tret);
 	}
 
 err:	__wt_scr_free(session, &tmp);
-	return (ret);
+	if (ret == 0)
+		return (ret);
+
+	/* See comment in __posix_sync(): sync cannot be retried or fail. */
+	WT_PANIC_RET(session, ret, "%s: directory-sync", path);
 }
 #endif
 
@@ -294,7 +338,7 @@ __posix_file_advise(WT_FILE_HANDLE *file_handle, WT_SESSION *wt_session,
 	 */
 	if (ret == EINVAL) {
 		file_handle->fh_advise = NULL;
-		return (ENOTSUP);
+		return (__wt_set_return(session, ENOTSUP));
 	}
 
 	WT_RET_MSG(session, ret,
@@ -395,11 +439,15 @@ __posix_file_read(WT_FILE_HANDLE *file_handle,
 	/* Break reads larger than 1GB into 1GB chunks. */
 	for (addr = buf; len > 0; addr += nr, len -= (size_t)nr, offset += nr) {
 		chunk = WT_MIN(len, WT_GIGABYTE);
-		if ((nr = pread(pfh->fd, addr, chunk, offset)) <= 0)
-			WT_RET_MSG(session, nr == 0 ? WT_ERROR : __wt_errno(),
+		if ((nr = pread(pfh->fd, addr, chunk, offset)) <= 0) {
+			if (nr == 0)
+				F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
+			WT_RET_MSG(session,
+			    nr == 0 ? WT_ERROR : __wt_errno(),
 			    "%s: handle-read: pread: failed to read %"
 			    WT_SIZET_FMT " bytes at offset %" PRIuMAX,
 			    file_handle->name, chunk, (uintmax_t)offset);
+		}
 	}
 	return (0);
 }
@@ -460,11 +508,13 @@ __posix_file_sync_nowait(WT_FILE_HANDLE *file_handle, WT_SESSION *wt_session)
 	session = (WT_SESSION_IMPL *)wt_session;
 	pfh = (WT_FILE_HANDLE_POSIX *)file_handle;
 
-	WT_SYSCALL_RETRY(sync_file_range(pfh->fd,
+	/* See comment in __posix_sync(): sync cannot be retried or fail. */
+	WT_SYSCALL(sync_file_range(pfh->fd,
 	    (off64_t)0, (off64_t)0, SYNC_FILE_RANGE_WRITE), ret);
 	if (ret == 0)
 		return (0);
-	WT_RET_MSG(session, ret,
+
+	WT_PANIC_RET(session, ret,
 	    "%s: handle-sync-nowait: sync_file_range", file_handle->name);
 }
 #endif
@@ -550,7 +600,7 @@ __posix_open_file_cloexec(WT_SESSION_IMPL *session, int fd, const char *name)
 	if ((f = fcntl(fd, F_GETFD)) == -1 ||
 	    fcntl(fd, F_SETFD, f | FD_CLOEXEC) == -1)
 		WT_RET_MSG(session, __wt_errno(),
-		    "%s: handle-open: fcntl", name);
+		    "%s: handle-open: fcntl(FD_CLOEXEC)", name);
 	return (0);
 #else
 	WT_UNUSED(session);
@@ -575,7 +625,7 @@ __posix_open_file(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session,
 	WT_FILE_HANDLE_POSIX *pfh;
 	WT_SESSION_IMPL *session;
 	mode_t mode;
-	int f;
+	int advise_flag, f;
 
 	WT_UNUSED(file_system);
 
@@ -602,7 +652,8 @@ __posix_open_file(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session,
 		WT_SYSCALL_RETRY((
 		    (pfh->fd = open(name, f, 0444)) == -1 ? -1 : 0), ret);
 		if (ret != 0)
-			WT_ERR_MSG(session, ret, "%s: handle-open: open", name);
+			WT_ERR_MSG(session, ret,
+			    "%s: handle-open: open-directory", name);
 		WT_ERR(__posix_open_file_cloexec(session, pfh->fd, name));
 		goto directory_open;
 	}
@@ -676,17 +727,24 @@ __posix_open_file(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session,
 
 #if defined(HAVE_POSIX_FADVISE)
 	/*
-	 * Disable read-ahead on trees: it slows down random read workloads.
+	 * If the user set an access pattern hint, call fadvise now.
 	 * Ignore fadvise when doing direct I/O, the kernel cache isn't
 	 * interesting.
 	 */
-	if (!pfh->direct_io && file_type == WT_FS_OPEN_FILE_TYPE_DATA) {
-		WT_SYSCALL(
-		    posix_fadvise(pfh->fd, 0, 0, POSIX_FADV_RANDOM), ret);
+	if (!pfh->direct_io && file_type == WT_FS_OPEN_FILE_TYPE_DATA &&
+	    LF_ISSET(WT_FS_OPEN_ACCESS_RAND | WT_FS_OPEN_ACCESS_SEQ)) {
+		advise_flag = 0;
+		if (LF_ISSET(WT_FS_OPEN_ACCESS_RAND))
+			advise_flag = POSIX_FADV_RANDOM;
+		if (LF_ISSET(WT_FS_OPEN_ACCESS_SEQ))
+			advise_flag = POSIX_FADV_SEQUENTIAL;
+		WT_SYSCALL(posix_fadvise(pfh->fd, 0, 0, advise_flag), ret);
 		if (ret != 0)
 			WT_ERR_MSG(session, ret,
 			    "%s: handle-open: posix_fadvise", name);
 	}
+#else
+	WT_UNUSED(advise_flag);
 #endif
 
 directory_open:
@@ -768,6 +826,8 @@ __wt_os_posix(WT_SESSION_IMPL *session)
 
 	/* Initialize the POSIX jump table. */
 	file_system->fs_directory_list = __wt_posix_directory_list;
+	file_system->fs_directory_list_single =
+	    __wt_posix_directory_list_single;
 	file_system->fs_directory_list_free = __wt_posix_directory_list_free;
 	file_system->fs_exist = __posix_fs_exist;
 	file_system->fs_open_file = __posix_open_file;

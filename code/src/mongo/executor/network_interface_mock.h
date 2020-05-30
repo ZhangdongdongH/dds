@@ -84,6 +84,9 @@ public:
     virtual ~NetworkInterfaceMock();
     virtual void appendConnectionStats(ConnectionPoolStats* stats) const;
     virtual std::string getDiagnosticString();
+    Counters getCounters() const override {
+        return Counters();
+    }
 
     /**
      * Logs the contents of the queues for diagnostics.
@@ -108,7 +111,8 @@ public:
     virtual std::string getHostName();
     virtual Status startCommand(const TaskExecutor::CallbackHandle& cbHandle,
                                 RemoteCommandRequest& request,
-                                const RemoteCommandCompletionFn& onFinish);
+                                const RemoteCommandCompletionFn& onFinish,
+                                const transport::BatonHandle& baton = nullptr);
 
     /**
      * If the network operation is in the _unscheduled or _processing queues, moves the operation
@@ -116,15 +120,19 @@ public:
      * the _scheduled queue, does nothing. The latter simulates the case where cancelCommand() is
      * called after the task has already completed, but its callback has not yet been run.
      */
-    virtual void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle);
+    virtual void cancelCommand(const TaskExecutor::CallbackHandle& cbHandle,
+                               const transport::BatonHandle& baton = nullptr);
 
     /**
      * Not implemented.
      */
-    void cancelAllCommands() override {}
-    virtual Status setAlarm(Date_t when, const stdx::function<void()>& action);
+    virtual Status setAlarm(Date_t when,
+                            const stdx::function<void()>& action,
+                            const transport::BatonHandle& baton = nullptr);
 
     virtual bool onNetworkThread();
+
+    void dropConnections(const HostAndPort&) override {}
 
 
     ////////////////////////////////////////////////////////////////////////////////
@@ -174,9 +182,15 @@ public:
 
     /**
      * Gets the first unscheduled request. There must be at least one unscheduled request in the
-     * queue.
+     * queue. Equivalent to getNthUnscheduledRequest(0).
      */
     NetworkOperationIterator getFrontOfUnscheduledQueue();
+
+    /**
+     * Get the nth (starting at 0) unscheduled request. Assumes there are at least n+1 unscheduled
+     * requests in the queue.
+     */
+    NetworkOperationIterator getNthUnscheduledRequest(size_t n);
 
     /**
      * Schedules "response" in response to "noi" at virtual time "when".
@@ -285,6 +299,11 @@ private:
      * Values are used in a bitmask, as well.
      */
     enum ThreadType { kNoThread = 0, kExecutorThread = 1, kNetworkThread = 2 };
+
+    /**
+     * Implementation of startup behavior.
+     */
+    void _startup_inlock();
 
     /**
      * Returns information about the state of this mock for diagnostic purposes.

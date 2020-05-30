@@ -32,9 +32,9 @@
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/ops/update_driver.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/update_result.h"
+#include "mongo/db/update/update_driver.h"
 
 namespace mongo {
 
@@ -77,7 +77,7 @@ class UpdateStage final : public PlanStage {
     MONGO_DISALLOW_COPYING(UpdateStage);
 
 public:
-    UpdateStage(OperationContext* txn,
+    UpdateStage(OperationContext* opCtx,
                 const UpdateStageParams& params,
                 WorkingSet* ws,
                 Collection* collection,
@@ -132,17 +132,17 @@ public:
      *
      * Fills out whether or not this is a fastmodinsert in 'stats'.
      *
-     * Returns the document to insert in *out.
+     * Returns the document to insert.
      */
-    static Status applyUpdateOpsForInsert(OperationContext* txn,
-                                          const CanonicalQuery* cq,
-                                          const BSONObj& query,
-                                          UpdateDriver* driver,
-                                          mutablebson::Document* doc,
-                                          bool isInternalRequest,
-                                          const NamespaceString& ns,
-                                          UpdateStats* stats,
-                                          BSONObj* out);
+    static BSONObj applyUpdateOpsForInsert(OperationContext* opCtx,
+                                           const CanonicalQuery* cq,
+                                           const BSONObj& query,
+                                           UpdateDriver* driver,
+                                           mutablebson::Document* doc,
+                                           bool isInternalRequest,
+                                           const NamespaceString& ns,
+                                           bool enforceOkForStorage,
+                                           UpdateStats* stats);
 
 private:
     /**
@@ -171,11 +171,6 @@ private:
     bool needInsert();
 
     /**
-     * Helper for restoring the state of this update.
-     */
-    Status restoreUpdateState();
-
-    /**
      * Stores 'idToRetry' in '_idRetrying' so the update can be retried during the next call to
      * work(). Always returns NEED_YIELD and sets 'out' to WorkingSet::INVALID_ID.
      */
@@ -198,6 +193,9 @@ private:
     // Stats
     UpdateStats _specificStats;
 
+    // True if updated documents should be validated with storage_validation::storageValid().
+    bool _enforceOkForStorage;
+
     // If the update was in-place, we may see it again.  This only matters if we're doing
     // a multi-update; if we're not doing a multi-update we stop after one update and we
     // won't see any more docs.
@@ -210,7 +208,7 @@ private:
     // document and we wouldn't want to update that.
     //
     // So, no matter what, we keep track of where the doc wound up.
-    typedef unordered_set<RecordId, RecordId::Hasher> RecordIdSet;
+    typedef stdx::unordered_set<RecordId, RecordId::Hasher> RecordIdSet;
     const std::unique_ptr<RecordIdSet> _updatedRecordIds;
 
     // These get reused for each update.

@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoimport
 
 import (
@@ -6,6 +12,7 @@ import (
 	"io/ioutil"
 	"os"
 	"reflect"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -63,12 +70,14 @@ func getBasicToolOptions() *options.ToolOptions {
 		Host: "localhost",
 		Port: db.DefaultTestPort,
 	}
+
 	return &options.ToolOptions{
 		General:    general,
 		SSL:        &ssl,
 		Namespace:  namespace,
 		Connection: connection,
 		Auth:       &auth,
+		URI:        &options.URI{},
 	}
 }
 
@@ -773,4 +782,24 @@ func TestImportDocuments(t *testing.T) {
 			So(err, ShouldNotBeNil)
 		})
 	})
+}
+
+// Regression test for TOOLS-1694 to prevent issue from TOOLS-1115
+func TestHiddenOptionsDefaults(t *testing.T) {
+	Convey("With a new mongoimport with empty options", t, func() {
+		imp, err := NewMongoImport()
+		imp.ToolOptions = options.New("", "", options.EnabledOptions{})
+		So(err, ShouldBeNil)
+		Convey("Then parsing should fill args with expected defaults", func() {
+			_, err := imp.ToolOptions.ParseArgs([]string{})
+			So(err, ShouldBeNil)
+
+			// collection cannot be empty in validate
+			imp.ToolOptions.Collection = "col"
+			So(imp.ValidateSettings([]string{}), ShouldBeNil)
+			So(imp.IngestOptions.NumDecodingWorkers, ShouldEqual, runtime.NumCPU())
+			So(imp.IngestOptions.BulkBufferSize, ShouldEqual, 1000)
+		})
+	})
+
 }

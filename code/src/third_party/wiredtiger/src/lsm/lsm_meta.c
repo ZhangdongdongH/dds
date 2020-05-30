@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -104,7 +104,8 @@ __lsm_meta_read_v0(
 					lsm_tree->chunk[nchunks++] = chunk;
 					chunk->id = (uint32_t)lv.val;
 					WT_RET(__wt_lsm_tree_chunk_name(session,
-					    lsm_tree, chunk->id, &chunk->uri));
+					    lsm_tree, chunk->id,
+					    chunk->generation, &chunk->uri));
 					F_SET(chunk,
 					    WT_LSM_CHUNK_ONDISK |
 					    WT_LSM_CHUNK_STABLE);
@@ -200,6 +201,24 @@ __lsm_meta_read_v1(
 		    cv.str, cv.len, &lsm_tree->collator_name));
 	}
 
+	/* lsm.merge_custom does not appear in all V1 LSM metadata. */
+	lsm_tree->custom_generation = 0;
+	if ((ret = __wt_config_getones(
+	    session, lsmconf, "lsm.merge_custom.start_generation", &cv)) == 0)
+		lsm_tree->custom_generation = (uint32_t)cv.val;
+	WT_ERR_NOTFOUND_OK(ret);
+	if (lsm_tree->custom_generation != 0) {
+		WT_ERR(__wt_config_getones(
+		    session, lsmconf, "lsm.merge_custom.prefix", &cv));
+		WT_ERR(__wt_strndup(session,
+		    cv.str, cv.len, &lsm_tree->custom_prefix));
+
+		WT_ERR(__wt_config_getones(
+		    session, lsmconf, "lsm.merge_custom.suffix", &cv));
+		WT_ERR(__wt_strndup(session,
+		    cv.str, cv.len, &lsm_tree->custom_suffix));
+	}
+
 	WT_ERR(__wt_config_getones(session, lsmconf, "lsm.auto_throttle", &cv));
 	if (cv.val)
 		F_SET(lsm_tree, WT_LSM_TREE_THROTTLE);
@@ -229,7 +248,7 @@ __lsm_meta_read_v1(
 		cv.len -= 2;
 	}
 	WT_ERR(__wt_config_check(session,
-	   WT_CONFIG_REF(session, WT_SESSION_create), cv.str, cv.len));
+	    WT_CONFIG_REF(session, WT_SESSION_create), cv.str, cv.len));
 	WT_ERR(__wt_strndup(session, cv.str, cv.len, &lsm_tree->bloom_config));
 	WT_ERR(__wt_config_getones(
 	    session, lsmconf, "lsm.bloom_hash_count", &cv));
@@ -265,8 +284,7 @@ __lsm_meta_read_v1(
 	lsm_tree->last = (u_int)cv.val;
 	WT_ERR(__wt_config_getones(session, lsmconf, "chunks", &cv));
 	__wt_config_subinit(session, &lparser, &cv);
-	for (nchunks = 0; (ret =
-	    __wt_config_next(&lparser, &lk, &lv)) == 0; ) {
+	for (nchunks = 0; (ret = __wt_config_next(&lparser, &lk, &lv)) == 0;) {
 		if (WT_STRING_MATCH("id", lk.str, lk.len)) {
 			WT_ERR(__wt_realloc_def(session,
 			    &lsm_tree->chunk_alloc,
@@ -274,25 +292,23 @@ __lsm_meta_read_v1(
 			WT_ERR(__wt_calloc_one(session, &chunk));
 			lsm_tree->chunk[nchunks++] = chunk;
 			chunk->id = (uint32_t)lv.val;
-			WT_ERR(__wt_lsm_tree_chunk_name(session,
-			    lsm_tree, chunk->id, &chunk->uri));
-			F_SET(chunk,
-			    WT_LSM_CHUNK_ONDISK |
-			    WT_LSM_CHUNK_STABLE);
+			F_SET(chunk, WT_LSM_CHUNK_ONDISK | WT_LSM_CHUNK_STABLE);
 		} else if (WT_STRING_MATCH("bloom", lk.str, lk.len)) {
 			WT_ERR(__wt_lsm_tree_bloom_name(
 			    session, lsm_tree, chunk->id, &chunk->bloom_uri));
 			F_SET(chunk, WT_LSM_CHUNK_BLOOM);
-			continue;
 		} else if (WT_STRING_MATCH("chunk_size", lk.str, lk.len)) {
 			chunk->size = (uint64_t)lv.val;
-			continue;
 		} else if (WT_STRING_MATCH("count", lk.str, lk.len)) {
 			chunk->count = (uint64_t)lv.val;
-			continue;
 		} else if (WT_STRING_MATCH("generation", lk.str, lk.len)) {
 			chunk->generation = (uint32_t)lv.val;
-			continue;
+			/*
+			 * Id appears first, but we need both id and generation
+			 * to create the name.
+			 */
+			WT_ERR(__wt_lsm_tree_chunk_name(session, lsm_tree,
+			    chunk->id, chunk->generation, &chunk->uri));
 		}
 	}
 	WT_ERR_NOTFOUND_OK(ret);
@@ -300,8 +316,7 @@ __lsm_meta_read_v1(
 
 	WT_ERR(__wt_config_getones(session, lsmconf, "old_chunks", &cv));
 	__wt_config_subinit(session, &lparser, &cv);
-	for (nchunks = 0; (ret =
-	    __wt_config_next(&lparser, &lk, &lv)) == 0; ) {
+	for (nchunks = 0; (ret = __wt_config_next(&lparser, &lk, &lv)) == 0;) {
 		if (WT_STRING_MATCH("bloom", lk.str, lk.len)) {
 			WT_ERR(__wt_strndup(session,
 			    lv.str, lv.len, &chunk->bloom_uri));
@@ -309,12 +324,10 @@ __lsm_meta_read_v1(
 			continue;
 		}
 		WT_ERR(__wt_realloc_def(session,
-		    &lsm_tree->old_alloc, nchunks + 1,
-		    &lsm_tree->old_chunks));
+		    &lsm_tree->old_alloc, nchunks + 1, &lsm_tree->old_chunks));
 		WT_ERR(__wt_calloc_one(session, &chunk));
 		lsm_tree->old_chunks[nchunks++] = chunk;
-		WT_ERR(__wt_strndup(session,
-		    lk.str, lk.len, &chunk->uri));
+		WT_ERR(__wt_strndup(session, lk.str, lk.len, &chunk->uri));
 		F_SET(chunk, WT_LSM_CHUNK_ONDISK);
 	}
 	WT_ERR_NOTFOUND_OK(ret);
@@ -454,13 +467,14 @@ __wt_lsm_meta_read(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
  *	Write the metadata for an LSM tree.
  */
 int
-__wt_lsm_meta_write(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
+__wt_lsm_meta_write(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree,
+    const char *newconfig)
 {
 	WT_DECL_ITEM(buf);
 	WT_DECL_RET;
 	WT_LSM_CHUNK *chunk;
 	u_int i;
-	const char *new_cfg[] = { NULL, NULL, NULL };
+	const char *new_cfg[] = { NULL, NULL, NULL, NULL, NULL };
 	char *new_metadata;
 	bool first;
 
@@ -474,7 +488,10 @@ __wt_lsm_meta_write(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 		chunk = lsm_tree->chunk[i];
 		if (i > 0)
 			WT_ERR(__wt_buf_catfmt(session, buf, ","));
-		WT_ERR(__wt_buf_catfmt(session, buf, "id=%" PRIu32, chunk->id));
+		WT_ERR(__wt_buf_catfmt(
+		    session, buf, "id=%" PRIu32, chunk->id));
+		WT_ERR(__wt_buf_catfmt(
+		    session, buf, ",generation=%" PRIu32, chunk->generation));
 		if (F_ISSET(chunk, WT_LSM_CHUNK_BLOOM))
 			WT_ERR(__wt_buf_catfmt(session, buf, ",bloom"));
 		if (chunk->size != 0)
@@ -483,8 +500,6 @@ __wt_lsm_meta_write(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 		if (chunk->count != 0)
 			WT_ERR(__wt_buf_catfmt(
 			    session, buf, ",count=%" PRIu64, chunk->count));
-		WT_ERR(__wt_buf_catfmt(
-		    session, buf, ",generation=%" PRIu32, chunk->generation));
 	}
 	WT_ERR(__wt_buf_catfmt(session, buf, "]"));
 	WT_ERR(__wt_buf_catfmt(session, buf, ",old_chunks=["));
@@ -504,8 +519,10 @@ __wt_lsm_meta_write(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
 	WT_ERR(__wt_buf_catfmt(session, buf, "]"));
 
 	/* Update the existing configuration with the new values. */
-	new_cfg[0] = lsm_tree->config;
-	new_cfg[1] = buf->data;
+	new_cfg[0] = WT_CONFIG_BASE(session, lsm_meta);
+	new_cfg[1] = lsm_tree->config;
+	new_cfg[2] = buf->data;
+	new_cfg[3] = newconfig;
 	WT_ERR(__wt_config_collapse(session, new_cfg, &new_metadata));
 	ret = __wt_metadata_update(session, lsm_tree->name, new_metadata);
 	WT_ERR(ret);

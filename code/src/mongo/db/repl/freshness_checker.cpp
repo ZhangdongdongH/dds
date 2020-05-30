@@ -34,11 +34,10 @@
 
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
-#include "mongo/db/repl/member_heartbeat_data.h"
-#include "mongo/db/repl/replica_set_config.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
 #include "mongo/rpc/get_status_from_command_result.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
 #include "mongo/util/time_support.h"
@@ -47,9 +46,10 @@ namespace mongo {
 namespace repl {
 
 using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
 
 FreshnessChecker::Algorithm::Algorithm(Timestamp lastOpTimeApplied,
-                                       const ReplicaSetConfig& rsConfig,
+                                       const ReplSetConfig& rsConfig,
                                        int selfIndex,
                                        const std::vector<HostAndPort>& targets)
     : _responsesProcessed(0),
@@ -122,7 +122,7 @@ bool FreshnessChecker::Algorithm::_isVotingMember(const HostAndPort hap) const {
 }
 
 void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& request,
-                                                  const ResponseStatus& response) {
+                                                  const RemoteCommandResponse& response) {
     ++_responsesProcessed;
     bool votingMember = _isVotingMember(request.target);
 
@@ -149,7 +149,8 @@ void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& re
     LOG(2) << "FreshnessChecker: Got response from " << request.target << " of " << res;
 
     if (res["fresher"].trueValue()) {
-        log() << "not electing self, we are not freshest";
+        log() << "not electing self, " << request.target.toString()
+              << " knows a node is fresher than us";
         _abortReason = FresherNodeFound;
         return;
     }
@@ -162,10 +163,15 @@ void FreshnessChecker::Algorithm::processResponse(const RemoteCommandRequest& re
     }
     Timestamp remoteTime(res["opTime"].date());
     if (remoteTime == _lastOpTimeApplied) {
+        log() << "not electing self, " << request.target.toString()
+              << " has same OpTime as us: " << remoteTime.toBSON();
         _abortReason = FreshnessTie;
     }
     if (remoteTime > _lastOpTimeApplied) {
         // something really wrong (rogue command?)
+        log() << "not electing self, " << request.target.toString()
+              << " has newer OpTime than us. Our OpTime: " << _lastOpTimeApplied.toBSON()
+              << ", their OpTime: " << remoteTime.toBSON();
         _abortReason = FresherNodeFound;
         return;
     }
@@ -203,15 +209,15 @@ long long FreshnessChecker::getOriginalConfigVersion() const {
 FreshnessChecker::FreshnessChecker() : _isCanceled(false) {}
 FreshnessChecker::~FreshnessChecker() {}
 
-StatusWith<ReplicationExecutor::EventHandle> FreshnessChecker::start(
-    ReplicationExecutor* executor,
+StatusWith<executor::TaskExecutor::EventHandle> FreshnessChecker::start(
+    executor::TaskExecutor* executor,
     const Timestamp& lastOpTimeApplied,
-    const ReplicaSetConfig& currentConfig,
+    const ReplSetConfig& currentConfig,
     int selfIndex,
     const std::vector<HostAndPort>& targets) {
     _originalConfigVersion = currentConfig.getConfigVersion();
-    _algorithm.reset(new Algorithm(lastOpTimeApplied, currentConfig, selfIndex, targets));
-    _runner.reset(new ScatterGatherRunner(_algorithm.get(), executor));
+    _algorithm = std::make_shared<Algorithm>(lastOpTimeApplied, currentConfig, selfIndex, targets);
+    _runner = stdx::make_unique<ScatterGatherRunner>(_algorithm, executor);
     return _runner->start();
 }
 

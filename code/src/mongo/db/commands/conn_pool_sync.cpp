@@ -28,46 +28,47 @@
 
 #include "mongo/platform/basic.h"
 
-#include <sstream>
-
-#include "mongo/client/connpool.h"
 #include "mongo/client/global_conn_pool.h"
 #include "mongo/db/commands.h"
 #include "mongo/s/client/shard_connection.h"
 
 namespace mongo {
+namespace {
 
-class PoolFlushCmd : public Command {
+class PoolFlushCmd : public BasicCommand {
 public:
-    PoolFlushCmd() : Command("connPoolSync", false, "connpoolsync") {}
-    virtual void help(std::stringstream& help) const {
-        help << "internal";
+    PoolFlushCmd() : BasicCommand("connPoolSync", "connpoolsync") {}
+
+    std::string help() const override {
+        return "internal";
     }
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {
         ActionSet actions;
         actions.addAction(ActionType::connPoolSync);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string&,
-                     mongo::BSONObj&,
-                     int,
-                     std::string&,
-                     mongo::BSONObjBuilder& result) {
+    bool run(OperationContext* opCtx,
+             const std::string&,
+             const mongo::BSONObj&,
+             mongo::BSONObjBuilder& result) override {
         shardConnectionPool.flush();
         globalConnPool.flush();
-        return true;
-    }
-    virtual bool slaveOk() const {
         return true;
     }
 
 } poolFlushCmd;
 
+}  // namespace
 }  // namespace mongo

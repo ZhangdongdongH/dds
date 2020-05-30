@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -43,8 +43,8 @@ class test_sweep01(wttest.WiredTigerTestCase, suite_subprocess):
     numfiles = 30
     numkv = 1000
     conn_config = 'file_manager=(close_handle_minimum=0,' + \
-                  'close_idle_time=6,close_scan_interval=2),' + \
-                  'statistics=(fast),'
+                  'close_idle_time=3,close_scan_interval=1),' + \
+                  'statistics=(fast),operation_tracking=(enabled=false),'
 
     types = [
         ('row', dict(tabletype='row',
@@ -111,15 +111,20 @@ class test_sweep01(wttest.WiredTigerTestCase, suite_subprocess):
             self.session.checkpoint()
             k = k+1
             c[k] = 1
-            sleep += 2
-            time.sleep(2)
+            sleep += 0.5
+            time.sleep(0.5)
             # Give slow machines time to process files.
             stat_cursor = self.session.open_cursor('statistics:', None, None)
             this_nfile = stat_cursor[stat.conn.file_open][2]
+            removed = stat_cursor[stat.conn.dh_sweep_remove][2]
             stat_cursor.close()
             self.pr("==== loop " + str(sleep))
             self.pr("this_nfile " + str(this_nfile))
-            if this_nfile == final_nfile:
+            self.pr("removed " + str(removed))
+            # On slow machines there can be a lag where files get closed but
+            # the sweep server cannot yet remove the handles.  So wait for the
+            # removed statistic to indicate forward progress too.
+            if this_nfile == final_nfile and removed != remove1:
                 break
         c.close()
         self.pr("Sweep loop took " + str(sleep))

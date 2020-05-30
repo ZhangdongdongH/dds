@@ -64,7 +64,7 @@ public:
     /**
      * Applies this tree of exclusions to the input document.
      */
-    Document applyProjection(Document input) const;
+    Document applyProjection(const Document& input) const;
 
     /**
      * Creates the child if it doesn't already exist. 'field' is not allowed to be dotted.
@@ -97,13 +97,14 @@ private:
  */
 class ParsedExclusionProjection : public ParsedAggregationProjection {
 public:
-    ParsedExclusionProjection() : ParsedAggregationProjection(), _root(new ExclusionNode()) {}
+    ParsedExclusionProjection(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ParsedAggregationProjection(expCtx), _root(new ExclusionNode()) {}
 
-    ProjectionType getType() const final {
-        return ProjectionType::kExclusion;
+    TransformerType getType() const final {
+        return TransformerType::kExclusionProjection;
     }
 
-    Document serialize(bool explain = false) const final;
+    Document serializeStageOptions(boost::optional<ExplainOptions::Verbosity> explain) const final;
 
     /**
      * Parses the projection specification given by 'spec', populating internal data structures.
@@ -115,7 +116,7 @@ public:
     /**
      * Exclude the fields specified.
      */
-    Document applyProjection(Document inputDoc) const final;
+    Document applyProjection(const Document& inputDoc) const final;
 
     DocumentSource::GetDepsReturn addDependencies(DepsTracker* deps) const final {
         return DocumentSource::SEE_NEXT;
@@ -124,7 +125,7 @@ public:
     DocumentSource::GetModPathsReturn getModifiedPaths() const final {
         std::set<std::string> modifiedPaths;
         _root->addModifiedPaths(&modifiedPaths);
-        return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths)};
+        return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths), {}};
     }
 
 private:

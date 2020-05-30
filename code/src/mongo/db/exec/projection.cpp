@@ -61,8 +61,8 @@ ProjectionStage::ProjectionStage(OperationContext* opCtx,
     _projObj = params.projObj;
 
     if (ProjectionStageParams::NO_FAST_PATH == _projImpl) {
-        _exec.reset(new ProjectionExec(
-            params.projObj, params.fullExpression, params.collator, *params.extensionsCallback));
+        _exec.reset(
+            new ProjectionExec(opCtx, params.projObj, params.fullExpression, params.collator));
     } else {
         // We shouldn't need the full expression if we're fast-pathing.
         invariant(NULL == params.fullExpression);
@@ -210,16 +210,10 @@ PlanStage::StageState ProjectionStage::doWork(WorkingSetID* out) {
 
         *out = id;
     } else if (PlanStage::FAILURE == status || PlanStage::DEAD == status) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "projection stage failed to read in results from child";
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
     } else if (PlanStage::NEED_YIELD == status) {
         *out = id;
     }

@@ -34,7 +34,6 @@
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/chunk_version.h"
 
 namespace mongo {
 
@@ -45,6 +44,7 @@ const char kIdField[] = "id";
 const char kNsField[] = "ns";
 const char kBatchField[] = "nextBatch";
 const char kBatchFieldInitial[] = "firstBatch";
+const char kInternalLatestOplogTimestampField[] = "$_internalLatestOplogTimestamp";
 
 }  // namespace
 
@@ -61,6 +61,9 @@ void CursorResponseBuilder::done(CursorId cursorId, StringData cursorNamespace) 
     _cursorObject.append(kIdField, cursorId);
     _cursorObject.append(kNsField, cursorNamespace);
     _cursorObject.doneFast();
+    if (!_latestOplogTimestamp.isNull()) {
+        _commandResponse->append(kInternalLatestOplogTimestampField, _latestOplogTimestamp);
+    }
     _active = false;
 }
 
@@ -69,6 +72,7 @@ void CursorResponseBuilder::abandon() {
     _batch.doneFast();
     _cursorObject.doneFast();
     _commandResponse->bb().setlen(_responseInitialLen);  // Removes everything we've added.
+    _numDocs = 0;
     _active = false;
 }
 
@@ -97,22 +101,19 @@ void appendGetMoreResponseObject(long long cursorId,
 CursorResponse::CursorResponse(NamespaceString nss,
                                CursorId cursorId,
                                std::vector<BSONObj> batch,
-                               boost::optional<long long> numReturnedSoFar)
+                               boost::optional<long long> numReturnedSoFar,
+                               boost::optional<Timestamp> latestOplogTimestamp,
+                               boost::optional<BSONObj> writeConcernError)
     : _nss(std::move(nss)),
       _cursorId(cursorId),
       _batch(std::move(batch)),
-      _numReturnedSoFar(numReturnedSoFar) {}
+      _numReturnedSoFar(numReturnedSoFar),
+      _latestOplogTimestamp(latestOplogTimestamp),
+      _writeConcernError(std::move(writeConcernError)) {}
 
 StatusWith<CursorResponse> CursorResponse::parseFromBSON(const BSONObj& cmdResponse) {
     Status cmdStatus = getStatusFromCommandResult(cmdResponse);
     if (!cmdStatus.isOK()) {
-        if (ErrorCodes::isStaleShardingError(cmdStatus.code())) {
-            auto vWanted = ChunkVersion::fromBSON(cmdResponse, "vWanted");
-            auto vReceived = ChunkVersion::fromBSON(cmdResponse, "vReceived");
-            if (!vWanted.hasEqualEpoch(vReceived)) {
-                return Status(ErrorCodes::StaleEpoch, cmdStatus.reason());
-            }
-        }
         return cmdStatus;
     }
 
@@ -173,7 +174,30 @@ StatusWith<CursorResponse> CursorResponse::parseFromBSON(const BSONObj& cmdRespo
         doc.shareOwnershipWith(cmdResponse);
     }
 
-    return {{NamespaceString(fullns), cursorId, std::move(batch)}};
+    auto latestOplogTimestampElem = cmdResponse[kInternalLatestOplogTimestampField];
+    if (latestOplogTimestampElem && latestOplogTimestampElem.type() != BSONType::bsonTimestamp) {
+        return {
+            ErrorCodes::BadValue,
+            str::stream()
+                << "invalid _internalLatestOplogTimestamp format; expected timestamp but found: "
+                << latestOplogTimestampElem.type()};
+    }
+
+    auto writeConcernError = cmdResponse["writeConcernError"];
+
+    if (writeConcernError && writeConcernError.type() != BSONType::Object) {
+        return {ErrorCodes::BadValue,
+                str::stream() << "invalid writeConcernError format; expected object but found: "
+                              << writeConcernError.type()};
+    }
+
+    return {{NamespaceString(fullns),
+             cursorId,
+             std::move(batch),
+             boost::none,
+             latestOplogTimestampElem ? latestOplogTimestampElem.timestamp()
+                                      : boost::optional<Timestamp>{},
+             writeConcernError ? writeConcernError.Obj().getOwned() : boost::optional<BSONObj>{}}};
 }
 
 void CursorResponse::addToBSON(CursorResponse::ResponseType responseType,
@@ -193,7 +217,14 @@ void CursorResponse::addToBSON(CursorResponse::ResponseType responseType,
 
     cursorBuilder.doneFast();
 
+    if (_latestOplogTimestamp) {
+        builder->append(kInternalLatestOplogTimestampField, *_latestOplogTimestamp);
+    }
     builder->append("ok", 1.0);
+
+    if (_writeConcernError) {
+        builder->append("writeConcernError", *_writeConcernError);
+    }
 }
 
 BSONObj CursorResponse::toBSON(CursorResponse::ResponseType responseType) const {

@@ -33,6 +33,7 @@
 #include "mongo/s/client/shard.h"
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
@@ -70,32 +71,56 @@ public:
 
     bool isRetriableError(ErrorCodes::Error code, RetryPolicy options) final;
 
-    Status createIndexOnConfig(OperationContext* txn,
+    Status createIndexOnConfig(OperationContext* opCtx,
                                const NamespaceString& ns,
                                const BSONObj& keys,
                                bool unique) override;
+
+    void updateLastCommittedOpTime(LogicalTime lastCommittedOpTime) final;
+
+    LogicalTime getLastCommittedOpTime() const final;
 
 private:
     /**
      * Returns the metadata that should be used when running commands against this shard with
      * the given read preference.
      */
-    BSONObj _appendMetadataForCommand(OperationContext* txn, const ReadPreferenceSetting& readPref);
+    BSONObj _appendMetadataForCommand(OperationContext* opCtx,
+                                      const ReadPreferenceSetting& readPref);
 
-    Shard::HostWithResponse _runCommand(OperationContext* txn,
-                                        const ReadPreferenceSetting& readPref,
-                                        const std::string& dbname,
-                                        Milliseconds maxTimeMSOverride,
-                                        const BSONObj& cmdObj) final;
+    StatusWith<Shard::CommandResponse> _runCommand(OperationContext* opCtx,
+                                                   const ReadPreferenceSetting& readPref,
+                                                   const std::string& dbname,
+                                                   Milliseconds maxTimeMSOverride,
+                                                   const BSONObj& cmdObj) final;
+
+    StatusWith<Shard::QueryResponse> _runExhaustiveCursorCommand(
+        OperationContext* opCtx,
+        const ReadPreferenceSetting& readPref,
+        const std::string& dbName,
+        Milliseconds maxTimeMSOverride,
+        const BSONObj& cmdObj) final;
 
     StatusWith<QueryResponse> _exhaustiveFindOnConfig(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
         const repl::ReadConcernLevel& readConcernLevel,
         const NamespaceString& nss,
         const BSONObj& query,
         const BSONObj& sort,
         boost::optional<long long> limit) final;
+
+    /**
+     * Protects _lastCommittedOpTime.
+     */
+    mutable stdx::mutex _lastCommittedOpTimeMutex;
+
+    /**
+    * Logical time representing the latest opTime timestamp known to be in this shard's majority
+    * committed snapshot. Only the latest time is kept because lagged secondaries may return earlier
+    * times.
+    */
+    LogicalTime _lastCommittedOpTime;
 
     /**
      * Connection string for the shard at the creation time.

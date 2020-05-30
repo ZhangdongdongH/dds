@@ -27,9 +27,14 @@
  */
 #pragma once
 
+#include <list>
+
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/executor/task_executor.h"
 #include "mongo/s/catalog/type_chunk.h"
+#include "mongo/util/concurrency/notification.h"
+#include "mongo/util/time_support.h"
 
 namespace mongo {
 
@@ -37,41 +42,163 @@ class BSONObj;
 class Collection;
 class OperationContext;
 
+// After completing a batch of document deletions, the time in millis to wait before commencing the
+// next batch of deletions.
+extern AtomicInt32 rangeDeleterBatchDelayMS;
+
 class CollectionRangeDeleter {
     MONGO_DISALLOW_COPYING(CollectionRangeDeleter);
 
 public:
-    CollectionRangeDeleter(NamespaceString nss);
+    /**
+      * This is an object n that asynchronously changes state when a scheduled range deletion
+      * completes or fails. Call n.ready() to discover if the event has already occurred.  Call
+      * n.waitStatus(opCtx) to sleep waiting for the event, and get its result.  If the wait is
+      * interrupted, waitStatus throws.
+      *
+      * It is an error to destroy a returned CleanupNotification object n unless either n.ready()
+      * is true or n.abandon() has been called.  After n.abandon(), n is in a moved-from state.
+      */
+    class DeleteNotification {
+    public:
+        DeleteNotification();
+        DeleteNotification(Status status);
+
+        // The following default declarations are needed because the presence of a non-trivial
+        // destructor forbids the compiler to generate the declarations itself, but the definitions
+        // it generates are fine.
+        DeleteNotification(DeleteNotification&& notifn) = default;
+        DeleteNotification& operator=(DeleteNotification&& notifn) = default;
+        DeleteNotification(DeleteNotification const& notifn) = default;
+        DeleteNotification& operator=(DeleteNotification const& notifn) = default;
+
+        ~DeleteNotification() {
+            // Can be null only if moved from
+            dassert(!_notification || *_notification || _notification.use_count() == 1);
+        }
+
+        void notify(Status status) const {
+            _notification->set(status);
+        }
+
+        /**
+         * Sleeps waiting for notification, and returns notify's argument. On interruption, throws;
+         * calling waitStatus afterward returns failed status.
+         */
+        Status waitStatus(OperationContext* opCtx);
+
+        bool ready() const {
+            return bool(*_notification);
+        }
+        void abandon() {
+            _notification = nullptr;
+        }
+        bool operator==(DeleteNotification const& other) const {
+            return _notification == other._notification;
+        }
+        bool operator!=(DeleteNotification const& other) const {
+            return _notification != other._notification;
+        }
+
+    private:
+        std::shared_ptr<Notification<Status>> _notification;
+    };
+
+    struct Deletion {
+        Deletion(ChunkRange r, Date_t when) : range(std::move(r)), whenToDelete(when) {}
+
+        ChunkRange range;
+        Date_t whenToDelete;  // A value of Date_t{} means immediately.
+        DeleteNotification notification{};
+    };
+
+    CollectionRangeDeleter();
+    ~CollectionRangeDeleter();
+
+    //
+    // All of the following members must be called only while the containing MetadataManager's lock
+    // is held (or in its destructor), except cleanUpNextRange.
+    //
 
     /**
-     * Starts deleting ranges and cleans up this object when it is finished.
+     * Splices range's elements to the list to be cleaned up by the deleter thread.  Deletions d
+     * with d.delay == true are added to the delayed queue, and scheduled at time `later`.
+     * Returns the time to begin deletions, if needed, or boost::none if deletions are already
+     * scheduled.
      */
-    void run();
+    boost::optional<Date_t> add(std::list<Deletion> ranges);
 
     /**
-     * Acquires the collection IX lock and checks whether there are new entries for the collection's
-     * rangesToClean structure.  If there are, deletes some small amount of entries and yields using
-     * the standard query yielding logic.
+     * Reports whether the argument range overlaps any of the ranges to clean.  If there is overlap,
+     * it returns a notification that will be signaled when the currently newest overlapping range
+     * completes or fails. If there is no overlap, the result is boost::none.  After a successful
+     * removal, the caller should call again to ensure no other range overlaps the argument.
+     * (See CollectionShardingState::waitForClean and MetadataManager::trackOrphanedDataCleanup for
+     * an example use.)
+     */
+    boost::optional<DeleteNotification> overlaps(ChunkRange const& range) const;
+
+    /**
+     * Reports the number of ranges remaining to be cleaned up.
+     */
+    size_t size() const;
+
+    bool isEmpty() const;
+
+    /*
+     * Notifies with the specified status anything waiting on ranges scheduled, and then discards
+     * the ranges and notifications.  Is called in the destructor.
+     */
+    void clear(Status status);
+
+    /*
+     * Append a representation of self to the specified builder.
+     */
+    void append(BSONObjBuilder* builder) const;
+
+    /**
+     * If any range deletions are scheduled, deletes up to maxToDelete documents, notifying
+     * watchers of ranges as they are done being deleted. It performs its own collection locking, so
+     * it must be called without locks.
      *
-     * Returns true if there are more entries in rangesToClean, false if there is no more progress
-     * to be made.
+     * If it should be scheduled to run again because there might be more documents to delete,
+     * returns the time to begin, or boost::none otherwise.
+     *
+     * Argument 'forTestOnly' is used in unit tests that exercise the CollectionRangeDeleter class,
+     * so that they do not need to set up CollectionShardingState and MetadataManager objects.
      */
-    bool cleanupNextRange(OperationContext* txn);
+    static boost::optional<Date_t> cleanUpNextRange(OperationContext*,
+                                                    NamespaceString const& nss,
+                                                    OID const& epoch,
+                                                    int maxToDelete,
+                                                    CollectionRangeDeleter* forTestOnly = nullptr);
 
 private:
     /**
-     * Performs the deletion of a small amount of entries within the range in progress.
-     * This function will invariant if called while _rangeInProgress is not set.
+     * Performs the deletion of up to maxToDelete entries within the range in progress. Must be
+     * called under the collection lock.
      *
-     * Returns the number of documents deleted (0 if deletion is finished), or -1 for error.
+     * Returns the number of documents deleted, 0 if done with the range, or bad status if deleting
+     * the range failed.
      */
-    int _doDeletion(OperationContext* txn, Collection* collection, const BSONObj& keyPattern);
+    StatusWith<int> _doDeletion(OperationContext* opCtx,
+                                Collection* collection,
+                                const BSONObj& keyPattern,
+                                ChunkRange const& range,
+                                int maxToDelete);
 
-    NamespaceString _nss;
+    /**
+     * Removes the latest-scheduled range from the ranges to be cleaned up, and notifies any
+     * interested callers of this->overlaps(range) with specified status.
+     */
+    void _pop(Status status);
 
-    // Holds a range for which deletion has begun. If empty, then a new range
-    // must be requested from rangesToClean
-    boost::optional<ChunkRange> _rangeInProgress;
+    /**
+     * Ranges scheduled for deletion.  The front of the list will be in active process of deletion.
+     * As each range is completed, its notification is signaled before it is popped.
+     */
+    std::list<Deletion> _orphans;
+    std::list<Deletion> _delayedOrphans;
 };
 
 }  // namespace mongo

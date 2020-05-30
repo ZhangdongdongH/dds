@@ -42,6 +42,8 @@ TimerImpl::~TimerImpl() {
 }
 
 void TimerImpl::setTimeout(Milliseconds timeout, TimeoutCallback cb) {
+    _timers.erase(this);
+
     _cb = std::move(cb);
     _expiration = _global->now() + timeout;
 
@@ -50,10 +52,14 @@ void TimerImpl::setTimeout(Milliseconds timeout, TimeoutCallback cb) {
 
 void TimerImpl::cancelTimeout() {
     _timers.erase(this);
+    _cb = TimeoutCallback{};
 }
 
 void TimerImpl::clear() {
-    _timers.clear();
+    while (!_timers.empty()) {
+        auto* timer = *_timers.begin();
+        timer->cancelTimeout();
+    }
 }
 
 void TimerImpl::fireIfNecessary() {
@@ -116,9 +122,14 @@ void ConnectionImpl::pushSetup(PushSetupCallback status) {
     _pushSetupQueue.push_back(status);
 
     if (_setupQueue.size()) {
-        _setupQueue.front()->_setupCallback(_setupQueue.front(), _pushSetupQueue.front()());
+        auto connPtr = _setupQueue.front();
+        auto callback = _pushSetupQueue.front();
         _setupQueue.pop_front();
         _pushSetupQueue.pop_front();
+
+        auto cb = connPtr->_setupCallback;
+        connPtr->indicateUsed();
+        cb(connPtr, callback());
     }
 }
 
@@ -126,18 +137,32 @@ void ConnectionImpl::pushSetup(Status status) {
     pushSetup([status]() { return status; });
 }
 
+size_t ConnectionImpl::setupQueueDepth() {
+    return _setupQueue.size();
+}
+
 void ConnectionImpl::pushRefresh(PushRefreshCallback status) {
     _pushRefreshQueue.push_back(status);
 
     if (_refreshQueue.size()) {
-        _refreshQueue.front()->_refreshCallback(_refreshQueue.front(), _pushRefreshQueue.front()());
+        auto connPtr = _refreshQueue.front();
+        auto callback = _pushRefreshQueue.front();
+
         _refreshQueue.pop_front();
         _pushRefreshQueue.pop_front();
+
+        auto cb = connPtr->_refreshCallback;
+        connPtr->indicateUsed();
+        cb(connPtr, callback());
     }
 }
 
 void ConnectionImpl::pushRefresh(Status status) {
     pushRefresh([status]() { return status; });
+}
+
+size_t ConnectionImpl::refreshQueueDepth() {
+    return _refreshQueue.size();
 }
 
 Date_t ConnectionImpl::getLastUsed() const {
@@ -160,15 +185,20 @@ void ConnectionImpl::setup(Milliseconds timeout, SetupCallback cb) {
     _setupCallback = std::move(cb);
 
     _timer.setTimeout(timeout, [this] {
-        _setupCallback(this, Status(ErrorCodes::ExceededTimeLimit, "timeout"));
+        _setupCallback(this, Status(ErrorCodes::NetworkInterfaceExceededTimeLimit, "timeout"));
     });
 
     _setupQueue.push_back(this);
 
     if (_pushSetupQueue.size()) {
-        _setupQueue.front()->_setupCallback(_setupQueue.front(), _pushSetupQueue.front()());
+        auto connPtr = _setupQueue.front();
+        auto callback = _pushSetupQueue.front();
         _setupQueue.pop_front();
         _pushSetupQueue.pop_front();
+
+        auto refreshCb = connPtr->_setupCallback;
+        connPtr->indicateUsed();
+        refreshCb(connPtr, callback());
     }
 }
 
@@ -176,15 +206,21 @@ void ConnectionImpl::refresh(Milliseconds timeout, RefreshCallback cb) {
     _refreshCallback = std::move(cb);
 
     _timer.setTimeout(timeout, [this] {
-        _refreshCallback(this, Status(ErrorCodes::ExceededTimeLimit, "timeout"));
+        _refreshCallback(this, Status(ErrorCodes::NetworkInterfaceExceededTimeLimit, "timeout"));
     });
 
     _refreshQueue.push_back(this);
 
     if (_pushRefreshQueue.size()) {
-        _refreshQueue.front()->_refreshCallback(_refreshQueue.front(), _pushRefreshQueue.front()());
+        auto connPtr = _refreshQueue.front();
+        auto callback = _pushRefreshQueue.front();
+
         _refreshQueue.pop_front();
         _pushRefreshQueue.pop_front();
+
+        auto refreshCb = connPtr->_refreshCallback;
+        connPtr->indicateUsed();
+        refreshCb(connPtr, callback());
     }
 }
 
@@ -198,12 +234,12 @@ std::deque<ConnectionImpl*> ConnectionImpl::_setupQueue;
 std::deque<ConnectionImpl*> ConnectionImpl::_refreshQueue;
 size_t ConnectionImpl::_idCounter = 1;
 
-std::unique_ptr<ConnectionPool::ConnectionInterface> PoolImpl::makeConnection(
+std::shared_ptr<ConnectionPool::ConnectionInterface> PoolImpl::makeConnection(
     const HostAndPort& hostAndPort, size_t generation) {
-    return stdx::make_unique<ConnectionImpl>(hostAndPort, generation, this);
+    return std::make_shared<ConnectionImpl>(hostAndPort, generation, this);
 }
 
-std::unique_ptr<ConnectionPool::TimerInterface> PoolImpl::makeTimer() {
+std::shared_ptr<ConnectionPool::TimerInterface> PoolImpl::makeTimer() {
     return stdx::make_unique<TimerImpl>(this);
 }
 

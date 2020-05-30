@@ -302,7 +302,7 @@ public:
      * Returns null if the request can't be satisifed.
      */
     void* allocate(std::size_t size, std::size_t alignOf) {
-        if (stdx::align(alignOf, size, _ptr, _remaining)) {
+        if (std::align(alignOf, size, _ptr, _remaining)) {
             auto result = _ptr;
             _ptr = static_cast<char*>(_ptr) + size;
             _remaining -= size;
@@ -328,7 +328,7 @@ std::shared_ptr<Allocation> lastAllocation = nullptr;
 
 }  // namespace
 
-MONGO_INITIALIZER_GENERAL(SecureAllocator, ("SystemInfo"), MONGO_NO_DEPENDENTS)
+MONGO_INITIALIZER_GENERAL(SecureAllocator, MONGO_NO_PREREQUISITES, MONGO_NO_DEPENDENTS)
 (InitializerContext* context) {
 #if _WIN32
     // Enable the increase working set size privilege in our access token.
@@ -379,4 +379,7 @@ void deallocate(void* ptr, std::size_t bytes) {
 }
 
 }  // namespace secure_allocator_details
+
+constexpr StringData SecureAllocatorAuthDomainTrait::DomainType;
+
 }  // namespace mongo

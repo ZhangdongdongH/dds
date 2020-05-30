@@ -3,6 +3,11 @@
 // NOTE: Basic write functionality is tested via the passthrough tests, this file should contain
 // *only* mongos-specific tests.
 //
+
+// Checking UUID consistency involves talking to the config server primary, but there is no config
+// server primary by the end of this test.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     "use strict";
 
@@ -11,7 +16,6 @@
     var mongos = st.s0;
     var admin = mongos.getDB("admin");
     var config = mongos.getDB("config");
-    var shards = config.shards.find().toArray();
     var configConnStr = st._configDB;
 
     jsTest.log("Starting sharding batch write tests...");
@@ -27,7 +31,7 @@
 
     var coll = mongos.getCollection("foo.bar");
     assert.commandWorked(admin.runCommand({enableSharding: coll.getDB().toString()}));
-    st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+    st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll.toString(), key: {_id: 1}}));
 
     //
@@ -106,7 +110,7 @@
     // START SETUP
     var brokenColl = mongos.getCollection("broken.coll");
     assert.commandWorked(admin.runCommand({enableSharding: brokenColl.getDB().toString()}));
-    st.ensurePrimaryShard(brokenColl.getDB().toString(), shards[0]._id);
+    st.ensurePrimaryShard(brokenColl.getDB().toString(), st.shard0.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: brokenColl.toString(), key: {_id: 1}}));
     assert.commandWorked(admin.runCommand({split: brokenColl.toString(), middle: {_id: 0}}));
 
@@ -120,8 +124,8 @@
 
     // Modify the chunks to make shards at a higher version
 
-    assert.commandWorked(
-        admin.runCommand({moveChunk: brokenColl.toString(), find: {_id: 0}, to: shards[1]._id}));
+    assert.commandWorked(admin.runCommand(
+        {moveChunk: brokenColl.toString(), find: {_id: 0}, to: st.shard1.shardName}));
 
     // Rewrite the old chunks back to the config server
 

@@ -58,7 +58,7 @@ public:
 
     virtual void abandonSnapshot() {}
 
-    Status setReadFromMajorityCommittedSnapshot() final;
+    Status obtainMajorityCommittedSnapshot() final;
 
     virtual void registerChange(Change* change) {
         _changes.push_back(ChangePtr(change));
@@ -73,6 +73,8 @@ public:
     virtual SnapshotId getSnapshotId() const {
         return SnapshotId();
     }
+
+    virtual void setOrderedCommit(bool orderedCommit) {}
 
 private:
     typedef std::shared_ptr<Change> ChangePtr;

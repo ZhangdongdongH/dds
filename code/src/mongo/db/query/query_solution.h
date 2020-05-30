@@ -250,6 +250,13 @@ struct TextNode : public QuerySolutionNode {
     IndexEntry index;
     std::unique_ptr<fts::FTSQuery> ftsQuery;
 
+    // The number of fields in the prefix of the text index. For example, if the key pattern is
+    //
+    //   { a: 1, b: 1, _fts: "text", _ftsx: 1, c: 1 }
+    //
+    // then the number of prefix fields is 2, because of "a" and "b".
+    size_t numPrefixFields = 0u;
+
     // "Prefix" fields of a text index can handle equality predicates.  We group them with the
     // text node while creating the text leaf node and convert them into a BSONObj index prefix
     // when we finish the text leaf node.
@@ -289,10 +296,18 @@ struct CollectionScanNode : public QuerySolutionNode {
     // Should we make a tailable cursor?
     bool tailable;
 
+    // Should we keep track of the timestamp of the latest oplog entry we've seen? This information
+    // is needed to merge cursors from the oplog in order of operation time when reading the oplog
+    // across a sharded cluster.
+    bool shouldTrackLatestOplogTimestamp = false;
+
     int direction;
 
     // maxScan option to .find() limits how many docs we look at.
     int maxScan;
+
+    // Whether or not to wait for oplog visibility on oplog collection scans.
+    bool shouldWaitForOplogVisibility = false;
 };
 
 struct AndHashNode : public QuerySolutionNode {
@@ -483,6 +498,12 @@ struct IndexScanNode : public QuerySolutionNode {
     IndexBounds bounds;
 
     const CollatorInterface* queryCollator;
+
+    // The set of paths in the index key pattern which have at least one multikey path component, or
+    // empty if the index either is not multikey or does not have path-level multikeyness metadata.
+    //
+    // The correct set of paths is computed and stored here by computeProperties().
+    std::set<StringData> multikeyFields;
 };
 
 struct ProjectionNode : public QuerySolutionNode {
@@ -596,10 +617,6 @@ struct SortKeyGeneratorNode : public QuerySolutionNode {
     QuerySolutionNode* clone() const final;
 
     void appendToString(mongoutils::str::stream* ss, int indent) const final;
-
-    // The query predicate provided by the user. For sorted by an array field, the sort key depends
-    // on the predicate.
-    BSONObj queryObj;
 
     // The user-supplied sort pattern.
     BSONObj sortSpec;

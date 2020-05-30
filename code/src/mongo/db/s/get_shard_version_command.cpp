@@ -35,32 +35,32 @@
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/auth/privilege.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/db_raii.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/sharded_connection_info.h"
 #include "mongo/db/s/sharding_state.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace {
 
-class GetShardVersion : public Command {
+class GetShardVersion : public BasicCommand {
 public:
-    GetShardVersion() : Command("getShardVersion") {}
+    GetShardVersion() : BasicCommand("getShardVersion") {}
 
-    void help(std::stringstream& help) const override {
-        help << " example: { getShardVersion : 'alleyinsider.foo'  } ";
+    std::string help() const override {
+        return " example: { getShardVersion : 'alleyinsider.foo'  } ";
     }
 
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -69,7 +69,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forExactNamespace(NamespaceString(parseNs(dbname, cmdObj))),
                 ActionType::getShardVersion)) {
@@ -79,52 +79,46 @@ public:
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return parseNsFullyQualified(dbname, cmdObj);
+        return CommandHelpers::parseNsFullyQualified(cmdObj);
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         const NamespaceString nss(parseNs(dbname, cmdObj));
-        uassert(ErrorCodes::InvalidNamespace,
-                str::stream() << nss.ns() << " is not a valid namespace",
-                nss.isValid());
 
-        ShardingState* const gss = ShardingState::get(txn);
-        if (gss->enabled()) {
-            result.append("configServer", gss->getConfigServer(txn).toString());
+        ShardingState* const shardingState = ShardingState::get(opCtx);
+        if (shardingState->enabled()) {
+            result.append(
+                "configServer",
+                Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString().toString());
         } else {
             result.append("configServer", "");
         }
 
-        ShardedConnectionInfo* const sci = ShardedConnectionInfo::get(txn->getClient(), false);
+        ShardedConnectionInfo* const sci = ShardedConnectionInfo::get(opCtx->getClient(), false);
         result.appendBool("inShardedMode", sci != nullptr);
-        if (sci) {
-            result.appendTimestamp("mine", sci->getVersion(nss.ns()).toLong());
+
+        if (sci && sci->getVersion(nss.ns())) {
+            result.appendTimestamp("mine", sci->getVersion(nss.ns())->toLong());
         } else {
             result.appendTimestamp("mine", 0);
         }
 
-        AutoGetCollection autoColl(txn, nss, MODE_IS);
-        CollectionShardingState* const css = CollectionShardingState::get(txn, nss);
+        AutoGetCollection autoColl(opCtx, nss, MODE_IS);
+        auto* const css = CollectionShardingRuntime::get(opCtx, nss);
 
-        ScopedCollectionMetadata metadata;
-        if (css) {
-            metadata = css->getMetadata();
-        }
-
-        if (metadata) {
+        const auto metadata = css->getMetadata(opCtx);
+        if (metadata->isSharded()) {
             result.appendTimestamp("global", metadata->getShardVersion().toLong());
         } else {
-            result.appendTimestamp("global", ChunkVersion(0, 0, OID()).toLong());
+            result.appendTimestamp("global", ChunkVersion::UNSHARDED().toLong());
         }
 
         if (cmdObj["fullMetadata"].trueValue()) {
             BSONObjBuilder metadataBuilder(result.subobjStart("metadata"));
-            if (metadata) {
+            if (metadata->isSharded()) {
                 metadata->toBSONBasic(metadataBuilder);
 
                 BSONArrayBuilder chunksArr(metadataBuilder.subarrayStart("chunks"));
@@ -132,7 +126,7 @@ public:
                 chunksArr.doneFast();
 
                 BSONArrayBuilder pendingArr(metadataBuilder.subarrayStart("pending"));
-                metadata->toBSONPending(pendingArr);
+                css->toBSONPending(pendingArr);
                 pendingArr.doneFast();
             }
             metadataBuilder.doneFast();

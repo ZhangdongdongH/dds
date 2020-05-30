@@ -32,6 +32,8 @@
 
 #include "mongo/db/auth/authz_session_external_state_server_common.h"
 
+#include <mutex>
+
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/client.h"
@@ -43,6 +45,7 @@ namespace mongo {
 
 namespace {
 MONGO_EXPORT_STARTUP_SERVER_PARAMETER(enableLocalhostAuthBypass, bool, true);
+std::once_flag checkShouldAllowLocalhostOnceFlag;
 }  // namespace
 
 // NOTE: we default _allowLocalhost to true under the assumption that _checkShouldAllowLocalhost
@@ -53,7 +56,7 @@ AuthzSessionExternalStateServerCommon::AuthzSessionExternalStateServerCommon(
     : AuthzSessionExternalState(authzManager), _allowLocalhost(enableLocalhostAuthBypass) {}
 AuthzSessionExternalStateServerCommon::~AuthzSessionExternalStateServerCommon() {}
 
-void AuthzSessionExternalStateServerCommon::_checkShouldAllowLocalhost(OperationContext* txn) {
+void AuthzSessionExternalStateServerCommon::_checkShouldAllowLocalhost(OperationContext* opCtx) {
     if (!_authzManager->isAuthEnabled())
         return;
     // If we know that an admin user exists, don't re-check.
@@ -65,13 +68,13 @@ void AuthzSessionExternalStateServerCommon::_checkShouldAllowLocalhost(Operation
         return;
     }
 
-    _allowLocalhost = !_authzManager->hasAnyPrivilegeDocuments(txn);
+    _allowLocalhost = !_authzManager->hasAnyPrivilegeDocuments(opCtx);
     if (_allowLocalhost) {
-        ONCE {
+        std::call_once(checkShouldAllowLocalhostOnceFlag, []() {
             log() << "note: no users configured in admin.system.users, allowing localhost "
                      "access"
                   << std::endl;
-        }
+        });
     }
 }
 

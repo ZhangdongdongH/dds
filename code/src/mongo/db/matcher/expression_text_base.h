@@ -51,7 +51,8 @@ public:
     static const bool kCaseSensitiveDefault;
     static const bool kDiacriticSensitiveDefault;
 
-    TextMatchExpressionBase();
+    explicit TextMatchExpressionBase(StringData path);
+    virtual ~TextMatchExpressionBase() {}
 
     /**
      * Returns a reference to the parsed text query that this TextMatchExpressionBase owns.
@@ -62,26 +63,16 @@ public:
     // Methods inherited from MatchExpression.
     //
 
-    bool matchesSingleElement(const BSONElement& e) const final {
-        // Text match expressions force the selection of the text index and always generate EXACT
-        // index bounds (which causes the MatchExpression node to be trimmed), so we don't currently
-        // implement any explicit text matching logic here. SERVER-17648 tracks the work to
-        // implement a real text matcher.
-        //
-        // TODO: simply returning 'true' here isn't quite correct. First, we should be overriding
-        // matches() instead of matchesSingleElement(), because the latter is only ever called if
-        // the matched document has an element with path "_fts". Second, there are scenarios where
-        // we will use the untrimmed expression tree for matching (for example, when deciding
-        // whether or not to retry an operation that throws WriteConflictException); in those cases,
-        // we won't be able to correctly determine whether or not the object matches the expression.
-        return true;
-    }
-
     void debugString(StringBuilder& debug, int level = 0) const final;
 
     void serialize(BSONObjBuilder* out) const final;
 
     bool equivalent(const MatchExpression* other) const final;
+
+private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
 };
 
 }  // namespace mongo

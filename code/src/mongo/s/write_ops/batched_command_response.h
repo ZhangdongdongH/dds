@@ -31,11 +31,11 @@
 #include <string>
 #include <vector>
 
+#include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/rpc/write_concern_error_detail.h"
-#include "mongo/s/bson_serializable.h"
 #include "mongo/s/write_ops/batched_upsert_detail.h"
 #include "mongo/s/write_ops/write_error_detail.h"
 
@@ -45,16 +45,14 @@ namespace mongo {
  * This class represents the layout and content of a insert/update/delete runCommand,
  * the response side.
  */
-class BatchedCommandResponse : public BSONSerializable {
+class BatchedCommandResponse {
+    MONGO_DISALLOW_COPYING(BatchedCommandResponse);
 
 public:
     //
     // schema declarations
     //
 
-    static const BSONField<int> ok;
-    static const BSONField<int> errCode;
-    static const BSONField<std::string> errMessage;
     static const BSONField<long long> n;
     static const BSONField<long long> nModified;
     static const BSONField<std::vector<BatchedUpsertDetail*>> upsertDetails;
@@ -62,48 +60,35 @@ public:
     static const BSONField<std::vector<WriteErrorDetail*>> writeErrors;
     static const BSONField<WriteConcernErrorDetail*> writeConcernError;
 
-    //
-    // construction / destruction
-    //
-
     BatchedCommandResponse();
-    virtual ~BatchedCommandResponse();
-
-    //
-    // BatchedCommandResponse should have a move constructor but not a copy constructor
-    //
-
+    ~BatchedCommandResponse();
     BatchedCommandResponse(BatchedCommandResponse&&) = default;
     BatchedCommandResponse& operator=(BatchedCommandResponse&&) = default;
 
-    /** Copies all the fields present in 'this' to 'other'. */
-    void cloneTo(BatchedCommandResponse* other) const;
-
-    //
-    // bson serializable interface implementation
-    //
-
-    virtual bool isValid(std::string* errMsg) const;
-    virtual BSONObj toBSON() const;
-    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-    virtual void clear();
-    virtual std::string toString() const;
+    bool isValid(std::string* errMsg) const;
+    BSONObj toBSON() const;
+    bool parseBSON(const BSONObj& source, std::string* errMsg);
+    void clear();
+    std::string toString() const;
 
     //
     // individual field accessors
     //
 
-    void setOk(int ok);
-    int getOk() const;
-
-    void setErrCode(int errCode);
-    void unsetErrCode();
-    bool isErrCodeSet() const;
-    int getErrCode() const;
-
-    void setErrMessage(StringData errMessage);
-    bool isErrMessageSet() const;
-    const std::string& getErrMessage() const;
+    /**
+     * This group of getters/setters is only for the top-level command status. If you want to know
+     * if all writes succeeded, use toStatus() below which considers all of the ways that writes can
+     * fail.
+     */
+    void setStatus(Status status);
+    Status getTopLevelStatus() const {
+        dassert(_isStatusSet);
+        return _status;
+    }
+    bool getOk() const {
+        dassert(_isStatusSet);
+        return _status.isOK();
+    }
 
     void setNModified(long long n);
     void unsetNModified();
@@ -148,24 +133,16 @@ public:
     const WriteConcernErrorDetail* getWriteConcernError() const;
 
     /**
-     * Converts the specified command response into a status, based on its contents.
+     * Converts the specified command response into a status, based on all of its contents.
      */
     Status toStatus() const;
 
 private:
     // Convention: (M)andatory, (O)ptional
 
-    // (M)  0 if batch didn't get to be applied for any reason
-    int _ok;
-    bool _isOkSet;
-
-    // (O)  whether all items in the batch applied correctly
-    int _errCode;
-    bool _isErrCodeSet;
-
-    // (O)  whether all items in the batch applied correctly
-    std::string _errMessage;
-    bool _isErrMessageSet;
+    // (M) The top-level command status.
+    Status _status = Status::OK();
+    bool _isStatusSet;
 
     // (M)  number of documents affected
     long long _n;

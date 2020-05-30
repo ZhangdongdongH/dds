@@ -39,7 +39,8 @@ namespace mongo {
  * Mock of the AuthzSessionExternalState class used only for testing.
  */
 class AuthzSessionExternalStateMock : public AuthzSessionExternalState {
-    MONGO_DISALLOW_COPYING(AuthzSessionExternalStateMock);
+    AuthzSessionExternalStateMock(const AuthzSessionExternalStateMock&) = delete;
+    AuthzSessionExternalStateMock& operator=(const AuthzSessionExternalStateMock&) = delete;
 
 public:
     AuthzSessionExternalStateMock(AuthorizationManager* authzManager)
@@ -68,7 +69,7 @@ public:
         _allowLocalhostReturnValue = returnValue;
     }
 
-    virtual void startRequest(OperationContext* txn) {}
+    virtual void startRequest(OperationContext* opCtx) {}
 
 private:
     bool _ignoreAuthChecksReturnValue;

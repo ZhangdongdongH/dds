@@ -39,6 +39,7 @@
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_expr_eq.h"
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_tag.h"
@@ -47,6 +48,28 @@
 #include "mongo/util/log.h"
 
 namespace mongo {
+
+namespace {
+
+/**
+ * Checks whether the given index is compatible with each child of the given $elemMatch expression.
+ * Assumes that the match expression is of type ELEM_MATCH_VALUE.
+ */
+bool elemMatchValueCompatible(const BSONElement& elt,
+                              const IndexEntry& index,
+                              MatchExpression* elemMatch,
+                              const CollatorInterface* collator) {
+    invariant(elemMatch->matchType() == MatchExpression::ELEM_MATCH_VALUE);
+    for (size_t child = 0; child < elemMatch->numChildren(); ++child) {
+        if (!QueryPlannerIXSelect::compatible(
+                elt, index, elemMatch->getChild(child), collator, true)) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
 
 static double fieldWithDefault(const BSONObj& infoObj, const string& name, double def) {
     BSONElement e = infoObj[name];
@@ -77,16 +100,14 @@ static bool twoDWontWrap(const Circle& circle, const IndexEntry& index) {
 // Checks whether 'node' contains any comparison to an element of type 'type'. Nested objects and
 // arrays are not checked recursively. We assume 'node' is bounds-generating or is a recursive child
 // of a bounds-generating node, i.e. it does not contain AND, OR, ELEM_MATCH_OBJECT, or NOR.
-// TODO SERVER-23172: Check nested objects and arrays.
 static bool boundsGeneratingNodeContainsComparisonToType(MatchExpression* node, BSONType type) {
     invariant(node->matchType() != MatchExpression::AND &&
               node->matchType() != MatchExpression::OR &&
               node->matchType() != MatchExpression::NOR &&
               node->matchType() != MatchExpression::ELEM_MATCH_OBJECT);
 
-    if (Indexability::isEqualityOrInequality(node)) {
-        const ComparisonMatchExpression* expr = static_cast<const ComparisonMatchExpression*>(node);
-        return expr->getData().type() == type;
+    if (const auto* comparisonExpr = dynamic_cast<const ComparisonMatchExpressionBase*>(node)) {
+        return comparisonExpr->getData().type() == type;
     }
 
     if (node->matchType() == MatchExpression::MATCH_IN) {
@@ -119,7 +140,7 @@ static bool boundsGeneratingNodeContainsComparisonToType(MatchExpression* node, 
 // static
 void QueryPlannerIXSelect::getFields(const MatchExpression* node,
                                      string prefix,
-                                     unordered_set<string>* out) {
+                                     stdx::unordered_set<string>* out) {
     // Do not traverse tree beyond a NOR negation node
     MatchExpression::MatchType exprtype = node->matchType();
     if (exprtype == MatchExpression::NOR) {
@@ -143,7 +164,7 @@ void QueryPlannerIXSelect::getFields(const MatchExpression* node,
         for (size_t i = 0; i < node->numChildren(); ++i) {
             getFields(node->getChild(i), prefix, out);
         }
-    } else if (node->isLogical()) {
+    } else if (node->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (size_t i = 0; i < node->numChildren(); ++i) {
             getFields(node->getChild(i), prefix, out);
         }
@@ -151,7 +172,7 @@ void QueryPlannerIXSelect::getFields(const MatchExpression* node,
 }
 
 // static
-void QueryPlannerIXSelect::findRelevantIndices(const unordered_set<string>& fields,
+void QueryPlannerIXSelect::findRelevantIndices(const stdx::unordered_set<string>& fields,
                                                const vector<IndexEntry>& allIndices,
                                                vector<IndexEntry>* out) {
     for (size_t i = 0; i < allIndices.size(); ++i) {
@@ -168,7 +189,8 @@ void QueryPlannerIXSelect::findRelevantIndices(const unordered_set<string>& fiel
 bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
                                       const IndexEntry& index,
                                       MatchExpression* node,
-                                      const CollatorInterface* collator) {
+                                      const CollatorInterface* collator,
+                                      bool elemMatchChild) {
     if ((boundsGeneratingNodeContainsComparisonToType(node, BSONType::String) ||
          boundsGeneratingNodeContainsComparisonToType(node, BSONType::Array) ||
          boundsGeneratingNodeContainsComparisonToType(node, BSONType::Object)) &&
@@ -194,17 +216,29 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
     // We know elt.fieldname() == node->path().
     MatchExpression::MatchType exprtype = node->matchType();
 
+    if (exprtype == MatchExpression::INTERNAL_EXPR_EQ &&
+        indexedFieldHasMultikeyComponents(elt.fieldNameStringData(), index)) {
+        // Expression language equality cannot be indexed if the field path has multikey components.
+        return false;
+    }
+
     if (indexedFieldType.empty()) {
-        // Can't check for null w/a sparse index.
-        if (exprtype == MatchExpression::EQ && index.sparse) {
+        // Can't use a sparse index for $eq with a null element, unless the equality is within a
+        // $elemMatch expression since the latter implies a match on the literal element 'null'.
+        //
+        // We can use a sparse index for $_internalExprEq with a null element. Expression language
+        // equality-to-null semantics are that only literal nulls match. Sparse indexes contain
+        // index keys for literal nulls, but not for missing elements.
+        if (exprtype == MatchExpression::EQ && index.sparse && !elemMatchChild) {
             const EqualityMatchExpression* expr = static_cast<const EqualityMatchExpression*>(node);
             if (expr->getData().isNull()) {
                 return false;
             }
         }
 
-        // Can't check for $in w/ null element w/a sparse index.
-        if (exprtype == MatchExpression::MATCH_IN && index.sparse) {
+        // Can't use a sparse index for $in with a null element, unless the $eq is within a
+        // $elemMatch expression since the latter implies a match on the literal element 'null'.
+        if (exprtype == MatchExpression::MATCH_IN && index.sparse && !elemMatchChild) {
             const InMatchExpression* expr = static_cast<const InMatchExpression*>(node);
             if (expr->hasNull()) {
                 return false;
@@ -220,7 +254,10 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
         // the expression is a NOT.
         if (exprtype == MatchExpression::NOT) {
             // Don't allow indexed NOT on special index types such as geo or text indices.
-            if (INDEX_BTREE != index.type) {
+            // TODO: SERVER-30994 should remove this check entirely and allow $not on the
+            // 'non-special' fields of non-btree indices.
+            // (e.g. {a: 1, geo: "2dsphere"})
+            if (INDEX_BTREE != index.type && !elemMatchChild) {
                 return false;
             }
 
@@ -286,10 +323,10 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
 
         // NOTE: This shouldn't be reached.  Text index implies there is a separator implies we
         // will always hit the 'return true' above.
-        invariant(0);
+        MONGO_UNREACHABLE;
         return true;
     } else if (IndexNames::HASHED == indexedFieldType) {
-        if (exprtype == MatchExpression::EQ) {
+        if (ComparisonMatchExpressionBase::isEquality(exprtype)) {
             return true;
         }
         if (exprtype == MatchExpression::MATCH_IN) {
@@ -377,8 +414,8 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
         }
 
         verify(NULL == node->getTag());
-        RelevantTag* rt = new RelevantTag();
-        node->setTag(rt);
+        node->setTag(new RelevantTag());
+        auto rt = static_cast<RelevantTag*>(node->getTag());
         rt->path = fullPath;
 
         // TODO: This is slow, with all the string compares.
@@ -386,12 +423,19 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
             BSONObjIterator it(indices[i].keyPattern);
             BSONElement elt = it.next();
             if (elt.fieldName() == fullPath && compatible(elt, indices[i], node, collator)) {
-                rt->first.push_back(i);
+                if (node->matchType() != MatchExpression::ELEM_MATCH_VALUE ||
+                    elemMatchValueCompatible(elt, indices[i], node, collator)) {
+                    rt->first.push_back(i);
+                }
             }
             while (it.more()) {
                 elt = it.next();
-                if (elt.fieldName() == fullPath && compatible(elt, indices[i], node, collator)) {
-                    rt->notFirst.push_back(i);
+                if (elt.fieldName() == fullPath &&
+                    compatible(elt, indices[i], node, collator, false)) {
+                    if (node->matchType() != MatchExpression::ELEM_MATCH_VALUE ||
+                        elemMatchValueCompatible(elt, indices[i], node, collator)) {
+                        rt->notFirst.push_back(i);
+                    }
                 }
             }
         }
@@ -411,7 +455,7 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
         for (size_t i = 0; i < node->numChildren(); ++i) {
             rateIndices(node->getChild(i), prefix, indices, collator);
         }
-    } else if (node->isLogical()) {
+    } else if (node->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (size_t i = 0; i < node->numChildren(); ++i) {
             rateIndices(node->getChild(i), prefix, indices, collator);
         }
@@ -429,6 +473,24 @@ void QueryPlannerIXSelect::stripInvalidAssignments(MatchExpression* node,
     }
 
     stripInvalidAssignmentsToPartialIndices(node, indices);
+}
+
+bool QueryPlannerIXSelect::indexedFieldHasMultikeyComponents(StringData indexedField,
+                                                             const IndexEntry& index) {
+    if (index.multikeyPaths.empty()) {
+        // The index has no path-level multikeyness metadata.
+        return index.multikey;
+    }
+
+    size_t pos = 0;
+    for (auto&& key : index.keyPattern) {
+        if (key.fieldNameStringData() == indexedField) {
+            return !index.multikeyPaths[pos].empty();
+        }
+        ++pos;
+    }
+
+    MONGO_UNREACHABLE;
 }
 
 namespace {

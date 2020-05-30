@@ -32,6 +32,7 @@
 
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
@@ -41,6 +42,7 @@ namespace mongo {
 
 using Parser = DocumentSource::Parser;
 using boost::intrusive_ptr;
+using std::list;
 using std::string;
 using std::vector;
 
@@ -60,8 +62,8 @@ void DocumentSource::registerParser(string name, Parser parser) {
     parserMap[name] = parser;
 }
 
-vector<intrusive_ptr<DocumentSource>> DocumentSource::parse(
-    const intrusive_ptr<ExpressionContext> expCtx, BSONObj stageObj) {
+list<intrusive_ptr<DocumentSource>> DocumentSource::parse(
+    const intrusive_ptr<ExpressionContext>& expCtx, BSONObj stageObj) {
     uassert(16435,
             "A pipeline stage specification object must contain exactly one field.",
             stageObj.nFields() == 1);
@@ -81,11 +83,6 @@ vector<intrusive_ptr<DocumentSource>> DocumentSource::parse(
 const char* DocumentSource::getSourceName() const {
     static const char unknown[] = "[UNKNOWN]";
     return unknown;
-}
-
-void DocumentSource::setSource(DocumentSource* pTheSource) {
-    verify(!isValidInitialSource());
-    pSource = pTheSource;
 }
 
 intrusive_ptr<DocumentSource> DocumentSource::optimize() {
@@ -152,19 +149,32 @@ splitMatchByModifiedFields(const boost::intrusive_ptr<DocumentSourceMatch>& matc
         case DocumentSource::GetModPathsReturn::Type::kAllExcept: {
             DepsTracker depsTracker;
             match->getDependencies(&depsTracker);
-            modifiedPaths = extractModifiedDependencies(depsTracker.fields, modifiedPathsRet.paths);
+
+            auto preservedPaths = modifiedPathsRet.paths;
+            for (auto&& rename : modifiedPathsRet.renames) {
+                preservedPaths.insert(rename.first);
+            }
+            modifiedPaths = extractModifiedDependencies(depsTracker.fields, preservedPaths);
         }
     }
-    return match->splitSourceBy(modifiedPaths);
+    return match->splitSourceBy(modifiedPaths, modifiedPathsRet.renames);
 }
 
 }  // namespace
 
 Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    invariant(*itr == this && (std::next(itr) != container->end()));
+    invariant(*itr == this);
+
+    // If we are at the end of the pipeline, only optimize in the special case of a cache stage.
+    if (std::next(itr) == container->end()) {
+        return dynamic_cast<DocumentSourceSequentialDocumentCache*>(this)
+            ? doOptimizeAt(itr, container)
+            : container->end();
+    }
+
     auto nextMatch = dynamic_cast<DocumentSourceMatch*>((*std::next(itr)).get());
-    if (canSwapWithMatch() && nextMatch && !nextMatch->isTextQuery()) {
+    if (constraints().canSwapWithMatch && nextMatch && !nextMatch->isTextQuery()) {
         // We're allowed to swap with a $match and the stage after us is a $match. Furthermore, the
         // $match does not contain a text search predicate, which we do not attempt to optimize
         // because such a $match must already be the first stage in the pipeline. We can attempt to
@@ -192,13 +202,8 @@ Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     return doOptimizeAt(itr, container);
 }
 
-void DocumentSource::dispose() {
-    if (pSource) {
-        pSource->dispose();
-    }
-}
-
-void DocumentSource::serializeToArray(vector<Value>& array, bool explain) const {
+void DocumentSource::serializeToArray(vector<Value>& array,
+                                      boost::optional<ExplainOptions::Verbosity> explain) const {
     Value entry = serialize(explain);
     if (!entry.missing()) {
         array.push_back(entry);

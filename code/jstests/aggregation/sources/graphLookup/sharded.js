@@ -1,5 +1,6 @@
 // In SERVER-23725, $graphLookup was introduced. In this file, we test that the expression behaves
 // correctly on a sharded collection.
+// @tags: [requires_sharding]
 load("jstests/aggregation/extras/utils.js");  // For assertErrorCode.
 
 (function() {
@@ -8,7 +9,7 @@ load("jstests/aggregation/extras/utils.js");  // For assertErrorCode.
     var st = new ShardingTest({name: "aggregation_graph_lookup", shards: 2, mongos: 1});
 
     st.adminCommand({enableSharding: "graphLookup"});
-    st.ensurePrimaryShard("graphLookup", "shard0001");
+    st.ensurePrimaryShard("graphLookup", st.shard1.shardName);
     st.adminCommand({shardCollection: "graphLookup.local", key: {_id: 1}});
 
     var foreign = st.getDB("graphLookup").foreign;
@@ -51,4 +52,5 @@ load("jstests/aggregation/extras/utils.js");  // For assertErrorCode.
     };
 
     assertErrorCode(foreign, pipeline, 28769);
+    st.stop();
 }());

@@ -28,59 +28,68 @@
 
 #pragma once
 
-#include <boost/optional.hpp>
-#include <vector>
-
-#include "mongo/db/jsobj.h"
-#include "mongo/db/namespace_string.h"
+#include "mongo/db/ops/write_ops_gen.h"
+#include "mongo/rpc/message.h"
+#include "mongo/rpc/op_msg.h"
 
 namespace mongo {
 
-/**
- * The base structure for all fields that are common for all write operations.
- *
- * Unlike ParsedUpdate and UpdateRequest (and the Delete counterparts), types deriving from this are
- * intended to represent entire operations that may consist of multiple sub-operations.
- */
-struct ParsedWriteOp {
-    NamespaceString ns;
-    bool bypassDocumentValidation = false;
-    bool continueOnError = false;
+class InsertOp {
+public:
+    static write_ops::Insert parse(const OpMsgRequest& request);
+    static write_ops::Insert parseLegacy(const Message& msg);
 };
 
-/**
- * A parsed insert insert operation.
- */
-struct InsertOp : ParsedWriteOp {
-    std::vector<BSONObj> documents;
+class UpdateOp {
+public:
+    static write_ops::Update parse(const OpMsgRequest& request);
+    static write_ops::Update parseLegacy(const Message& msg);
 };
 
-/**
- * A parsed update operation.
- */
-struct UpdateOp : ParsedWriteOp {
-    struct SingleUpdate {
-        BSONObj query;
-        BSONObj update;
-        BSONObj collation;
-        bool multi = false;
-        bool upsert = false;
-    };
-
-    std::vector<SingleUpdate> updates;
+class DeleteOp {
+public:
+    static write_ops::Delete parse(const OpMsgRequest& request);
+    static write_ops::Delete parseLegacy(const Message& msg);
 };
 
+namespace write_ops {
+
+// Limit of the number of operations that can be included in a single write command. This is an
+// attempt to avoid a large number of errors resulting in a reply that exceeds 16MB. It doesn't
+// fully ensure that goal, but it reduces the probability of it happening. This limit should not be
+// used if the protocol changes to avoid the 16MB limit on reply size.
+constexpr size_t kMaxWriteBatchSize = 100'000;
+
 /**
- * A parsed Delete operation.
+ * Retrieves the statement id for the write at the specified position in the write batch entries
+ * array.
  */
-struct DeleteOp : ParsedWriteOp {
-    struct SingleDelete {
-        BSONObj query;
-        BSONObj collation;
-        bool multi = true;
-    };
+int32_t getStmtIdForWriteAt(const WriteCommandBase& writeCommandBase, size_t writePos);
 
-    std::vector<SingleDelete> deletes;
-};
+template <class T>
+int32_t getStmtIdForWriteAt(const T& op, size_t writePos) {
+    return getStmtIdForWriteAt(op.getWriteCommandBase(), writePos);
+}
 
+/**
+ * Must only be called if the insert is for the "system.indexes" namespace. Returns the actual
+ * namespace for which the index is being created.
+ */
+NamespaceString extractIndexedNamespace(const Insert& insertOp);
+
+// TODO: Delete this getter once IDL supports defaults for object and array fields
+template <class T>
+const BSONObj& collationOf(const T& opEntry) {
+    static const BSONObj emptyBSON{};
+    return opEntry.getCollation().get_value_or(emptyBSON);
+}
+
+// TODO: Delete this getter once IDL supports defaults for object and array fields
+template <class T>
+const std::vector<BSONObj>& arrayFiltersOf(const T& opEntry) {
+    static const std::vector<BSONObj> emptyBSONArray{};
+    return opEntry.getArrayFilters().get_value_or(emptyBSONArray);
+}
+
+}  // namespace write_ops
 }  // namespace mongo

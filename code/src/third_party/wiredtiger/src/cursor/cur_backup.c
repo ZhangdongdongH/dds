@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -57,7 +57,7 @@ __curbackup_reset(WT_CURSOR *cursor)
 	WT_SESSION_IMPL *session;
 
 	cb = (WT_CURSOR_BACKUP *)cursor;
-	CURSOR_API_CALL(cursor, session, reset, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, reset, NULL);
 
 	cb->next = 0;
 	F_CLR(cursor, WT_CURSTD_KEY_SET | WT_CURSTD_VALUE_SET);
@@ -77,8 +77,8 @@ __curbackup_close(WT_CURSOR *cursor)
 	WT_SESSION_IMPL *session;
 
 	cb = (WT_CURSOR_BACKUP *)cursor;
-
-	CURSOR_API_CALL(cursor, session, close, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, close, NULL);
+err:
 
 	/*
 	 * When starting a hot backup, we serialize hot backup cursors and set
@@ -92,10 +92,10 @@ __curbackup_close(WT_CURSOR *cursor)
 	if (F_ISSET(cb, WT_CURBACKUP_LOCKER))
 		WT_TRET(__backup_stop(session, cb));
 
-	WT_TRET(__wt_cursor_close(cursor));
+	__wt_cursor_close(cursor);
 	session->bkp_cursor = NULL;
 
-err:	API_END_RET(session, ret);
+	API_END_RET(session, ret);
 }
 
 /*
@@ -119,9 +119,13 @@ __wt_curbackup_open(WT_SESSION_IMPL *session,
 	    __wt_cursor_notsup,			/* search */
 	    __wt_cursor_search_near_notsup,	/* search-near */
 	    __wt_cursor_notsup,			/* insert */
+	    __wt_cursor_modify_notsup,		/* modify */
 	    __wt_cursor_notsup,			/* update */
 	    __wt_cursor_notsup,			/* remove */
+	    __wt_cursor_notsup,			/* reserve */
 	    __wt_cursor_reconfigure_notsup,	/* reconfigure */
+	    __wt_cursor_notsup,			/* cache */
+	    __wt_cursor_reopen_notsup,		/* reopen */
 	    __curbackup_close);			/* close */
 	WT_CURSOR *cursor;
 	WT_CURSOR_BACKUP *cb;
@@ -129,23 +133,21 @@ __wt_curbackup_open(WT_SESSION_IMPL *session,
 
 	WT_STATIC_ASSERT(offsetof(WT_CURSOR_BACKUP, iface) == 0);
 
-	cb = NULL;
-
 	WT_RET(__wt_calloc_one(session, &cb));
-	cursor = &cb->iface;
+	cursor = (WT_CURSOR *)cb;
 	*cursor = iface;
-	cursor->session = &session->iface;
-	session->bkp_cursor = cb;
-
+	cursor->session = (WT_SESSION *)session;
 	cursor->key_format = "S";	/* Return the file names as the key. */
 	cursor->value_format = "";	/* No value. */
+
+	session->bkp_cursor = cb;
 
 	/*
 	 * Start the backup and fill in the cursor's list.  Acquire the schema
 	 * lock, we need a consistent view when creating a copy.
 	 */
-	WT_WITH_CHECKPOINT_LOCK(session, ret,
-	    WT_WITH_SCHEMA_LOCK(session, ret,
+	WT_WITH_CHECKPOINT_LOCK(session,
+	    WT_WITH_SCHEMA_LOCK(session,
 		ret = __backup_start(session, cb, cfg)));
 	WT_ERR(ret);
 
@@ -177,7 +179,7 @@ __backup_log_append(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb, bool active)
 	ret = 0;
 
 	if (conn->log) {
-		WT_ERR(__wt_log_get_all_files(
+		WT_ERR(__wt_log_get_backup_files(
 		    session, &logfiles, &logcount, &cb->maxid, active));
 		for (i = 0; i < logcount; i++)
 			WT_ERR(__backup_list_append(session, cb, logfiles[i]));
@@ -208,6 +210,8 @@ __backup_start(
 	cb->list = NULL;
 	cb->list_next = 0;
 
+	WT_RET(__wt_inmem_unsupported_op(session, "backup cursor"));
+
 	/*
 	 * Single thread hot backups: we're holding the schema lock, so we
 	 * know we'll serialize with other attempts to start a hot backup.
@@ -230,10 +234,10 @@ __backup_start(
 	 * We are holding the checkpoint and schema locks so schema operations
 	 * will not see the backup file list until it is complete and valid.
 	 */
-	__wt_writelock(session, conn->hot_backup_lock);
+	__wt_writelock(session, &conn->hot_backup_lock);
 	conn->hot_backup = true;
 	conn->hot_backup_list = NULL;
-	__wt_writeunlock(session, conn->hot_backup_lock);
+	__wt_writeunlock(session, &conn->hot_backup_lock);
 
 	/* We're the lock holder, we own cleanup. */
 	F_SET(cb, WT_CURBACKUP_LOCKER);
@@ -249,17 +253,28 @@ __backup_start(
 	WT_ERR(__wt_fopen(session, WT_BACKUP_TMP,
 	    WT_FS_OPEN_CREATE, WT_STREAM_WRITE, &cb->bfs));
 	/*
-	 * If a list of targets was specified, work our way through them.
-	 * Else, generate a list of all database objects.
-	 *
-	 * Include log files if doing a full backup, and copy them before
-	 * copying data files to avoid rolling the metadata forward across
-	 * a checkpoint that completes during the backup.
+	 * If targets were specified, add them to the list. Otherwise it is a
+	 * full backup, add all database objects and log files to the list.
 	 */
 	target_list = false;
 	WT_ERR(__backup_uri(session, cfg, &target_list, &log_only));
-
 	if (!target_list) {
+		/*
+		 * It's important to first gather the log files to be copied
+		 * (which internally starts a new log file), followed by
+		 * choosing a checkpoint to reference in the WiredTiger.backup
+		 * file.
+		 *
+		 * Applications may have logic that takes a checkpoint, followed
+		 * by performing a write that should only appear in the new
+		 * checkpoint. This ordering prevents choosing the prior
+		 * checkpoint, but including the write in the log files
+		 * returned.
+		 *
+		 * It is also possible, and considered legal, to choose the new
+		 * checkpoint, but not include the log file that contains the
+		 * log entry for taking the new checkpoint.
+		 */
 		WT_ERR(__backup_log_append(session, cb, true));
 		WT_ERR(__backup_all(session));
 	}
@@ -297,9 +312,9 @@ err:	/* Close the hot backup file. */
 	if (ret == 0) {
 		WT_ASSERT(session, dest != NULL);
 		WT_TRET(__wt_fs_rename(session, WT_BACKUP_TMP, dest, false));
-		__wt_writelock(session, conn->hot_backup_lock);
+		__wt_writelock(session, &conn->hot_backup_lock);
 		conn->hot_backup_list = cb->list;
-		__wt_writeunlock(session, conn->hot_backup_lock);
+		__wt_writeunlock(session, &conn->hot_backup_lock);
 	}
 
 	return (ret);
@@ -319,9 +334,9 @@ __backup_stop(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 	conn = S2C(session);
 
 	/* Release all btree names held by the backup. */
-	__wt_writelock(session, conn->hot_backup_lock);
+	__wt_writelock(session, &conn->hot_backup_lock);
 	conn->hot_backup_list = NULL;
-	__wt_writeunlock(session, conn->hot_backup_lock);
+	__wt_writeunlock(session, &conn->hot_backup_lock);
 	if (cb->list != NULL) {
 		for (i = 0; cb->list[i] != NULL; ++i)
 			__wt_free(session, cb->list[i]);
@@ -332,9 +347,9 @@ __backup_stop(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 	WT_TRET(__wt_backup_file_remove(session));
 
 	/* Checkpoint deletion can proceed, as can the next hot backup. */
-	__wt_writelock(session, conn->hot_backup_lock);
+	__wt_writelock(session, &conn->hot_backup_lock);
 	conn->hot_backup = false;
-	__wt_writeunlock(session, conn->hot_backup_lock);
+	__wt_writeunlock(session, &conn->hot_backup_lock);
 
 	return (ret);
 }
@@ -346,13 +361,9 @@ __backup_stop(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 static int
 __backup_all(WT_SESSION_IMPL *session)
 {
-	WT_DECL_RET;
-
 	/* Build a list of the file objects that need to be copied. */
-	WT_WITH_HANDLE_LIST_LOCK(session, ret =
-	    __wt_meta_apply_all(session, NULL, __backup_list_uri_append, NULL));
-
-	return (ret);
+	return (__wt_meta_apply_all(
+	    session, NULL, __backup_list_uri_append, NULL));
 }
 
 /*
@@ -367,8 +378,8 @@ __backup_uri(WT_SESSION_IMPL *session,
 	WT_CONFIG_ITEM cval, k, v;
 	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;
-	bool target_list;
 	const char *uri;
+	bool target_list;
 
 	*foundp = *log_only = false;
 
@@ -473,12 +484,13 @@ __backup_list_uri_append(
 	    !WT_PREFIX_MATCH(name, "colgroup:") &&
 	    !WT_PREFIX_MATCH(name, "index:") &&
 	    !WT_PREFIX_MATCH(name, "lsm:") &&
+	    !WT_PREFIX_MATCH(name, WT_SYSTEM_PREFIX) &&
 	    !WT_PREFIX_MATCH(name, "table:"))
 		WT_RET_MSG(session, ENOTSUP,
 		    "hot backup is not supported for objects of type %s",
 		    name);
 
-	/* Ignore the lookaside table. */
+	/* Ignore the lookaside table or system info. */
 	if (strcmp(name, WT_LAS_URI) == 0)
 		return (0);
 
@@ -487,6 +499,13 @@ __backup_list_uri_append(
 	ret = __wt_fprintf(session, cb->bfs, "%s\n%s\n", name, value);
 	__wt_free(session, value);
 	WT_RET(ret);
+
+	/*
+	 * We want to retain the system information in the backup metadata
+	 * file above, but there is no file object to copy so return now.
+	 */
+	if (WT_PREFIX_MATCH(name, WT_SYSTEM_PREFIX))
+		return (0);
 
 	/* Add file type objects to the list of files to be copied. */
 	if (WT_PREFIX_MATCH(name, "file:"))
@@ -503,8 +522,8 @@ static int
 __backup_list_append(
     WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb, const char *uri)
 {
-	char **p;
 	const char *name;
+	char **p;
 
 	/* Leave a NULL at the end to mark the end of the list. */
 	WT_RET(__wt_realloc_def(session, &cb->list_allocated,

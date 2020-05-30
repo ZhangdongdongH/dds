@@ -36,14 +36,17 @@
 
 namespace mongo {
 
-ClusterClientCursorMock::ClusterClientCursorMock(stdx::function<void(void)> killCallback)
-    : _killCallback(std::move(killCallback)) {}
+ClusterClientCursorMock::ClusterClientCursorMock(boost::optional<LogicalSessionId> lsid,
+                                                 boost::optional<TxnNumber> txnNumber,
+                                                 stdx::function<void(void)> killCallback)
+    : _killCallback(std::move(killCallback)), _lsid(lsid), _txnNumber(txnNumber) {}
 
 ClusterClientCursorMock::~ClusterClientCursorMock() {
-    invariant(_exhausted || _killed);
+    invariant((_exhausted && _remotesExhausted) || _killed);
 }
 
-StatusWith<ClusterQueryResult> ClusterClientCursorMock::next() {
+StatusWith<ClusterQueryResult> ClusterClientCursorMock::next(
+    RouterExecStage::ExecContext execContext) {
     invariant(!_killed);
 
     if (_resultsQueue.empty()) {
@@ -62,11 +65,19 @@ StatusWith<ClusterQueryResult> ClusterClientCursorMock::next() {
     return out.getValue();
 }
 
+BSONObj ClusterClientCursorMock::getOriginatingCommand() const {
+    return _originatingCommand;
+}
+
+std::size_t ClusterClientCursorMock::getNumRemotes() const {
+    MONGO_UNREACHABLE;
+}
+
 long long ClusterClientCursorMock::getNumReturnedSoFar() const {
     return _numReturnedSoFar;
 }
 
-void ClusterClientCursorMock::kill() {
+void ClusterClientCursorMock::kill(OperationContext* opCtx) {
     _killed = true;
     if (_killCallback) {
         _killCallback();
@@ -74,6 +85,10 @@ void ClusterClientCursorMock::kill() {
 }
 
 bool ClusterClientCursorMock::isTailable() const {
+    return false;
+}
+
+bool ClusterClientCursorMock::isTailableAndAwaitData() const {
     return false;
 }
 
@@ -97,9 +112,16 @@ Status ClusterClientCursorMock::setAwaitDataTimeout(Milliseconds awaitDataTimeou
     MONGO_UNREACHABLE;
 }
 
+boost::optional<LogicalSessionId> ClusterClientCursorMock::getLsid() const {
+    return _lsid;
+}
 
-void ClusterClientCursorMock::setOperationContext(OperationContext* txn) {
-    // Do nothing
+boost::optional<TxnNumber> ClusterClientCursorMock::getTxnNumber() const {
+    return _txnNumber;
+}
+
+boost::optional<ReadPreferenceSetting> ClusterClientCursorMock::getReadPreference() const {
+    return boost::none;
 }
 
 }  // namespace mongo

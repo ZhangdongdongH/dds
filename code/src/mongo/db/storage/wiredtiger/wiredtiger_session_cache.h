@@ -34,7 +34,6 @@
 #include <list>
 #include <string>
 
-#include <boost/thread/shared_mutex.hpp>
 #include <wiredtiger.h>
 
 #include "mongo/db/storage/journal_listener.h"
@@ -97,10 +96,24 @@ public:
 
     void releaseCursor(uint64_t id, WT_CURSOR* cursor);
 
-    void closeAllCursors();
+    void closeCursorsForQueuedDrops(WiredTigerKVEngine* engine);
+
+    /**
+     * Closes all cached cursors matching the uri.  If the uri is empty,
+     * all cached cursors are closed.
+     */
+    void closeAllCursors(const std::string& uri);
 
     int cursorsOut() const {
         return _cursorsOut;
+    }
+
+    bool isDropQueuedIdentsAtSessionEndAllowed() const {
+        return _dropQueuedIdentsAtSessionEnd;
+    }
+
+    void dropQueuedIdentsAtSessionEndAllowed(bool dropQueuedIdentsAtSessionEnd) {
+        _dropQueuedIdentsAtSessionEnd = dropQueuedIdentsAtSessionEnd;
     }
 
     static uint64_t genTableId();
@@ -132,7 +145,8 @@ private:
     WT_SESSION* _session;            // owned
     CursorCache _cursors;            // owned
     uint64_t _cursorGen;
-    int _cursorsCached, _cursorsOut;
+    int _cursorsOut;
+    bool _dropQueuedIdentsAtSessionEnd = true;
 };
 
 /**
@@ -154,6 +168,11 @@ public:
     };
 
     /**
+     * Indicates that WiredTiger should be configured to cache cursors.
+     */
+    static bool isEngineCachingCursors();
+
+    /**
      * Returns a smart pointer to a previously released session for reuse, or creates a new session.
      * This method must only be called while holding the global lock to avoid races with
      * shuttingDown, but otherwise is thread safe.
@@ -167,10 +186,15 @@ public:
     void closeAll();
 
     /**
-     * Closes all cached cursors and ensures that previously opened cursors will be closed on
-     * release.
+     * Closes cached cursors for tables that are queued to be dropped.
      */
-    void closeAllCursors();
+    void closeCursorsForQueuedDrops();
+
+    /**
+     * Closes all cached cursors matching the uri.  If the uri is empty,
+     * all cached cursors are closed.
+     */
+    void closeAllCursors(const std::string& uri);
 
     /**
      * Transitions the cache to shutting down mode. Any already released sessions are freed and
@@ -185,7 +209,27 @@ public:
      * the log or forcing a checkpoint if forceCheckpoint is true or the journal is disabled.
      * Uses a temporary session. Safe to call without any locks, even during shutdown.
      */
-    void waitUntilDurable(bool forceCheckpoint);
+    void waitUntilDurable(bool forceCheckpoint, bool stableCheckpoint);
+
+    /**
+     * Waits until a prepared unit of work has ended (either been commited or aborted). This
+     * should be used when encountering WT_PREPARE_CONFLICT errors. The caller is required to retry
+     * the conflicting WiredTiger API operation. A return from this function does not guarantee that
+     * the conflicting transaction has ended, only that one prepared unit of work in the process has
+     * signaled that it has ended.
+     * Accepts an OperationContext that will throw an AssertionException when interrupted.
+     *
+     * This method is provided in WiredTigerSessionCache and not RecoveryUnit because all recovery
+     * units share the same session cache, and we want a recovery unit on one thread to signal all
+     * recovery units waiting for prepare conflicts across all other threads.
+     */
+    void waitUntilPreparedUnitOfWorkCommitsOrAborts(OperationContext* opCtx);
+
+    /**
+     * Notifies waiters that the caller's perpared unit of work has ended (either committed or
+     * aborted).
+     */
+    void notifyPreparedUnitOfWorkHasCommittedOrAborted();
 
     WT_CONNECTION* conn() const {
         return _conn;
@@ -202,6 +246,10 @@ public:
 
     uint64_t getCursorEpoch() const {
         return _cursorEpoch.load();
+    }
+
+    WiredTigerKVEngine* getKVEngine() const {
+        return _engine;
     }
 
 private:
@@ -229,10 +277,18 @@ private:
     AtomicUInt32 _lastSyncTime;
     stdx::mutex _lastSyncMutex;
 
-    // Notified when we commit to the journal.
-    JournalListener* _journalListener = &NoOpJournalListener::instance;
+    // Mutex and cond var for waiting on prepare commit or abort.
+    stdx::mutex _prepareCommittedOrAbortedMutex;
+    stdx::condition_variable _prepareCommittedOrAbortedCond;
+    std::uint64_t _lastCommitOrAbortCounter;
+
     // Protects _journalListener.
     stdx::mutex _journalListenerMutex;
+    // Notified when we commit to the journal.
+    JournalListener* _journalListener = &NoOpJournalListener::instance;
+
+    WT_SESSION* _waitUntilDurableSession = nullptr;  // owned, and never explicitly closed
+                                                     // (uses connection close to clean up)
 
     /**
      * Returns a session to the cache for later reuse. If closeAll was called between getting this
@@ -247,4 +303,6 @@ private:
 typedef std::unique_ptr<WiredTigerSession,
                         typename WiredTigerSessionCache::WiredTigerSessionDeleter>
     UniqueWiredTigerSession;
+
+extern const std::string kWTRepairMsg;
 }  // namespace

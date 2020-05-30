@@ -47,14 +47,10 @@ using std::stringstream;
 /**
  * Admin command to display global lock information
  */
-class CmdLockInfo : public Command {
+class CmdLockInfo : public BasicCommand {
 public:
-    virtual bool slaveOk() const {
-        return true;
-    }
-
-    virtual bool slaveOverrideOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -65,43 +61,41 @@ public:
         return false;
     }
 
-    virtual void help(stringstream& help) const {
-        help << "show all lock info on the server";
+    std::string help() const override {
+        return "show all lock info on the server";
     }
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final {
+                               const BSONObj& cmdObj) const final {
         bool isAuthorized = AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
             ResourcePattern::forClusterResource(), ActionType::serverStatus);
         return isAuthorized ? Status::OK() : Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
 
-    CmdLockInfo() : Command("lockInfo", true) {}
+    CmdLockInfo() : BasicCommand("lockInfo") {}
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const string& dbname,
-             BSONObj& jsobj,
-             int,
-             string& errmsg,
+             const BSONObj& jsobj,
              BSONObjBuilder& result) {
         std::map<LockerId, BSONObj> lockToClientMap;
 
-        for (ServiceContext::LockedClientsCursor cursor(txn->getClient()->getServiceContext());
+        for (ServiceContext::LockedClientsCursor cursor(opCtx->getClient()->getServiceContext());
              Client* client = cursor.next();) {
             invariant(client);
 
             stdx::lock_guard<Client> lk(*client);
-            const OperationContext* opCtx = client->getOperationContext();
+            const OperationContext* clientOpCtx = client->getOperationContext();
 
             // Operation context specific information
-            if (opCtx) {
+            if (clientOpCtx) {
                 BSONObjBuilder infoBuilder;
                 // The client information
                 client->reportState(infoBuilder);
 
-                infoBuilder.append("opid", opCtx->getOpID());
-                LockerId lockerId = opCtx->lockState()->getId();
+                infoBuilder.append("opid", clientOpCtx->getOpID());
+                LockerId lockerId = clientOpCtx->lockState()->getId();
                 lockToClientMap.insert({lockerId, infoBuilder.obj()});
             }
         }

@@ -34,6 +34,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/privilege_format.h"
 #include "mongo/db/auth/role_name.h"
@@ -46,14 +47,18 @@ namespace auth {
 
 struct CreateOrUpdateUserArgs {
     UserName userName;
-    bool hasHashedPassword;
-    std::string hashedPassword;
+    bool hasPassword;
+    std::string password;
     bool hasCustomData;
     BSONObj customData;
     bool hasRoles;
     std::vector<RoleName> roles;
+    boost::optional<BSONArray> authenticationRestrictions;
+    std::vector<std::string> mechanisms;
+    bool digestPassword;
 
-    CreateOrUpdateUserArgs() : hasHashedPassword(false), hasCustomData(false), hasRoles(false) {}
+    CreateOrUpdateUserArgs()
+        : hasPassword(false), hasCustomData(false), hasRoles(false), digestPassword(true) {}
 };
 
 /**
@@ -98,11 +103,15 @@ Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
                                                        const std::string& dbname);
 
 struct UsersInfoArgs {
+    enum class Target { kExplicitUsers, kDB, kGlobal };
+
     std::vector<UserName> userNames;
-    bool allForDB;
-    bool showPrivileges;
-    bool showCredentials;
-    UsersInfoArgs() : allForDB(false), showPrivileges(false), showCredentials(false) {}
+    Target target;
+    bool showPrivileges = false;
+    AuthenticationRestrictionsFormat authenticationRestrictionsFormat =
+        AuthenticationRestrictionsFormat::kOmit;
+    bool showCredentials = false;
+    boost::optional<BSONObj> filter;
 };
 
 /**
@@ -113,11 +122,11 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
 
 struct RolesInfoArgs {
     std::vector<RoleName> roleNames;
-    bool allForDB;
-    PrivilegeFormat privilegeFormat;
-    bool showBuiltinRoles;
-    RolesInfoArgs()
-        : allForDB(false), privilegeFormat(PrivilegeFormat::kOmit), showBuiltinRoles(false) {}
+    bool allForDB = false;
+    PrivilegeFormat privilegeFormat = PrivilegeFormat::kOmit;
+    AuthenticationRestrictionsFormat authenticationRestrictionsFormat =
+        AuthenticationRestrictionsFormat::kOmit;
+    bool showBuiltinRoles = false;
 };
 
 /**
@@ -128,12 +137,11 @@ Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfo
 
 struct CreateOrUpdateRoleArgs {
     RoleName roleName;
-    bool hasRoles;
+    bool hasRoles = false;
     std::vector<RoleName> roles;
-    bool hasPrivileges;
+    bool hasPrivileges = false;
     PrivilegeVector privileges;
-
-    CreateOrUpdateRoleArgs() : hasRoles(false), hasPrivileges(false) {}
+    boost::optional<BSONArray> authenticationRestrictions;
 };
 
 /**
@@ -216,18 +224,5 @@ struct MergeAuthzCollectionsArgs {
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
                                          MergeAuthzCollectionsArgs* parsedArgs);
 
-struct AuthSchemaUpgradeArgs {
-    int maxSteps = 3;
-    bool shouldUpgradeShards = true;
-};
-
-/**
- * Takes a command object describing an invocation of the "authSchemaUpgrade" command and
- * parses out the write concern, maximum steps to take and whether or not shard servers should
- * also be upgraded, in the sharded deployment case.
- */
-Status parseAuthSchemaUpgradeCommand(const BSONObj& cmdObj,
-                                     const std::string& dbname,
-                                     AuthSchemaUpgradeArgs* parsedArgs);
 }  // namespace auth
 }  // namespace mongo

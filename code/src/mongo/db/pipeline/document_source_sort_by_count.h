@@ -40,10 +40,12 @@ public:
     /**
      * Returns a $group stage followed by a $sort stage.
      */
-    static std::vector<boost::intrusive_ptr<DocumentSource>> createFromBson(
+    static std::list<boost::intrusive_ptr<DocumentSource>> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
 
 private:
+    // It is illegal to construct a DocumentSourceSortByCount directly, use createFromBson()
+    // instead.
     DocumentSourceSortByCount() = default;
 };
 

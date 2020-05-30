@@ -1,11 +1,18 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Package auth provides utilities for performing tasks related to authentication.
 package auth
 
 import (
 	"fmt"
+	"strings"
+
 	"github.com/mongodb/mongo-tools/common/db"
 	"gopkg.in/mgo.v2/bson"
-	"strings"
 )
 
 // GetAuthVersion gets the authentication schema version of the connected server
@@ -28,7 +35,7 @@ func GetAuthVersion(commander db.CommandRunner) (int, error) {
 		// had no concept of an "auth schema version", so asking for the
 		// authSchemaVersion value will return a "no option found" or "no such cmd"
 		if errMessage == "no option found to get" ||
-			strings.HasPrefix(errMessage, "no such cmd") {
+			strings.Contains(errMessage, "no such cmd") {
 			return 1, nil
 		}
 		// otherwise it's a connection error, so bubble it up

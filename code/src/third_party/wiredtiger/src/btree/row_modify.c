@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -15,18 +15,13 @@
 int
 __wt_page_modify_alloc(WT_SESSION_IMPL *session, WT_PAGE *page)
 {
-	WT_CONNECTION_IMPL *conn;
+	WT_DECL_RET;
 	WT_PAGE_MODIFY *modify;
-
-	conn = S2C(session);
 
 	WT_RET(__wt_calloc_one(session, &modify));
 
-	/*
-	 * Select a spinlock for the page; let the barrier immediately below
-	 * keep things from racing too badly.
-	 */
-	modify->page_lock = ++conn->page_lock_cnt % WT_PAGE_LOCKS;
+	/* Initialize the spinlock for the page. */
+	WT_ERR(__wt_spin_init(session, &modify->page_lock, "btree page"));
 
 	/*
 	 * Multiple threads of control may be searching and deciding to modify
@@ -37,8 +32,8 @@ __wt_page_modify_alloc(WT_SESSION_IMPL *session, WT_PAGE *page)
 	if (__wt_atomic_cas_ptr(&page->modify, NULL, modify))
 		__wt_cache_page_inmem_incr(session, page, sizeof(*modify));
 	else
-		__wt_free(session, modify);
-	return (0);
+err:		__wt_free(session, modify);
+	return (ret);
 }
 
 /*
@@ -47,7 +42,8 @@ __wt_page_modify_alloc(WT_SESSION_IMPL *session, WT_PAGE *page)
  */
 int
 __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
-    WT_ITEM *key, WT_ITEM *value, WT_UPDATE *upd_arg, bool is_remove)
+    const WT_ITEM *key, const WT_ITEM *value,
+    WT_UPDATE *upd_arg, u_int modify_type, bool exclusive)
 {
 	WT_DECL_RET;
 	WT_INSERT *ins;
@@ -65,9 +61,8 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 	upd = upd_arg;
 	logged = false;
 
-	/* This code expects a remove to have a NULL value. */
-	if (is_remove)
-		value = NULL;
+	/* We're going to modify the page, we should have loaded history. */
+	WT_ASSERT(session, cbt->ref->state != WT_REF_LIMBO);
 
 	/* If we don't yet have a modify structure, we'll need one. */
 	WT_RET(__wt_page_modify_init(session, page));
@@ -85,9 +80,8 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 	if (cbt->compare == 0) {
 		if (cbt->ins == NULL) {
 			/* Allocate an update array as necessary. */
-			WT_PAGE_ALLOC_AND_SWAP(session,
-			    page, mod->mod_row_update,
-			    upd_entry, page->pg_row_entries);
+			WT_PAGE_ALLOC_AND_SWAP(session, page,
+			    mod->mod_row_update, upd_entry, page->entries);
 
 			/* Set the WT_UPDATE array reference. */
 			upd_entry = &mod->mod_row_update[cbt->slot];
@@ -100,9 +94,9 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 			    session, old_upd = *upd_entry));
 
 			/* Allocate a WT_UPDATE structure and transaction ID. */
-			WT_ERR(
-			    __wt_update_alloc(session, value, &upd, &upd_size));
-			WT_ERR(__wt_txn_modify(session, upd));
+			WT_ERR(__wt_update_alloc(session,
+			    value, &upd, &upd_size, modify_type));
+			WT_ERR(__wt_txn_modify(session, cbt, upd));
 			logged = true;
 
 			/* Avoid WT_CURSOR.update data copy. */
@@ -133,7 +127,7 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 
 		/* Serialize the update. */
 		WT_ERR(__wt_update_serial(
-		    session, page, upd_entry, &upd, upd_size));
+		    session, page, upd_entry, &upd, upd_size, exclusive));
 	} else {
 		/*
 		 * Allocate the insert array as necessary.
@@ -147,10 +141,10 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		 * slot.  That's hard, so we set a flag.
 		 */
 		WT_PAGE_ALLOC_AND_SWAP(session, page,
-		    mod->mod_row_insert, ins_headp, page->pg_row_entries + 1);
+		    mod->mod_row_insert, ins_headp, page->entries + 1);
 
 		ins_slot = F_ISSET(cbt, WT_CBT_SEARCH_SMALLEST) ?
-		    page->pg_row_entries: cbt->slot;
+		    page->entries: cbt->slot;
 		ins_headp = &mod->mod_row_insert[ins_slot];
 
 		/* Allocate the WT_INSERT_HEAD structure as necessary. */
@@ -171,9 +165,9 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		cbt->ins = ins;
 
 		if (upd_arg == NULL) {
-			WT_ERR(
-			    __wt_update_alloc(session, value, &upd, &upd_size));
-			WT_ERR(__wt_txn_modify(session, upd));
+			WT_ERR(__wt_update_alloc(session,
+			    value, &upd, &upd_size, modify_type));
+			WT_ERR(__wt_txn_modify(session, cbt, upd));
 			logged = true;
 
 			/* Avoid WT_CURSOR.update data copy. */
@@ -208,10 +202,10 @@ __wt_row_modify(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt,
 		/* Insert the WT_INSERT structure. */
 		WT_ERR(__wt_insert_serial(
 		    session, page, cbt->ins_head, cbt->ins_stack,
-		    &ins, ins_size, skipdepth));
+		    &ins, ins_size, skipdepth, exclusive));
 	}
 
-	if (logged)
+	if (logged && modify_type != WT_UPDATE_RESERVE)
 		WT_ERR(__wt_txn_log_op(session, cbt));
 
 	if (0) {
@@ -236,7 +230,7 @@ err:		/*
  */
 int
 __wt_row_insert_alloc(WT_SESSION_IMPL *session,
-    WT_ITEM *key, u_int skipdepth, WT_INSERT **insp, size_t *ins_sizep)
+    const WT_ITEM *key, u_int skipdepth, WT_INSERT **insp, size_t *ins_sizep)
 {
 	WT_INSERT *ins;
 	size_t ins_size;
@@ -264,27 +258,37 @@ __wt_row_insert_alloc(WT_SESSION_IMPL *session,
  *	Allocate a WT_UPDATE structure and associated value and fill it in.
  */
 int
-__wt_update_alloc(
-    WT_SESSION_IMPL *session, WT_ITEM *value, WT_UPDATE **updp, size_t *sizep)
+__wt_update_alloc(WT_SESSION_IMPL *session, const WT_ITEM *value,
+    WT_UPDATE **updp, size_t *sizep, u_int modify_type)
 {
 	WT_UPDATE *upd;
-	size_t size;
 
 	*updp = NULL;
+
+	/*
+	 * The code paths leading here are convoluted: assert we never attempt
+	 * to allocate an update structure if only intending to insert one we
+	 * already have.
+	 */
+	WT_ASSERT(session, modify_type != WT_UPDATE_INVALID);
 
 	/*
 	 * Allocate the WT_UPDATE structure and room for the value, then copy
 	 * the value into place.
 	 */
-	size = value == NULL ? 0 : value->size;
-	WT_RET(__wt_calloc(session, 1, sizeof(WT_UPDATE) + size, &upd));
-	if (value == NULL)
-		WT_UPDATE_DELETED_SET(upd);
+	if (modify_type == WT_UPDATE_BIRTHMARK ||
+	    modify_type == WT_UPDATE_RESERVE ||
+	    modify_type == WT_UPDATE_TOMBSTONE)
+		WT_RET(__wt_calloc(session, 1, WT_UPDATE_SIZE, &upd));
 	else {
-		upd->size = WT_STORE_SIZE(size);
-		if (size != 0)
-			memcpy(WT_UPDATE_DATA(upd), value->data, size);
+		WT_RET(__wt_calloc(
+		    session, 1, WT_UPDATE_SIZE + value->size, &upd));
+		if (value->size != 0) {
+			upd->size = WT_STORE_SIZE(value->size);
+			memcpy(upd->data, value->data, value->size);
+		}
 	}
+	upd->type = (uint8_t)modify_type;
 
 	*updp = upd;
 	*sizep = WT_UPDATE_MEMSIZE(upd);
@@ -299,8 +303,11 @@ WT_UPDATE *
 __wt_update_obsolete_check(
     WT_SESSION_IMPL *session, WT_PAGE *page, WT_UPDATE *upd)
 {
+	WT_TXN_GLOBAL *txn_global;
 	WT_UPDATE *first, *next;
 	u_int count;
+
+	txn_global = &S2C(session)->txn_global;
 
 	/*
 	 * This function identifies obsolete updates, and truncates them from
@@ -309,13 +316,19 @@ __wt_update_obsolete_check(
 	 * freeing the memory.
 	 *
 	 * Walk the list of updates, looking for obsolete updates at the end.
+	 *
+	 * Only updates with globally visible, self-contained data can terminate
+	 * update chains.
 	 */
-	for (first = NULL, count = 0; upd != NULL; upd = upd->next, count++)
-		if (__wt_txn_visible_all(session, upd->txnid)) {
-			if (first == NULL)
-				first = upd;
-		} else if (upd->txnid != WT_TXN_ABORTED)
+	for (first = NULL, count = 0; upd != NULL; upd = upd->next, count++) {
+		if (upd->txnid == WT_TXN_ABORTED)
+			continue;
+		if (!__wt_txn_upd_visible_all(session, upd))
 			first = NULL;
+		else if (first == NULL && (WT_UPDATE_DATA_VALUE(upd) ||
+		    upd->type == WT_UPDATE_BIRTHMARK))
+			first = upd;
+	}
 
 	/*
 	 * We cannot discard this WT_UPDATE structure, we can only discard
@@ -330,32 +343,20 @@ __wt_update_obsolete_check(
 
 	/*
 	 * If the list is long, don't retry checks on this page until the
-	 * transaction state has moved forwards.
+	 * transaction state has moved forwards. This function is used to
+	 * trim update lists independently of the page state, ensure there
+	 * is a modify structure.
 	 */
-	if (count > 20)
-		page->modify->obsolete_check_txn =
-		    S2C(session)->txn_global.last_running;
+	if (count > 20 && page->modify != NULL) {
+		page->modify->obsolete_check_txn = txn_global->last_running;
+#ifdef HAVE_TIMESTAMPS
+		if (txn_global->has_pinned_timestamp)
+			WT_WITH_TIMESTAMP_READLOCK(session, &txn_global->rwlock,
+			    __wt_timestamp_set(
+				&page->modify->obsolete_check_timestamp,
+				&txn_global->pinned_timestamp));
+#endif
+	}
 
 	return (NULL);
-}
-
-/*
- * __wt_update_obsolete_free --
- *	Free an obsolete update list.
- */
-void
-__wt_update_obsolete_free(
-    WT_SESSION_IMPL *session, WT_PAGE *page, WT_UPDATE *upd)
-{
-	WT_UPDATE *next;
-	size_t size;
-
-	/* Free a WT_UPDATE list. */
-	for (size = 0; upd != NULL; upd = next) {
-		next = upd->next;
-		size += WT_UPDATE_MEMSIZE(upd);
-		__wt_free(session, upd);
-	}
-	if (size != 0)
-		__wt_cache_page_inmem_decr(session, page, size);
 }

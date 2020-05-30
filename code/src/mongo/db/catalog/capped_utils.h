@@ -36,20 +36,22 @@ class OperationContext;
 /**
  * Drops all documents contained in the capped collection, "collectionName".
  */
-Status emptyCapped(OperationContext* txn, const NamespaceString& collectionName);
+Status emptyCapped(OperationContext* opCtx, const NamespaceString& collectionName);
 
 /**
  * Clones the collection "shortFrom" to the capped collection "shortTo" with a size of "size".
  */
-Status cloneCollectionAsCapped(OperationContext* txn,
+Status cloneCollectionAsCapped(OperationContext* opCtx,
                                Database* db,
                                const std::string& shortFrom,
                                const std::string& shortTo,
-                               double size,
+                               long long size,
                                bool temp);
 
 /**
  * Converts the collection "collectionName" to a capped collection with a size of "size".
  */
-Status convertToCapped(OperationContext* txn, const NamespaceString& collectionName, double size);
+Status convertToCapped(OperationContext* opCtx,
+                       const NamespaceString& collectionName,
+                       long long size);
 }  // namespace mongo

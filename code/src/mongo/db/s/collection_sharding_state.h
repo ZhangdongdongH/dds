@@ -28,178 +28,122 @@
 
 #pragma once
 
-#include <memory>
-#include <string>
-
 #include "mongo/base/disallow_copying.h"
-#include "mongo/base/string_data.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/s/metadata_manager.h"
+#include "mongo/db/s/scoped_collection_metadata.h"
+#include "mongo/db/s/sharding_migration_critical_section.h"
 
 namespace mongo {
 
-class BSONObj;
-struct ChunkVersion;
-class CollectionMetadata;
-class MigrationSourceManager;
-class OperationContext;
-
 /**
- * Contains all sharding-related runtime state for a given collection. One such object is assigned
- * to each sharded collection known on a mongod instance. A set of these objects is linked off the
- * instance's sharding state.
+ * Each collection on a mongod instance is dynamically assigned two pieces of information for the
+ * duration of its lifetime:
+ *  CollectionShardingState - this is a passive data-only state, which represents what is the
+ * shard's knowledge of its the shard version and the set of chunks that it owns.
+ *  CollectionShardingRuntime (missing from the embedded mongod) - this is the heavyweight machinery
+ * which implements the sharding protocol functions and is what controls the data-only state.
  *
- * Synchronization rules: In order to look-up this object in the instance's sharding map, one must
- * have some lock on the respective collection.
+ * The CollectionShardingStateFactory class below is used in order to allow for the collection
+ * runtime to be instantiated separately from the sharding state.
+ *
+ * Synchronization rule: In order to obtain an instance of this object, the caller must have some
+ * lock on the respective collection.
  */
 class CollectionShardingState {
     MONGO_DISALLOW_COPYING(CollectionShardingState);
 
 public:
-    /**
-     * Instantiates a new per-collection sharding state as unsharded.
-     */
-    CollectionShardingState(ServiceContext* sc, NamespaceString nss);
-    ~CollectionShardingState();
-
-    /**
-     * Holds information used for tracking document removals during chunk migration.
-     */
-    struct DeleteState {
-        // Contains the _id field of the document being deleted.
-        BSONObj idDoc;
-
-        // True if the document being deleted belongs to a chunk which is currently being migrated
-        // out of this shard.
-        bool isMigrating = false;
-    };
+    virtual ~CollectionShardingState() = default;
 
     /**
      * Obtains the sharding state for the specified collection. If it does not exist, it will be
-     * created and will remain active until the collection is dropped or unsharded.
+     * created and will remain in memory until the collection is dropped.
      *
      * Must be called with some lock held on the specific collection being looked up and the
-     * returned pointer should never be stored.
+     * returned pointer must not be stored.
      */
-    static CollectionShardingState* get(OperationContext* txn, const NamespaceString& nss);
-    static CollectionShardingState* get(OperationContext* txn, const std::string& ns);
+    static CollectionShardingState* get(OperationContext* opCtx, const NamespaceString& nss);
 
     /**
-     * Returns the chunk metadata for the collection.
+     * Reports all collections which have filtering information associated.
      */
-    ScopedCollectionMetadata getMetadata();
+    static void report(OperationContext* opCtx, BSONObjBuilder* builder);
 
     /**
-     * Updates the metadata based on changes received from the config server and also resolves the
-     * pending receives map in case some of these pending receives have completed or have been
-     * abandoned.
+     * Returns the chunk filtering metadata for the collection. The returned object is safe to
+     * access outside of collection lock.
      *
-     * Must always be called with an exclusive collection lock.
+     * If the operation context contains an 'atClusterTime' property, the returned filtering
+     * metadata will be tied to a specific point in time. Otherwise it will reference the latest
+     * time available.
      */
-    void refreshMetadata(OperationContext* txn, std::unique_ptr<CollectionMetadata> newMetadata);
+    ScopedCollectionMetadata getMetadata(OperationContext* opCtx);
 
     /**
-     * Marks the collection as not sharded at stepdown time so that no filtering will occur for
-     * slaveOk queries.
+     * Checks whether the shard version in the operation context is compatible with the shard
+     * version of the collection and if not, throws StaleConfigException populated with the received
+     * and wanted versions.
      */
-    void markNotShardedAtStepdown();
+    void checkShardVersionOrThrow(OperationContext* opCtx);
 
     /**
-     * Modifies the collection's sharding state to indicate that it is beginning to receive the
-     * given ChunkRange.
+     * Methods to control the collection's critical section. Must be called with the collection X
+     * lock held.
      */
-    void beginReceive(const ChunkRange& range);
-
-    /*
-     * Modifies the collection's sharding state to indicate that the previous pending migration
-     * failed. If the range was not previously pending, this function will crash the server.
-     *
-     * This function is the mirror image of beginReceive.
-     */
-    void forgetReceive(const ChunkRange& range);
+    void enterCriticalSectionCatchUpPhase(OperationContext* opCtx);
+    void enterCriticalSectionCommitPhase(OperationContext* opCtx);
+    void exitCriticalSection(OperationContext* opCtx);
 
     /**
-     * Returns the active migration source manager, if one is available.
+     * If the collection is currently in a critical section, returns the critical section signal to
+     * be waited on. Otherwise, returns nullptr.
      */
-    MigrationSourceManager* getMigrationSourceManager();
+    auto getCriticalSectionSignal(ShardingMigrationCriticalSection::Operation op) const {
+        return _critSec.getSignal(op);
+    }
 
-    /**
-     * Attaches a migration source manager to this collection's sharding state. Must be called with
-     * collection X lock. May not be called if there is a migration source manager already
-     * installed. Must be followed by a call to clearMigrationSourceManager.
-     */
-    void setMigrationSourceManager(OperationContext* txn, MigrationSourceManager* sourceMgr);
-
-    /**
-     * Removes a migration source manager from this collection's sharding state. Must be called with
-     * collection X lock. May not be called if there isn't a migration source manager installed
-     * already through a previous call to setMigrationSourceManager.
-     */
-    void clearMigrationSourceManager(OperationContext* txn);
-
-    /**
-     * Checks whether the shard version in the context is compatible with the shard version of the
-     * collection locally and if not throws SendStaleConfigException populated with the expected and
-     * actual versions.
-     *
-     * Because SendStaleConfigException has special semantics in terms of how a sharded command's
-     * response is constructed, this function should be the only means of checking for shard version
-     * match.
-     */
-    void checkShardVersionOrThrow(OperationContext* txn);
-
-    /**
-     * Returns whether this collection is sharded. Valid only if mongoD is primary.
-     * TODO SERVER-24960: This method may return a false positive until SERVER-24960 is fixed.
-     */
-    bool collectionIsSharded();
-
-    // Replication subsystem hooks. If this collection is serving as a source for migration, these
-    // methods inform it of any changes to its contents.
-
-    bool isDocumentInMigratingChunk(OperationContext* txn, const BSONObj& doc);
-
-    void onInsertOp(OperationContext* txn, const BSONObj& insertedDoc);
-
-    void onUpdateOp(OperationContext* txn, const BSONObj& updatedDoc);
-
-    void onDeleteOp(OperationContext* txn, const DeleteState& deleteState);
-
-    void onDropCollection(OperationContext* txn, const NamespaceString& collectionName);
+protected:
+    CollectionShardingState(NamespaceString nss);
 
 private:
-    friend class CollectionRangeDeleter;
-
-    /**
-     * Checks whether the shard version of the operation matches that of the collection.
-     *
-     * txn - Operation context from which to retrieve the operation's expected version.
-     * errmsg (out) - On false return contains an explanatory error message.
-     * expectedShardVersion (out) - On false return contains the expected collection version on this
-     *  shard. Obtained from the operation sharding state.
-     * actualShardVersion (out) - On false return contains the actual collection version on this
-     *  shard. Obtained from the collection sharding state.
-     *
-     * Returns true if the expected collection version on the shard matches its actual version on
-     * the shard and false otherwise. Upon false return, the output parameters will be set.
-     */
-    bool _checkShardVersionOk(OperationContext* txn,
-                              std::string* errmsg,
-                              ChunkVersion* expectedShardVersion,
-                              ChunkVersion* actualShardVersion);
-
-    // Namespace to which this state belongs.
+    // Namespace this state belongs to.
     const NamespaceString _nss;
 
-    // Contains all the metadata associated with this collection.
-    MetadataManager _metadataManager;
+    // Tracks the migration critical section state for this collection.
+    ShardingMigrationCriticalSection _critSec;
 
-    // If this collection is serving as a source shard for chunk migration, this value will be
-    // non-null. To write this value there needs to be X-lock on the collection in order to
-    // synchronize with other callers, which read it.
-    //
-    // NOTE: The value is not owned by this class.
-    MigrationSourceManager* _sourceMgr{nullptr};
+    // Obtains the current metadata for the collection
+    virtual ScopedCollectionMetadata _getMetadata(OperationContext* opCtx) = 0;
+};
+
+/**
+ * Singleton factory to instantiate CollectionShardingState objects specific to the type of instance
+ * which is running.
+ */
+class CollectionShardingStateFactory {
+    MONGO_DISALLOW_COPYING(CollectionShardingStateFactory);
+
+public:
+    static void set(ServiceContext* service,
+                    std::unique_ptr<CollectionShardingStateFactory> factory);
+    static void clear(ServiceContext* service);
+
+    virtual ~CollectionShardingStateFactory() = default;
+
+    /**
+     * Called by the CollectionShardingState::get method once per newly cached namespace. It is
+     * invoked under a mutex and must not acquire any locks or do blocking work.
+     *
+     * Implementations must be thread-safe when called from multiple threads.
+     */
+    virtual std::unique_ptr<CollectionShardingState> make(const NamespaceString& nss) = 0;
+
+protected:
+    CollectionShardingStateFactory(ServiceContext* serviceContext)
+        : _serviceContext(serviceContext) {}
+
+    // The service context which owns this factory
+    ServiceContext* const _serviceContext;
 };
 
 }  // namespace mongo

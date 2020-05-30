@@ -31,6 +31,7 @@
 #include <cstddef>
 #include <set>
 
+#include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/bson/bsonobj.h"
 
 namespace mongo {
@@ -83,7 +84,7 @@ BSONElement extractElementAtPathOrArrayAlongPath(const BSONObj& obj, const char*
  * and array elements.
  *
  * This function fills 'arrayComponents' with the positions (starting at 0) of 'path' corresponding
- * to array values with multiple elements.
+ * to array values.
  *
  * Some examples:
  *
@@ -104,7 +105,7 @@ void extractAllElementsAlongPath(const BSONObj& obj,
 
 void extractAllElementsAlongPath(const BSONObj& obj,
                                  StringData path,
-                                 BSONElementMSet& elements,
+                                 BSONElementMultiSet& elements,
                                  bool expandArrayOnTrailingField = true,
                                  std::set<std::size_t>* arrayComponents = nullptr);
 

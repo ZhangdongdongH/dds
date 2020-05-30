@@ -45,22 +45,18 @@
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
 namespace rpc {
 
-using std::shared_ptr;
+ShardingEgressMetadataHook::ShardingEgressMetadataHook(ServiceContext* serviceContext)
+    : _serviceContext(serviceContext) {
+    invariant(_serviceContext);
+}
 
-Status ShardingEgressMetadataHook::writeRequestMetadata(bool shardedConnection,
-                                                        OperationContext* txn,
-                                                        const StringData target,
+Status ShardingEgressMetadataHook::writeRequestMetadata(OperationContext* opCtx,
                                                         BSONObjBuilder* metadataBob) {
     try {
-        audit::writeImpersonatedUsersToMetadata(txn, metadataBob);
-
-        ClientMetadataIsMasterState::writeToMetadata(txn, metadataBob);
-        if (!shardedConnection) {
-            return Status::OK();
-        }
+        audit::writeImpersonatedUsersToMetadata(opCtx, metadataBob);
+        ClientMetadataIsMasterState::writeToMetadata(opCtx, metadataBob);
         rpc::ConfigServerMetadata(_getConfigServerOpTime()).writeToMetadata(metadataBob);
         return Status::OK();
     } catch (...) {
@@ -68,20 +64,8 @@ Status ShardingEgressMetadataHook::writeRequestMetadata(bool shardedConnection,
     }
 }
 
-Status ShardingEgressMetadataHook::writeRequestMetadata(OperationContext* txn,
-                                                        const HostAndPort& target,
-                                                        BSONObjBuilder* metadataBob) {
-    try {
-        audit::writeImpersonatedUsersToMetadata(txn, metadataBob);
-        ClientMetadataIsMasterState::writeToMetadata(txn, metadataBob);
-        rpc::ConfigServerMetadata(_getConfigServerOpTime()).writeToMetadata(metadataBob);
-        return Status::OK();
-    } catch (...) {
-        return exceptionToStatus();
-    }
-}
-
-Status ShardingEgressMetadataHook::readReplyMetadata(const StringData replySource,
+Status ShardingEgressMetadataHook::readReplyMetadata(OperationContext* opCtx,
+                                                     StringData replySource,
                                                      const BSONObj& metadataObj) {
     try {
         _saveGLEStats(metadataObj, replySource);
@@ -91,20 +75,12 @@ Status ShardingEgressMetadataHook::readReplyMetadata(const StringData replySourc
     }
 }
 
-Status ShardingEgressMetadataHook::readReplyMetadata(const HostAndPort& replySource,
-                                                     const BSONObj& metadataObj) {
-    try {
-        _saveGLEStats(metadataObj, replySource.toString());
-        return _advanceConfigOptimeFromShard(replySource.toString(), metadataObj);
-    } catch (...) {
-        return exceptionToStatus();
-    }
-}
-
 Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId,
                                                                  const BSONObj& metadataObj) {
+    auto const grid = Grid::get(_serviceContext);
+
     try {
-        auto shard = grid.shardRegistry()->getShardNoReload(shardId);
+        auto shard = grid->shardRegistry()->getShardNoReload(shardId);
         if (!shard) {
             return Status::OK();
         }
@@ -126,7 +102,7 @@ Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId
                 // is safe to use.
                 const auto& replMetadata = parseStatus.getValue();
                 auto opTime = replMetadata.getLastOpCommitted();
-                grid.advanceConfigOpTime(opTime);
+                grid->advanceConfigOpTime(opTime);
             }
         } else {
             // Regular shards return the config opTime as part of ConfigServerMetadata.
@@ -138,7 +114,7 @@ Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId
             const auto& configMetadata = parseStatus.getValue();
             auto opTime = configMetadata.getOpTime();
             if (opTime.is_initialized()) {
-                grid.advanceConfigOpTime(opTime.get());
+                grid->advanceConfigOpTime(opTime.get());
             }
         }
         return Status::OK();

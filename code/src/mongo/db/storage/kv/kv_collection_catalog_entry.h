@@ -33,6 +33,7 @@
 #include <memory>
 
 #include "mongo/db/catalog/collection_catalog_entry.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/storage/bson_collection_catalog_entry.h"
 #include "mongo/db/storage/record_store.h"
 
@@ -55,30 +56,40 @@ public:
         return 64;
     };
 
-    bool setIndexIsMultikey(OperationContext* txn,
+    bool setIndexIsMultikey(OperationContext* opCtx,
                             StringData indexName,
                             const MultikeyPaths& multikeyPaths) final;
 
-    void setIndexHead(OperationContext* txn, StringData indexName, const RecordId& newHead) final;
+    void setIndexHead(OperationContext* opCtx, StringData indexName, const RecordId& newHead) final;
 
-    Status removeIndex(OperationContext* txn, StringData indexName) final;
+    Status removeIndex(OperationContext* opCtx, StringData indexName) final;
 
-    Status prepareForIndexBuild(OperationContext* txn, const IndexDescriptor* spec) final;
+    Status prepareForIndexBuild(OperationContext* opCtx,
+                                const IndexDescriptor* spec,
+                                bool isBackgroundSecondaryBuild) final;
 
-    void indexBuildSuccess(OperationContext* txn, StringData indexName) final;
+    void indexBuildSuccess(OperationContext* opCtx, StringData indexName) final;
 
-    void updateTTLSetting(OperationContext* txn,
+    void updateTTLSetting(OperationContext* opCtx,
                           StringData idxName,
                           long long newExpireSeconds) final;
 
-    void updateFlags(OperationContext* txn, int newValue) final;
+    void updateFlags(OperationContext* opCtx, int newValue) final;
 
-    void clearTempFlag(OperationContext* txn) final;
+    void updateIndexMetadata(OperationContext* opCtx, const IndexDescriptor* desc) final;
 
-    void updateValidator(OperationContext* txn,
+    void updateValidator(OperationContext* opCtx,
                          const BSONObj& validator,
                          StringData validationLevel,
                          StringData validationAction) final;
+
+    void setIsTemp(OperationContext* opCtx, bool isTemp);
+
+    void updateCappedSize(OperationContext*, long long int) final;
+
+    void addUUID(OperationContext* opCtx, CollectionUUID uuid, Collection* coll) final;
+
+    bool isEqualToMetadataUUID(OperationContext* opCtx, OptionalCollectionUUID uuid) final;
 
     RecordStore* getRecordStore() {
         return _recordStore.get();
@@ -88,7 +99,7 @@ public:
     }
 
 protected:
-    MetaData _getMetaData(OperationContext* txn) const final;
+    MetaData _getMetaData(OperationContext* opCtx) const final;
 
 private:
     class AddIndexChange;

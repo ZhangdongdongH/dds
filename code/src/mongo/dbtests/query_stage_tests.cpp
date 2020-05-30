@@ -31,6 +31,7 @@
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
@@ -38,7 +39,7 @@
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/stdx/memory.h"
@@ -53,8 +54,8 @@ using std::unique_ptr;
 
 class IndexScanBase {
 public:
-    IndexScanBase() : _client(&_txn) {
-        OldClientWriteContext ctx(&_txn, ns());
+    IndexScanBase() : _client(&_opCtx) {
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         for (int i = 0; i < numObj(); ++i) {
             BSONObjBuilder bob;
@@ -69,31 +70,33 @@ public:
     }
 
     virtual ~IndexScanBase() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
         _client.dropCollection(ns());
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), obj));
     }
 
     int countResults(const IndexScanParams& params, BSONObj filterObj = BSONObj()) {
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, NamespaceString(ns()));
 
         const CollatorInterface* collator = nullptr;
-        StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(
-            filterObj, ExtensionsCallbackDisallowExtensions(), collator);
+        const boost::intrusive_ptr<ExpressionContext> expCtx(
+            new ExpressionContext(&_opCtx, collator));
+        StatusWithMatchExpression statusWithMatcher =
+            MatchExpressionParser::parse(filterObj, expCtx);
         verify(statusWithMatcher.isOK());
         unique_ptr<MatchExpression> filterExpr = std::move(statusWithMatcher.getValue());
 
         unique_ptr<WorkingSet> ws = stdx::make_unique<WorkingSet>();
         unique_ptr<IndexScan> ix =
-            stdx::make_unique<IndexScan>(&_txn, params, ws.get(), filterExpr.get());
+            stdx::make_unique<IndexScan>(&_opCtx, params, ws.get(), filterExpr.get());
 
         auto statusWithPlanExecutor = PlanExecutor::make(
-            &_txn, std::move(ws), std::move(ix), ctx.getCollection(), PlanExecutor::YIELD_MANUAL);
+            &_opCtx, std::move(ws), std::move(ix), ctx.getCollection(), PlanExecutor::NO_YIELD);
         ASSERT_OK(statusWithPlanExecutor.getStatus());
-        unique_ptr<PlanExecutor> exec = std::move(statusWithPlanExecutor.getValue());
+        auto exec = std::move(statusWithPlanExecutor.getValue());
 
         int count = 0;
         PlanExecutor::ExecState state;
@@ -106,7 +109,7 @@ public:
     }
 
     void makeGeoData() {
-        OldClientWriteContext ctx(&_txn, ns());
+        OldClientWriteContext ctx(&_opCtx, ns());
 
         for (int i = 0; i < numObj(); ++i) {
             double lat = double(rand()) / RAND_MAX;
@@ -116,10 +119,10 @@ public:
     }
 
     IndexDescriptor* getIndex(const BSONObj& obj) {
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, NamespaceString(ns()));
         Collection* collection = ctx.getCollection();
         std::vector<IndexDescriptor*> indexes;
-        collection->getIndexCatalog()->findIndexesByKeyPattern(&_txn, obj, false, &indexes);
+        collection->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, obj, false, &indexes);
         return indexes.empty() ? nullptr : indexes[0];
     }
 
@@ -132,7 +135,7 @@ public:
 
 protected:
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContext& _opCtx = *_txnPtr;
 
 private:
     DBDirectClient _client;
@@ -226,7 +229,7 @@ public:
         params.bounds.boundInclusion = BoundInclusion::kIncludeBothStartAndEndKeys;
         params.direction = 1;
 
-        ASSERT_THROWS(countResults(params, BSON("baz" << 25)), MsgAssertionException);
+        ASSERT_THROWS(countResults(params, BSON("baz" << 25)), AssertionException);
     }
 };
 

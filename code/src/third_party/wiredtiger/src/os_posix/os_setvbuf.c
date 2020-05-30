@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -14,6 +14,7 @@
  */
 void
 __wt_stream_set_line_buffer(FILE *fp)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	/*
 	 * This function exists because MSVC doesn't support buffer sizes of 0
@@ -29,6 +30,7 @@ __wt_stream_set_line_buffer(FILE *fp)
  */
 void
 __wt_stream_set_no_buffer(FILE *fp)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	(void)setvbuf(fp, NULL, _IONBF, 0);
 }

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -7,6 +7,7 @@
  */
 
 #include "wt_internal.h"
+
 /*
  * __async_get_key --
  *	WT_ASYNC_OP->get_key implementation for op handles.
@@ -254,7 +255,6 @@ __wt_async_op_enqueue(WT_SESSION_IMPL *session, WT_ASYNC_OP_IMPL *op)
 {
 	WT_ASYNC *async;
 	WT_CONNECTION_IMPL *conn;
-	WT_DECL_RET;
 	uint64_t cur_head, cur_tail, my_alloc, my_slot;
 #ifdef	HAVE_DIAGNOSTIC
 	WT_ASYNC_OP_IMPL *my_op;
@@ -307,7 +307,7 @@ __wt_async_op_enqueue(WT_SESSION_IMPL *session, WT_ASYNC_OP_IMPL *op)
 		WT_ORDERED_READ(cur_head, async->head);
 	}
 	WT_PUBLISH(async->head, my_alloc);
-	return (ret);
+	return (0);
 }
 
 /*

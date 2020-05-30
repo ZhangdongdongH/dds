@@ -38,20 +38,23 @@
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/set_shard_version_request.h"
+#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
 
 Status ShardingNetworkConnectionHook::validateHost(
-    const HostAndPort& remoteHost, const executor::RemoteCommandResponse& isMasterReply) {
+    const HostAndPort& remoteHost,
+    const BSONObj&,
+    const executor::RemoteCommandResponse& isMasterReply) {
     return validateHostImpl(remoteHost, isMasterReply);
 }
 
 Status ShardingNetworkConnectionHook::validateHostImpl(
     const HostAndPort& remoteHost, const executor::RemoteCommandResponse& isMasterReply) {
-    auto shard = grid.shardRegistry()->getShardForHostNoReload(remoteHost);
+    auto shard =
+        Grid::get(getGlobalServiceContext())->shardRegistry()->getShardForHostNoReload(remoteHost);
     if (!shard) {
         return {ErrorCodes::ShardNotFound,
                 str::stream() << "No shard found for host: " << remoteHost.toString()};
@@ -90,31 +93,11 @@ Status ShardingNetworkConnectionHook::validateHostImpl(
 
 StatusWith<boost::optional<executor::RemoteCommandRequest>>
 ShardingNetworkConnectionHook::makeRequest(const HostAndPort& remoteHost) {
-    auto shard = grid.shardRegistry()->getShardForHostNoReload(remoteHost);
-    if (!shard) {
-        return {ErrorCodes::ShardNotFound,
-                str::stream() << "No shard found for host: " << remoteHost.toString()};
-    }
-    if (shard->isConfig()) {
-        // No need to initialize sharding metadata if talking to a config server
-        return {boost::none};
-    }
-
-    SetShardVersionRequest ssv = SetShardVersionRequest::makeForInitNoPersist(
-        grid.shardRegistry()->getConfigServerConnectionString(),
-        shard->getId(),
-        shard->getConnString());
-    executor::RemoteCommandRequest request;
-    request.dbname = "admin";
-    request.target = remoteHost;
-    request.timeout = Seconds{30};
-    request.cmdObj = ssv.toBSON();
-
-    return {request};
+    return {boost::none};
 }
 
 Status ShardingNetworkConnectionHook::handleReply(const HostAndPort& remoteHost,
                                                   executor::RemoteCommandResponse&& response) {
-    return getStatusFromCommandResult(response.data);
+    MONGO_UNREACHABLE;
 }
 }  // namespace mongo

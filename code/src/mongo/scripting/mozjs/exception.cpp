@@ -43,39 +43,20 @@
 namespace mongo {
 namespace mozjs {
 
-namespace {
-
-JSErrorFormatString kErrorFormatString = {"{0}", 1, JSEXN_ERR};
-const JSErrorFormatString* errorCallback(void* data, const unsigned code) {
-    return &kErrorFormatString;
-}
-
-JSErrorFormatString kUncatchableErrorFormatString = {"{0}", 1, JSEXN_NONE};
-const JSErrorFormatString* uncatchableErrorCallback(void* data, const unsigned code) {
-    return &kUncatchableErrorFormatString;
-}
-
-MONGO_STATIC_ASSERT_MSG(
-    UINT_MAX - JSErr_Limit > ErrorCodes::MaxError,
-    "Not enough space in an unsigned int for Mongo ErrorCodes and JSErrorNumbers");
-
-}  // namespace
-
 void mongoToJSException(JSContext* cx) {
     auto status = exceptionToStatus();
 
-    auto callback =
-        status.code() == ErrorCodes::JSUncatchableError ? uncatchableErrorCallback : errorCallback;
+    if (status.code() != ErrorCodes::JSUncatchableError) {
+        JS::RootedValue val(cx);
+        statusToJSException(cx, status, &val);
 
-    JS_ReportErrorNumber(
-        cx, callback, nullptr, JSErr_Limit + status.code(), status.reason().c_str());
-}
-
-void setJSException(JSContext* cx, ErrorCodes::Error code, StringData sd) {
-    auto callback =
-        code == ErrorCodes::JSUncatchableError ? uncatchableErrorCallback : errorCallback;
-
-    JS_ReportErrorNumber(cx, callback, nullptr, JSErr_Limit + code, sd.rawData());
+        JS_SetPendingException(cx, val);
+    } else {
+        // If a JSAPI callback returns false without setting a pending exception, SpiderMonkey will
+        // treat it as an uncatchable error.
+        auto scope = getScope(cx);
+        scope->setStatus(status);
+    }
 }
 
 std::string currentJSStackToString(JSContext* cx) {
@@ -92,16 +73,7 @@ Status currentJSExceptionToStatus(JSContext* cx, ErrorCodes::Error altCode, Stri
     if (!JS_GetPendingException(cx, &vp))
         return Status(altCode, altReason.rawData());
 
-    if (!vp.isObject()) {
-        return Status(altCode, ValueWriter(cx, vp).toString());
-    }
-
-    JS::RootedObject obj(cx, vp.toObjectOrNull());
-    JSErrorReport* report = JS_ErrorFromException(cx, obj);
-    if (!report)
-        return Status(altCode, altReason.rawData());
-
-    return JSErrorReportToStatus(cx, report, altCode, altReason);
+    return jsExceptionToStatus(cx, vp, altCode, altReason);
 }
 
 Status JSErrorReportToStatus(JSContext* cx,
@@ -118,7 +90,8 @@ Status JSErrorReportToStatus(JSContext* cx,
         if (report->errorNumber < JSErr_Limit) {
             error = ErrorCodes::JSInterpreterFailure;
         } else {
-            error = ErrorCodes::fromInt(report->errorNumber - JSErr_Limit);
+            error = ErrorCodes::Error(report->errorNumber - JSErr_Limit);
+            invariant(!ErrorCodes::shouldHaveExtraInfo(error));
         }
     }
 
@@ -126,8 +99,41 @@ Status JSErrorReportToStatus(JSContext* cx,
 }
 
 void throwCurrentJSException(JSContext* cx, ErrorCodes::Error altCode, StringData altReason) {
-    auto status = currentJSExceptionToStatus(cx, altCode, altReason);
-    uasserted(status.code(), status.reason());
+    uassertStatusOK(currentJSExceptionToStatus(cx, altCode, altReason));
+    MONGO_UNREACHABLE;
+}
+
+/**
+ * Turns a status into a js exception
+ */
+void statusToJSException(JSContext* cx, Status status, JS::MutableHandleValue out) {
+    MongoStatusInfo::fromStatus(cx, std::move(status), out);
+}
+
+/**
+ * Turns a js exception into a status
+ */
+Status jsExceptionToStatus(JSContext* cx,
+                           JS::HandleValue excn,
+                           ErrorCodes::Error altCode,
+                           StringData altReason) {
+    auto scope = getScope(cx);
+
+    if (!excn.isObject()) {
+        return Status(altCode, ValueWriter(cx, excn).toString());
+    }
+
+    if (scope->getProto<MongoStatusInfo>().instanceOf(excn)) {
+        return MongoStatusInfo::toStatus(cx, excn);
+    }
+
+    JS::RootedObject obj(cx, excn.toObjectOrNull());
+
+    JSErrorReport* report = JS_ErrorFromException(cx, obj);
+    if (!report)
+        return Status(altCode, altReason.rawData());
+
+    return JSErrorReportToStatus(cx, report, altCode, altReason);
 }
 
 }  // namespace mozjs

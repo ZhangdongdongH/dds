@@ -93,6 +93,37 @@ const char* typeName(BSONType type) {
     }
 }
 
+const StringMap<BSONType> kTypeAliasMap = {
+    {typeName(BSONType::NumberDouble), BSONType::NumberDouble},
+    {typeName(BSONType::String), BSONType::String},
+    {typeName(BSONType::Object), BSONType::Object},
+    {typeName(BSONType::Array), BSONType::Array},
+    {typeName(BSONType::BinData), BSONType::BinData},
+    {typeName(BSONType::Undefined), BSONType::Undefined},
+    {typeName(BSONType::jstOID), BSONType::jstOID},
+    {typeName(BSONType::Bool), BSONType::Bool},
+    {typeName(BSONType::Date), BSONType::Date},
+    {typeName(BSONType::jstNULL), BSONType::jstNULL},
+    {typeName(BSONType::RegEx), BSONType::RegEx},
+    {typeName(BSONType::DBRef), BSONType::DBRef},
+    {typeName(BSONType::Code), BSONType::Code},
+    {typeName(BSONType::Symbol), BSONType::Symbol},
+    {typeName(BSONType::CodeWScope), BSONType::CodeWScope},
+    {typeName(BSONType::NumberInt), BSONType::NumberInt},
+    {typeName(BSONType::bsonTimestamp), BSONType::bsonTimestamp},
+    {typeName(BSONType::NumberLong), BSONType::NumberLong},
+    {typeName(BSONType::NumberDecimal), BSONType::NumberDecimal},
+    {typeName(BSONType::MaxKey), BSONType::MaxKey},
+    {typeName(BSONType::MinKey), BSONType::MinKey}};
+
+BSONType typeFromName(StringData name) {
+    auto typeIt = kTypeAliasMap.find(name);
+    uassert(ErrorCodes::BadValue,
+            str::stream() << "Unknown type name: " << name,
+            typeIt != kTypeAliasMap.end());
+    return typeIt->second;
+}
+
 std::ostream& operator<<(std::ostream& stream, BSONType type) {
     return stream << typeName(type);
 }
@@ -124,6 +155,27 @@ bool isValidBSONType(int type) {
             return true;
         default:
             return false;
+    }
+}
+
+const char* typeName(BinDataType type) {
+    switch (type) {
+        case BinDataGeneral:
+            return "general";
+        case Function:
+            return "function";
+        case ByteArrayDeprecated:
+            return "byte(deprecated)";
+        case bdtUUID:
+            return "UUID(deprecated)";
+        case newUUID:
+            return "UUID";
+        case MD5Type:
+            return "MD5";
+        case bdtCustom:
+            return "Custom";
+        default:
+            return "invalid";
     }
 }
 

@@ -38,40 +38,45 @@
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/commands/feature_compatibility_version_command_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request.h"
 #include "mongo/db/pipeline/document_source.h"
 #include "mongo/db/pipeline/expression_context.h"
+#include "mongo/db/pipeline/lite_parsed_pipeline.h"
 #include "mongo/db/pipeline/pipeline.h"
+#include "mongo/db/pipeline/stub_mongo_process_interface.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
-#include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/storage/recovery_unit.h"
 #include "mongo/db/views/resolved_view.h"
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_graph.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace {
-StatusWith<std::unique_ptr<CollatorInterface>> parseCollator(OperationContext* txn,
+MONGO_FAIL_POINT_DEFINE(hangDuringViewResolution);
+
+StatusWith<std::unique_ptr<CollatorInterface>> parseCollator(OperationContext* opCtx,
                                                              BSONObj collationSpec) {
     // If 'collationSpec' is empty, return the null collator, which represents the "simple"
     // collation.
     if (collationSpec.isEmpty()) {
         return {nullptr};
     }
-    return CollatorFactoryInterface::get(txn->getServiceContext())->makeFromBSON(collationSpec);
+    return CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collationSpec);
 }
 }  // namespace
 
-Status ViewCatalog::reloadIfNeeded(OperationContext* txn) {
+Status ViewCatalog::reloadIfNeeded(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return _reloadIfNeeded_inlock(txn);
+    return _reloadIfNeeded_inlock(opCtx);
 }
 
-Status ViewCatalog::_reloadIfNeeded_inlock(OperationContext* txn) {
+Status ViewCatalog::_reloadIfNeeded_inlock(OperationContext* opCtx) {
     if (_valid.load())
         return Status::OK();
 
@@ -80,18 +85,30 @@ Status ViewCatalog::_reloadIfNeeded_inlock(OperationContext* txn) {
     // Need to reload, first clear our cache.
     _viewMap.clear();
 
-    Status status = _durable->iterate(txn, [&](const BSONObj& view) -> Status {
+    Status status = _durable->iterate(opCtx, [&](const BSONObj& view) -> Status {
         BSONObj collationSpec = view.hasField("collation") ? view["collation"].Obj() : BSONObj();
-        auto collator = parseCollator(txn, collationSpec);
+        auto collator = parseCollator(opCtx, collationSpec);
         if (!collator.isOK()) {
             return collator.getStatus();
         }
 
         NamespaceString viewName(view["_id"].str());
+
+        auto pipeline = view["pipeline"].Obj();
+        for (auto&& stage : pipeline) {
+            if (BSONType::Object != stage.type()) {
+                return Status(ErrorCodes::InvalidViewDefinition,
+                              str::stream() << "View 'pipeline' entries must be objects, but "
+                                            << viewName.toString()
+                                            << " has a pipeline element of type "
+                                            << stage.type());
+            }
+        }
+
         _viewMap[viewName.ns()] = std::make_shared<ViewDefinition>(viewName.db(),
                                                                    viewName.coll(),
                                                                    view["viewOn"].str(),
-                                                                   view["pipeline"].Obj(),
+                                                                   pipeline,
                                                                    std::move(collator.getValue()));
         return Status::OK();
     });
@@ -105,20 +122,20 @@ Status ViewCatalog::_reloadIfNeeded_inlock(OperationContext* txn) {
     return status;
 }
 
-void ViewCatalog::iterate(OperationContext* txn, ViewIteratorCallback callback) {
+void ViewCatalog::iterate(OperationContext* opCtx, ViewIteratorCallback callback) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    _requireValidCatalog_inlock(txn);
+    _requireValidCatalog_inlock(opCtx);
     for (auto&& view : _viewMap) {
         callback(*view.second);
     }
 }
 
-Status ViewCatalog::_createOrUpdateView_inlock(OperationContext* txn,
+Status ViewCatalog::_createOrUpdateView_inlock(OperationContext* opCtx,
                                                const NamespaceString& viewName,
                                                const NamespaceString& viewOn,
                                                const BSONArray& pipeline,
                                                std::unique_ptr<CollatorInterface> collator) {
-    _requireValidCatalog_inlock(txn);
+    _requireValidCatalog_inlock(opCtx);
 
     // Build the BSON definition for this view to be saved in the durable view catalog. If the
     // collation is empty, omit it from the definition altogether.
@@ -135,41 +152,42 @@ Status ViewCatalog::_createOrUpdateView_inlock(OperationContext* txn,
         viewName.db(), viewName.coll(), viewOn.coll(), ownedPipeline, std::move(collator));
 
     // Check that the resulting dependency graph is acyclic and within the maximum depth.
-    Status graphStatus = _upsertIntoGraph(txn, *(view.get()));
+    Status graphStatus = _upsertIntoGraph(opCtx, *(view.get()));
     if (!graphStatus.isOK()) {
         return graphStatus;
     }
 
-    _durable->upsert(txn, viewName, viewDefBuilder.obj());
+    _durable->upsert(opCtx, viewName, viewDefBuilder.obj());
     _viewMap[viewName.ns()] = view;
-    txn->recoveryUnit()->onRollback([this, viewName]() {
+    opCtx->recoveryUnit()->onRollback([this, viewName]() {
         this->_viewMap.erase(viewName.ns());
         this->_viewGraphNeedsRefresh = true;
     });
 
     // We may get invalidated, but we're exclusively locked, so the change must be ours.
-    txn->recoveryUnit()->onCommit([this]() { this->_valid.store(true); });
+    opCtx->recoveryUnit()->onCommit(
+        [this](boost::optional<Timestamp>) { this->_valid.store(true); });
     return Status::OK();
 }
 
-Status ViewCatalog::_upsertIntoGraph(OperationContext* txn, const ViewDefinition& viewDef) {
+Status ViewCatalog::_upsertIntoGraph(OperationContext* opCtx, const ViewDefinition& viewDef) {
 
     // Performs the insert into the graph.
-    auto doInsert = [this, &txn](const ViewDefinition& viewDef, bool needsValidation) -> Status {
-        // Parse the pipeline for this view to get the namespaces it references.
-        AggregationRequest request(viewDef.viewOn(), viewDef.pipeline());
-        boost::intrusive_ptr<ExpressionContext> expCtx = new ExpressionContext(txn, request);
-        expCtx->setCollator(CollatorInterface::cloneCollator(viewDef.defaultCollator()));
-        auto pipelineStatus = Pipeline::parse(viewDef.pipeline(), expCtx);
+    auto doInsert = [this, &opCtx](const ViewDefinition& viewDef, bool needsValidation) -> Status {
+        // Validate that the pipeline is eligible to serve as a view definition. If it is, this
+        // will also return the set of involved namespaces.
+        auto pipelineStatus = _validatePipeline_inlock(opCtx, viewDef);
         if (!pipelineStatus.isOK()) {
-            uassert(40255,
-                    str::stream() << "Invalid pipeline for view " << viewDef.name().ns() << "; "
-                                  << pipelineStatus.getStatus().reason(),
-                    !needsValidation);
+            if (needsValidation) {
+                uassertStatusOKWithContext(pipelineStatus.getStatus(),
+                                           str::stream() << "Invalid pipeline for view "
+                                                         << viewDef.name().ns());
+            }
             return pipelineStatus.getStatus();
         }
 
-        std::vector<NamespaceString> refs = pipelineStatus.getValue()->getInvolvedCollections();
+        auto involvedNamespaces = pipelineStatus.getValue();
+        std::vector<NamespaceString> refs(involvedNamespaces.begin(), involvedNamespaces.end());
         refs.push_back(viewDef.viewOn());
 
         int pipelineSize = 0;
@@ -179,13 +197,13 @@ Status ViewCatalog::_upsertIntoGraph(OperationContext* txn, const ViewDefinition
 
         if (needsValidation) {
             // Check the collation of all the dependent namespaces before updating the graph.
-            auto collationStatus = _validateCollation_inlock(txn, viewDef, refs);
+            auto collationStatus = _validateCollation_inlock(opCtx, viewDef, refs);
             if (!collationStatus.isOK()) {
                 return collationStatus;
             }
-            return _viewGraph.insertAndValidate(viewDef.name(), refs, pipelineSize);
+            return _viewGraph.insertAndValidate(viewDef, refs, pipelineSize);
         } else {
-            _viewGraph.insertWithoutValidating(viewDef.name(), refs, pipelineSize);
+            _viewGraph.insertWithoutValidating(viewDef, refs, pipelineSize);
             return Status::OK();
         }
     };
@@ -200,7 +218,7 @@ Status ViewCatalog::_upsertIntoGraph(OperationContext* txn, const ViewDefinition
             }
         }
         // Only if the inserts completed without error will we no longer need a refresh.
-        txn->recoveryUnit()->onRollback([this]() { this->_viewGraphNeedsRefresh = true; });
+        opCtx->recoveryUnit()->onRollback([this]() { this->_viewGraphNeedsRefresh = true; });
         _viewGraphNeedsRefresh = false;
     }
 
@@ -211,11 +229,61 @@ Status ViewCatalog::_upsertIntoGraph(OperationContext* txn, const ViewDefinition
     return doInsert(viewDef, true);
 }
 
-Status ViewCatalog::_validateCollation_inlock(OperationContext* txn,
+StatusWith<stdx::unordered_set<NamespaceString>> ViewCatalog::_validatePipeline_inlock(
+    OperationContext* opCtx, const ViewDefinition& viewDef) const {
+    AggregationRequest request(viewDef.viewOn(), viewDef.pipeline());
+    const LiteParsedPipeline liteParsedPipeline(request);
+    const auto involvedNamespaces = liteParsedPipeline.getInvolvedNamespaces();
+
+    // Verify that this is a legitimate pipeline specification by making sure it parses
+    // correctly. In order to parse a pipeline we need to resolve any namespaces involved to a
+    // collection and a pipeline, but in this case we don't need this map to be accurate since
+    // we will not be evaluating the pipeline.
+    StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces;
+    for (auto&& nss : involvedNamespaces) {
+        resolvedNamespaces[nss.coll()] = {nss, {}};
+    }
+    boost::intrusive_ptr<ExpressionContext> expCtx =
+        new ExpressionContext(opCtx,
+                              request,
+                              CollatorInterface::cloneCollator(viewDef.defaultCollator()),
+                              // We can use a stub MongoProcessInterface because we are only parsing
+                              // the Pipeline for validation here. We won't do anything with the
+                              // pipeline that will require a real implementation.
+                              std::make_shared<StubMongoProcessInterface>(),
+                              std::move(resolvedNamespaces),
+                              boost::none);
+
+    // Save this to a variable to avoid reading the atomic variable multiple times.
+    auto currentFCV = serverGlobalParams.featureCompatibility.getVersion();
+
+    // If the feature compatibility version is not 4.0, and we are validating features as master,
+    // ban the use of new agg features introduced in 4.0 to prevent them from being persisted in the
+    // catalog.
+    if (serverGlobalParams.validateFeaturesAsMaster.load() &&
+        currentFCV != ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40) {
+        expCtx->maxFeatureCompatibilityVersion = currentFCV;
+    }
+    auto pipelineStatus = Pipeline::parse(viewDef.pipeline(), std::move(expCtx));
+    if (!pipelineStatus.isOK()) {
+        return pipelineStatus.getStatus();
+    }
+
+    // Validate that the view pipeline does not contain any ineligible stages.
+    auto sources = pipelineStatus.getValue()->getSources();
+    if (!sources.empty() && sources.front()->constraints().isChangeStreamStage()) {
+        return {ErrorCodes::OptionNotSupportedOnView,
+                "$changeStream cannot be used in a view definition"};
+    }
+
+    return std::move(involvedNamespaces);
+}
+
+Status ViewCatalog::_validateCollation_inlock(OperationContext* opCtx,
                                               const ViewDefinition& view,
                                               const std::vector<NamespaceString>& refs) {
     for (auto&& potentialViewNss : refs) {
-        auto otherView = _lookup_inlock(txn, potentialViewNss.ns());
+        auto otherView = _lookup_inlock(opCtx, potentialViewNss.ns());
         if (otherView &&
             !CollatorInterface::collatorsMatch(view.defaultCollator(),
                                                otherView->defaultCollator())) {
@@ -228,26 +296,18 @@ Status ViewCatalog::_validateCollation_inlock(OperationContext* txn,
     return Status::OK();
 }
 
-Status ViewCatalog::createView(OperationContext* txn,
+Status ViewCatalog::createView(OperationContext* opCtx,
                                const NamespaceString& viewName,
                                const NamespaceString& viewOn,
                                const BSONArray& pipeline,
                                const BSONObj& collation) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-    if (serverGlobalParams.featureCompatibility.version.load() ==
-            ServerGlobalParams::FeatureCompatibility::Version::k32 &&
-        serverGlobalParams.featureCompatibility.validateFeaturesAsMaster.load()) {
-        return Status(ErrorCodes::CommandNotSupported,
-                      "Cannot create view when the featureCompatibilityVersion is 3.2. See "
-                      "http://dochub.mongodb.org/core/3.4-feature-compatibility.");
-    }
-
     if (viewName.db() != viewOn.db())
         return Status(ErrorCodes::BadValue,
                       "View must be created on a view or collection in the same database");
 
-    if (_lookup_inlock(txn, StringData(viewName.ns())))
+    if (_lookup_inlock(opCtx, StringData(viewName.ns())))
         return Status(ErrorCodes::NamespaceExists, "Namespace already exists");
 
     if (!NamespaceString::validCollectionName(viewOn.coll()))
@@ -259,33 +319,25 @@ Status ViewCatalog::createView(OperationContext* txn,
             ErrorCodes::InvalidNamespace,
             "View name cannot start with 'system.', which is reserved for system namespaces");
 
-    auto collator = parseCollator(txn, collation);
+    auto collator = parseCollator(opCtx, collation);
     if (!collator.isOK())
         return collator.getStatus();
 
     return _createOrUpdateView_inlock(
-        txn, viewName, viewOn, pipeline, std::move(collator.getValue()));
+        opCtx, viewName, viewOn, pipeline, std::move(collator.getValue()));
 }
 
-Status ViewCatalog::modifyView(OperationContext* txn,
+Status ViewCatalog::modifyView(OperationContext* opCtx,
                                const NamespaceString& viewName,
                                const NamespaceString& viewOn,
                                const BSONArray& pipeline) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
 
-    if (serverGlobalParams.featureCompatibility.version.load() ==
-            ServerGlobalParams::FeatureCompatibility::Version::k32 &&
-        serverGlobalParams.featureCompatibility.validateFeaturesAsMaster.load()) {
-        return Status(ErrorCodes::CommandNotSupported,
-                      "Cannot modify view when the featureCompatibilityVersion is 3.2. See "
-                      "http://dochub.mongodb.org/core/3.4-feature-compatibility.");
-    }
-
     if (viewName.db() != viewOn.db())
         return Status(ErrorCodes::BadValue,
                       "View must be created on a view or collection in the same database");
 
-    auto viewPtr = _lookup_inlock(txn, viewName.ns());
+    auto viewPtr = _lookup_inlock(opCtx, viewName.ns());
     if (!viewPtr)
         return Status(ErrorCodes::NamespaceNotFound,
                       str::stream() << "cannot modify missing view " << viewName.ns());
@@ -295,24 +347,24 @@ Status ViewCatalog::modifyView(OperationContext* txn,
                       str::stream() << "invalid name for 'viewOn': " << viewOn.coll());
 
     ViewDefinition savedDefinition = *viewPtr;
-    txn->recoveryUnit()->onRollback([this, txn, viewName, savedDefinition]() {
+    opCtx->recoveryUnit()->onRollback([this, viewName, savedDefinition]() {
         this->_viewMap[viewName.ns()] = std::make_shared<ViewDefinition>(savedDefinition);
     });
 
     return _createOrUpdateView_inlock(
-        txn,
+        opCtx,
         viewName,
         viewOn,
         pipeline,
         CollatorInterface::cloneCollator(savedDefinition.defaultCollator()));
 }
 
-Status ViewCatalog::dropView(OperationContext* txn, const NamespaceString& viewName) {
+Status ViewCatalog::dropView(OperationContext* opCtx, const NamespaceString& viewName) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    _requireValidCatalog_inlock(txn);
+    _requireValidCatalog_inlock(opCtx);
 
     // Save a copy of the view definition in case we need to roll back.
-    auto viewPtr = _lookup_inlock(txn, viewName.ns());
+    auto viewPtr = _lookup_inlock(opCtx, viewName.ns());
     if (!viewPtr) {
         return {ErrorCodes::NamespaceNotFound,
                 str::stream() << "cannot drop missing view: " << viewName.ns()};
@@ -321,20 +373,22 @@ Status ViewCatalog::dropView(OperationContext* txn, const NamespaceString& viewN
     ViewDefinition savedDefinition = *viewPtr;
 
     invariant(_valid.load());
-    _durable->remove(txn, viewName);
+    _durable->remove(opCtx, viewName);
     _viewGraph.remove(savedDefinition.name());
     _viewMap.erase(viewName.ns());
-    txn->recoveryUnit()->onRollback([this, txn, viewName, savedDefinition]() {
+    opCtx->recoveryUnit()->onRollback([this, viewName, savedDefinition]() {
         this->_viewGraphNeedsRefresh = true;
         this->_viewMap[viewName.ns()] = std::make_shared<ViewDefinition>(savedDefinition);
     });
 
     // We may get invalidated, but we're exclusively locked, so the change must be ours.
-    txn->recoveryUnit()->onCommit([this]() { this->_valid.store(true); });
+    opCtx->recoveryUnit()->onCommit(
+        [this](boost::optional<Timestamp>) { this->_valid.store(true); });
     return Status::OK();
 }
 
-std::shared_ptr<ViewDefinition> ViewCatalog::_lookup_inlock(OperationContext* txn, StringData ns) {
+std::shared_ptr<ViewDefinition> ViewCatalog::_lookup_inlock(OperationContext* opCtx,
+                                                            StringData ns) {
     // We expect the catalog to be valid, so short-circuit other checks for best performance.
     if (MONGO_unlikely(!_valid.load())) {
         // If the catalog is invalid, we want to avoid references to virtualized or other invalid
@@ -342,11 +396,11 @@ std::shared_ptr<ViewDefinition> ViewCatalog::_lookup_inlock(OperationContext* tx
         // invalid view definitions.
         if (!NamespaceString::validCollectionName(ns))
             return nullptr;
-        Status status = _reloadIfNeeded_inlock(txn);
+        Status status = _reloadIfNeeded_inlock(opCtx);
         // In case of errors we've already logged a message. Only uassert if there actually is
         // a user connection, as otherwise we'd crash the server. The catalog will remain invalid,
         // and any views after the first invalid one are ignored.
-        if (txn->getClient()->isFromUserConnection())
+        if (opCtx->getClient()->isFromUserConnection())
             uassertStatusOK(status);
     }
 
@@ -357,47 +411,86 @@ std::shared_ptr<ViewDefinition> ViewCatalog::_lookup_inlock(OperationContext* tx
     return nullptr;
 }
 
-std::shared_ptr<ViewDefinition> ViewCatalog::lookup(OperationContext* txn, StringData ns) {
+std::shared_ptr<ViewDefinition> ViewCatalog::lookup(OperationContext* opCtx, StringData ns) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return _lookup_inlock(txn, ns);
+    return _lookup_inlock(opCtx, ns);
 }
 
-StatusWith<ResolvedView> ViewCatalog::resolveView(OperationContext* txn,
+StatusWith<ResolvedView> ViewCatalog::resolveView(OperationContext* opCtx,
                                                   const NamespaceString& nss) {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    const NamespaceString* resolvedNss = &nss;
-    std::vector<BSONObj> resolvedPipeline;
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
 
-    for (int i = 0; i < ViewGraph::kMaxViewDepth; i++) {
-        auto view = _lookup_inlock(txn, resolvedNss->ns());
-        if (!view) {
-            // Return error status if pipeline is too large.
-            int pipelineSize = 0;
-            for (auto obj : resolvedPipeline) {
-                pipelineSize += obj.objsize();
+    // Keep looping until the resolution completes. If the catalog is invalidated during the
+    // resolution, we start over from the beginning.
+    while (true) {
+        // Points to the name of the most resolved namespace.
+        const NamespaceString* resolvedNss = &nss;
+
+        // Holds the combination of all the resolved views.
+        std::vector<BSONObj> resolvedPipeline;
+
+        // If the catalog has not been tampered with, all views seen during the resolution will have
+        // the same collation. As an optimization, we fill out the collation spec only once.
+        boost::optional<BSONObj> collation;
+
+        // The last seen view definition, which owns the NamespaceString pointed to by
+        // 'resolvedNss'.
+        std::shared_ptr<ViewDefinition> lastViewDefinition;
+
+        int depth = 0;
+        for (; depth < ViewGraph::kMaxViewDepth; depth++) {
+            while (MONGO_FAIL_POINT(hangDuringViewResolution)) {
+                log() << "Yielding mutex and hanging due to 'hangDuringViewResolution' failpoint";
+                lock.unlock();
+                sleepmillis(1000);
+                lock.lock();
             }
-            if (pipelineSize > ViewGraph::kMaxViewPipelineSizeBytes) {
-                return {ErrorCodes::ViewPipelineMaxSizeExceeded,
-                        str::stream() << "View pipeline exceeds maximum size; maximum size is "
-                                      << ViewGraph::kMaxViewPipelineSizeBytes};
+
+            // If the catalog has been invalidated, bail and restart.
+            if (!_valid.load()) {
+                uassertStatusOK(_reloadIfNeeded_inlock(opCtx));
+                break;
             }
-            return StatusWith<ResolvedView>({*resolvedNss, resolvedPipeline});
+
+            auto view = _lookup_inlock(opCtx, resolvedNss->ns());
+            if (!view) {
+                // Return error status if pipeline is too large.
+                int pipelineSize = 0;
+                for (auto obj : resolvedPipeline) {
+                    pipelineSize += obj.objsize();
+                }
+                if (pipelineSize > ViewGraph::kMaxViewPipelineSizeBytes) {
+                    return {ErrorCodes::ViewPipelineMaxSizeExceeded,
+                            str::stream() << "View pipeline exceeds maximum size; maximum size is "
+                                          << ViewGraph::kMaxViewPipelineSizeBytes};
+                }
+                return StatusWith<ResolvedView>(
+                    {*resolvedNss, std::move(resolvedPipeline), std::move(collation.get())});
+            }
+
+            resolvedNss = &view->viewOn();
+            if (!collation) {
+                collation = view->defaultCollator() ? view->defaultCollator()->getSpec().toBSON()
+                                                    : CollationSpec::kSimpleSpec;
+            }
+
+            // Prepend the underlying view's pipeline to the current working pipeline.
+            const std::vector<BSONObj>& toPrepend = view->pipeline();
+            resolvedPipeline.insert(resolvedPipeline.begin(), toPrepend.begin(), toPrepend.end());
+
+            // If the first stage is a $collStats, then we return early with the viewOn namespace.
+            if (toPrepend.size() > 0 && !toPrepend[0]["$collStats"].eoo()) {
+                return StatusWith<ResolvedView>(
+                    {*resolvedNss, std::move(resolvedPipeline), std::move(collation.get())});
+            }
         }
 
-        resolvedNss = &(view->viewOn());
-
-        // Prepend the underlying view's pipeline to the current working pipeline.
-        const std::vector<BSONObj>& toPrepend = view->pipeline();
-        resolvedPipeline.insert(resolvedPipeline.begin(), toPrepend.begin(), toPrepend.end());
-
-        // If the first stage is a $collStats, then we return early with the viewOn namespace.
-        if (toPrepend.size() > 0 && !toPrepend[0]["$collStats"].eoo()) {
-            return StatusWith<ResolvedView>({*resolvedNss, resolvedPipeline});
+        if (depth >= ViewGraph::kMaxViewDepth) {
+            return {ErrorCodes::ViewDepthLimitExceeded,
+                    str::stream() << "View depth too deep or view cycle detected; maximum depth is "
+                                  << ViewGraph::kMaxViewDepth};
         }
-    }
-
-    return {ErrorCodes::ViewDepthLimitExceeded,
-            str::stream() << "View depth too deep or view cycle detected; maximum depth is "
-                          << ViewGraph::kMaxViewDepth};
+    };
+    MONGO_UNREACHABLE;
 }
 }  // namespace mongo

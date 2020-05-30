@@ -33,15 +33,14 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/repl/bgsync.h"
+#include "mongo/db/repl/oplog_applier.h"
 #include "mongo/db/repl/replication_coordinator_external_state.h"
-#include "mongo/db/repl/rs_sync.h"
 #include "mongo/db/repl/sync_source_feedback.h"
-#include "mongo/db/repl/sync_tail.h"
 #include "mongo/db/repl/task_runner.h"
 #include "mongo/db/storage/journal_listener.h"
 #include "mongo/db/storage/snapshot_manager.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
+#include "mongo/util/concurrency/thread_pool.h"
 
 namespace mongo {
 class ServiceContext;
@@ -51,7 +50,8 @@ namespace {
 using UniqueLock = stdx::unique_lock<stdx::mutex>;
 }  // namespace
 
-class SnapshotThread;
+class DropPendingCollectionReaper;
+class ReplicationProcess;
 class StorageInterface;
 class NoopWriter;
 
@@ -60,61 +60,53 @@ class ReplicationCoordinatorExternalStateImpl final : public ReplicationCoordina
     MONGO_DISALLOW_COPYING(ReplicationCoordinatorExternalStateImpl);
 
 public:
-    ReplicationCoordinatorExternalStateImpl(StorageInterface* storageInterface);
+    ReplicationCoordinatorExternalStateImpl(
+        ServiceContext* service,
+        DropPendingCollectionReaper* dropPendingCollectionReaper,
+        StorageInterface* storageInterface,
+        ReplicationProcess* replicationProcess);
     virtual ~ReplicationCoordinatorExternalStateImpl();
     virtual void startThreads(const ReplSettings& settings) override;
-    virtual void startInitialSync(OnInitialSyncFinishedFn finished) override;
-    virtual void startSteadyStateReplication(OperationContext* txn,
+    virtual void startSteadyStateReplication(OperationContext* opCtx,
                                              ReplicationCoordinator* replCoord) override;
-    virtual void stopDataReplication(OperationContext* txn) override;
-    virtual void runOnInitialSyncThread(stdx::function<void(OperationContext* txn)> run) override;
+    virtual void stopDataReplication(OperationContext* opCtx) override;
 
-    virtual bool isInitialSyncFlagSet(OperationContext* txn) override;
+    virtual bool isInitialSyncFlagSet(OperationContext* opCtx) override;
 
-    virtual void startMasterSlave(OperationContext* txn);
-    virtual void shutdown(OperationContext* txn);
+    virtual void shutdown(OperationContext* opCtx);
     virtual executor::TaskExecutor* getTaskExecutor() const override;
-    virtual OldThreadPool* getDbWorkThreadPool() const override;
-    virtual Status runRepairOnLocalDB(OperationContext* txn) override;
-    virtual Status initializeReplSetStorage(OperationContext* txn, const BSONObj& config);
-    void onDrainComplete(OperationContext* txn) override;
-    OpTime onTransitionToPrimary(OperationContext* txn, bool isV1ElectionProtocol) override;
+    virtual ThreadPool* getDbWorkThreadPool() const override;
+    virtual Status runRepairOnLocalDB(OperationContext* opCtx) override;
+    virtual Status initializeReplSetStorage(OperationContext* opCtx, const BSONObj& config);
+    void onDrainComplete(OperationContext* opCtx) override;
+    OpTime onTransitionToPrimary(OperationContext* opCtx, bool isV1ElectionProtocol) override;
     virtual void forwardSlaveProgress();
-    virtual OID ensureMe(OperationContext* txn);
-    virtual bool isSelf(const HostAndPort& host, ServiceContext* ctx);
-    virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* txn);
-    virtual Status storeLocalConfigDocument(OperationContext* txn, const BSONObj& config);
-    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* txn);
-    virtual Status storeLocalLastVoteDocument(OperationContext* txn, const LastVote& lastVote);
-    virtual void setGlobalTimestamp(const Timestamp& newTime);
-    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* txn);
-    virtual void cleanUpLastApplyBatch(OperationContext* txn);
-    virtual HostAndPort getClientHostAndPort(const OperationContext* txn);
+    virtual bool isSelf(const HostAndPort& host, ServiceContext* service);
+    virtual StatusWith<BSONObj> loadLocalConfigDocument(OperationContext* opCtx);
+    virtual Status storeLocalConfigDocument(OperationContext* opCtx, const BSONObj& config);
+    virtual StatusWith<LastVote> loadLocalLastVoteDocument(OperationContext* opCtx);
+    virtual Status storeLocalLastVoteDocument(OperationContext* opCtx, const LastVote& lastVote);
+    virtual void setGlobalTimestamp(ServiceContext* service, const Timestamp& newTime);
+    bool oplogExists(OperationContext* opCtx) final;
+    virtual StatusWith<OpTime> loadLastOpTime(OperationContext* opCtx);
+    virtual HostAndPort getClientHostAndPort(const OperationContext* opCtx);
     virtual void closeConnections();
-    virtual void killAllUserOperations(OperationContext* txn);
+    virtual void killAllUserOperations(OperationContext* opCtx);
     virtual void shardingOnStepDownHook();
     virtual void signalApplierToChooseNewSyncSource();
-    virtual void signalApplierToCancelFetcher();
+    virtual void stopProducer();
+    virtual void startProducerIfStopped();
     void dropAllSnapshots() final;
-    void updateCommittedSnapshot(SnapshotName newCommitPoint) final;
-    void forceSnapshotCreation() final;
+    void updateCommittedSnapshot(const OpTime& newCommitPoint) final;
+    void updateLocalSnapshot(const OpTime& optime) final;
     virtual bool snapshotsEnabled() const;
-    virtual void notifyOplogMetadataWaiters();
+    virtual void notifyOplogMetadataWaiters(const OpTime& committedOpTime);
+    boost::optional<OpTime> getEarliestDropPendingOpTime() const final;
     virtual double getElectionTimeoutOffsetLimitFraction() const;
-    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* txn) const;
-    virtual StatusWith<OpTime> multiApply(OperationContext* txn,
-                                          MultiApplier::Operations ops,
-                                          MultiApplier::ApplyOperationFn applyOperation) override;
-    virtual Status multiSyncApply(MultiApplier::OperationPtrs* ops) override;
-    virtual Status multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                         const HostAndPort& source,
-                                         AtomicUInt32* fetchCount) override;
-    virtual std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(
-        OperationContext* txn) const override;
-    virtual std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(
-        OperationContext* txn) const override;
-    virtual bool shouldUseDataReplicatorInitialSync() const override;
-    virtual std::size_t getOplogFetcherMaxFetcherRestarts() const override;
+    virtual bool isReadCommittedSupportedByStorageEngine(OperationContext* opCtx) const;
+    virtual bool isReadConcernSnapshotSupportedByStorageEngine(OperationContext* opCtx) const;
+    virtual std::size_t getOplogFetcherSteadyStateMaxFetcherRestarts() const override;
+    virtual std::size_t getOplogFetcherInitialSyncMaxFetcherRestarts() const override;
 
     // Methods from JournalListener.
     virtual JournalListener::Token getToken();
@@ -128,7 +120,7 @@ private:
     /**
      * Stops data replication and returns with 'lock' locked.
      */
-    void _stopDataReplication_inlock(OperationContext* txn, UniqueLock* lock);
+    void _stopDataReplication_inlock(OperationContext* opCtx, UniqueLock* lock);
 
     /**
      * Called when the instance transitions to primary in order to notify a potentially sharded host
@@ -136,15 +128,17 @@ private:
      *
      * Throws on errors.
      */
-    void _shardingOnTransitionToPrimaryHook(OperationContext* txn);
+    void _shardingOnTransitionToPrimaryHook(OperationContext* opCtx);
 
     /**
     * Drops all temporary collections on all databases except "local".
     *
     * The implementation may assume that the caller has acquired the global exclusive lock
-    * for "txn".
+    * for "opCtx".
     */
-    void _dropAllTempCollections(OperationContext* txn);
+    void _dropAllTempCollections(OperationContext* opCtx);
+
+    ServiceContext* _service;
 
     // Guards starting threads and setting _startedThreads
     stdx::mutex _threadMutex;
@@ -153,14 +147,29 @@ private:
     bool _stoppingDataReplication = false;
     stdx::condition_variable _dataReplicationStopped;
 
+    // Used to clean up drop-pending collections with drop optimes before the current replica set
+    // committed OpTime.
+    DropPendingCollectionReaper* _dropPendingCollectionReaper;
+
     StorageInterface* _storageInterface;
+
+    ReplicationProcess* _replicationProcess;
+
     // True when the threads have been started
     bool _startedThreads = false;
+
+    // Set to true when we are in the process of shutting down replication.
+    bool _inShutdown = false;
 
     // The SyncSourceFeedback class is responsible for sending replSetUpdatePosition commands
     // for forwarding replication progress information upstream when there is chained
     // replication.
     SyncSourceFeedback _syncSourceFeedback;
+
+    // The OplogBuffer is used to hold operations read from the sync source.
+    // BackgroundSync adds operations to the OplogBuffer while the applier thread consumes these
+    // operations in batches during oplog application.
+    std::unique_ptr<OplogBuffer> _oplogBuffer;
 
     // The BackgroundSync class is responsible for pulling ops off the network from the sync source
     // and into a BlockingQueue.
@@ -172,27 +181,24 @@ private:
     // Thread running SyncSourceFeedback::run().
     std::unique_ptr<stdx::thread> _syncSourceFeedbackThread;
 
-    // Thread running runSyncThread().
-    std::unique_ptr<RSDataSync> _applierThread;
+    // Thread running oplog application.
+    std::unique_ptr<executor::TaskExecutor> _oplogApplierTaskExecutor;
+    std::unique_ptr<OplogApplier> _oplogApplier;
+    Future<void> _oplogApplierShutdownFuture;
 
     // Mutex guarding the _nextThreadId value to prevent concurrent incrementing.
     stdx::mutex _nextThreadIdMutex;
     // Number used to uniquely name threads.
     long long _nextThreadId = 0;
 
-    std::unique_ptr<SnapshotThread> _snapshotThread;
-
-    // Initial sync stuff
-    StartInitialSyncFn _startInitialSyncIfNeededFn;
-    StartSteadyReplicationFn _startSteadReplicationFn;
-    OldThreadPool _initialSyncThreadPool;
-    TaskRunner _initialSyncRunner;
-
     // Task executor used to run replication tasks.
     std::unique_ptr<executor::TaskExecutor> _taskExecutor;
 
     // Used by repl::multiApply() to apply the sync source's operations in parallel.
-    std::unique_ptr<OldThreadPool> _writerPool;
+    // Also used by database and collection cloners to perform storage operations.
+    // Cloners and oplog application run in separate phases of initial sync so it is fine to share
+    // this thread pool.
+    std::unique_ptr<ThreadPool> _writerPool;
 
     // Writes a noop every 10 seconds.
     std::unique_ptr<NoopWriter> _noopWriter;

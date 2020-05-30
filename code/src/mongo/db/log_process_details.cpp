@@ -34,10 +34,12 @@
 
 #include "mongo/db/log_process_details.h"
 
+#include "mongo/db/repl/repl_set_config.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/server_options_helpers.h"
+#include "mongo/db/server_options_server_helpers.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/ssl_manager.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/version.h"
 
@@ -51,13 +53,27 @@ void logProcessDetails() {
     auto&& vii = VersionInfoInterface::instance();
     log() << mongodVersion(vii);
     vii.logBuildInfo();
+
     printCommandLineOpts();
 }
 
-void logProcessDetailsForLogRotate() {
+void logProcessDetailsForLogRotate(ServiceContext* serviceContext) {
     log() << "pid=" << ProcessId::getCurrent() << " port=" << serverGlobalParams.port
           << (is32bit() ? " 32" : " 64") << "-bit "
           << "host=" << getHostNameCached();
+
+    auto replCoord = repl::ReplicationCoordinator::get(serviceContext);
+    if (replCoord != nullptr &&
+        replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet) {
+        auto rsConfig = replCoord->getConfig();
+
+        if (rsConfig.isInitialized()) {
+            log() << "Replica Set Config: " << rsConfig.toBSON();
+            log() << "Replica Set Member State: " << (replCoord->getMemberState()).toString();
+        } else {
+            log() << "Node currently has no Replica Set Config.";
+        }
+    }
 
     logProcessDetails();
 }

@@ -53,7 +53,7 @@ namespace mongo {
 using std::string;
 using std::stringstream;
 
-class TouchCmd : public Command {
+class TouchCmd : public ErrmsgCommandDeprecated {
 public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -61,34 +61,33 @@ public:
     virtual bool adminOnly() const {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool maintenanceMode() const {
         return true;
     }
-    virtual void help(stringstream& help) const {
-        help << "touch collection\n"
-                "Page in all pages of memory containing every extent for the given collection\n"
-                "{ touch : <collection_name>, [data : true] , [index : true] }\n"
-                " at least one of data or index must be true; default is both are false\n";
+    std::string help() const override {
+        return "touch collection\n"
+               "Page in all pages of memory containing every extent for the given collection\n"
+               "{ touch : <collection_name>, [data : true] , [index : true] }\n"
+               " at least one of data or index must be true; default is both are false\n";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::touch);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    TouchCmd() : Command("touch") {}
+    TouchCmd() : ErrmsgCommandDeprecated("touch") {}
 
-    virtual bool run(OperationContext* txn,
-                     const string& dbname,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
-        const NamespaceString nss = parseNsCollectionRequired(dbname, cmdObj);
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
+        const NamespaceString nss = CommandHelpers::parseNsCollectionRequired(dbname, cmdObj);
         if (!nss.isNormal()) {
             errmsg = "bad namespace name";
             return false;
@@ -102,7 +101,7 @@ public:
             return false;
         }
 
-        AutoGetCollectionForRead context(txn, nss);
+        AutoGetCollectionForReadCommand context(opCtx, nss);
 
         Collection* collection = context.getCollection();
         if (!collection) {
@@ -110,8 +109,8 @@ public:
             return false;
         }
 
-        return appendCommandStatus(result,
-                                   collection->touch(txn, touch_data, touch_indexes, &result));
+        uassertStatusOK(collection->touch(opCtx, touch_data, touch_indexes, &result));
+        return true;
     }
 };
 static TouchCmd touchCmd;

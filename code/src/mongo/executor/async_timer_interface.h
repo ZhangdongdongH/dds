@@ -30,8 +30,6 @@
 
 #include <system_error>
 
-#include <asio.hpp>
-
 #include "mongo/base/disallow_copying.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/time_support.h"
@@ -68,6 +66,12 @@ public:
      */
     virtual void asyncWait(Handler handler) = 0;
 
+    /**
+     * Reset this timer's expiry time relative to now. Any pending asyncWait operations
+     * will be canceled, and their handlers will be invoked with an error code.
+     */
+    virtual void expireAfter(Milliseconds expiration) = 0;
+
 protected:
     AsyncTimerInterface() = default;
 };
@@ -81,8 +85,7 @@ class AsyncTimerFactoryInterface {
 public:
     virtual ~AsyncTimerFactoryInterface() = default;
 
-    virtual std::unique_ptr<AsyncTimerInterface> make(asio::io_service::strand* strand,
-                                                      Milliseconds expiration) = 0;
+    virtual std::unique_ptr<AsyncTimerInterface> make(Milliseconds expiration) = 0;
 
     virtual Date_t now() = 0;
 

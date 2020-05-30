@@ -31,6 +31,7 @@
 #include "mongo/db/geo/geoconstants.h"
 #include "mongo/db/geo/geoparser.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace mongo {
 
@@ -422,10 +423,11 @@ bool containsLine(const S2Polygon& poly, const S2Polyline& otherLine) {
     // Kind of a mess.  We get a function for clipping the line to the
     // polygon.  We do this and make sure the line is the same as the
     // line we're clipping against.
-    OwnedPointerVector<S2Polyline> clippedOwned;
-    vector<S2Polyline*>& clipped = clippedOwned.mutableVector();
+    std::vector<S2Polyline*> clipped;
 
     poly.IntersectWithPolyline(&otherLine, &clipped);
+    const std::vector<std::unique_ptr<S2Polyline>> clippedOwned =
+        transitional_tools_do_not_use::spool_vector(clipped);
     if (1 != clipped.size()) {
         return false;
     }
@@ -444,6 +446,17 @@ bool GeometryContainer::contains(const S2Polyline& otherLine) const {
 
     if (NULL != _polygon && NULL != _polygon->bigPolygon) {
         return _polygon->bigPolygon->Contains(otherLine);
+    }
+
+    if (NULL != _cap && (_cap->crs == SPHERE)) {
+        // If the radian distance of a line to the centroid of the complement spherical cap is less
+        // than the arc radian of the complement cap, then the line is not within the spherical cap.
+        S2Cap complementSphere = _cap->cap.Complement();
+        if (S2Distance::minDistanceRad(complementSphere.axis(), otherLine) <
+            complementSphere.angle().radians()) {
+            return false;
+        }
+        return true;
     }
 
     if (NULL != _multiPolygon) {
@@ -489,6 +502,18 @@ bool GeometryContainer::contains(const S2Polygon& otherPolygon) const {
 
     if (NULL != _polygon && NULL != _polygon->bigPolygon) {
         return _polygon->bigPolygon->Contains(otherPolygon);
+    }
+
+    if (NULL != _cap && (_cap->crs == SPHERE)) {
+        // If the radian distance of a polygon to the centroid of the complement spherical cap is
+        // less than the arc radian of the complement cap, then the polygon is not within the
+        // spherical cap.
+        S2Cap complementSphere = _cap->cap.Complement();
+        if (S2Distance::minDistanceRad(complementSphere.axis(), otherPolygon) <
+            complementSphere.angle().radians()) {
+            return false;
+        }
+        return true;
     }
 
     if (NULL != _multiPolygon) {
@@ -933,7 +958,7 @@ Status GeometryContainer::parseFromGeoJSON(const BSONObj& obj, bool skipValidati
         }
     } else {
         // Should not reach here.
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     // Check parsing result.
@@ -1064,7 +1089,7 @@ string GeometryContainer::getDebugType() const {
     } else if (NULL != _geometryCollection) {
         return "gc";
     } else {
-        invariant(false);
+        MONGO_UNREACHABLE;
         return "";
     }
 }
@@ -1091,7 +1116,7 @@ CRS GeometryContainer::getNativeCRS() const {
     } else if (NULL != _geometryCollection) {
         return SPHERE;
     } else {
-        invariant(false);
+        MONGO_UNREACHABLE;
         return FLAT;
     }
 }

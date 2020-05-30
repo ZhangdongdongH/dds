@@ -33,7 +33,6 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/metadata.h"
-#include "mongo/rpc/request_interface.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -45,10 +44,10 @@ namespace executor {
  */
 struct RemoteCommandRequest {
     // Indicates that there is no timeout for the request to complete
-    static const Milliseconds kNoTimeout;
+    static constexpr Milliseconds kNoTimeout{-1};
 
     // Indicates that there is no expiration time by when the request needs to complete
-    static const Date_t kNoExpirationDate;
+    static constexpr Date_t kNoExpirationDate{Date_t::max()};
 
     // Type to represent the internal id of this request
     typedef uint64_t RequestId;
@@ -60,34 +59,23 @@ struct RemoteCommandRequest {
                          const std::string& theDbName,
                          const BSONObj& theCmdObj,
                          const BSONObj& metadataObj,
-                         OperationContext* txn,
+                         OperationContext* opCtx,
                          Milliseconds timeoutMillis);
 
     RemoteCommandRequest(const HostAndPort& theTarget,
                          const std::string& theDbName,
                          const BSONObj& theCmdObj,
                          const BSONObj& metadataObj,
-                         OperationContext* txn,
+                         OperationContext* opCtx,
                          Milliseconds timeoutMillis = kNoTimeout);
 
     RemoteCommandRequest(const HostAndPort& theTarget,
                          const std::string& theDbName,
                          const BSONObj& theCmdObj,
-                         OperationContext* txn,
+                         OperationContext* opCtx,
                          Milliseconds timeoutMillis = kNoTimeout)
         : RemoteCommandRequest(
-              theTarget, theDbName, theCmdObj, rpc::makeEmptyMetadata(), txn, timeoutMillis) {}
-
-    RemoteCommandRequest(const HostAndPort& theTarget,
-                         const rpc::RequestInterface& request,
-                         OperationContext* txn,
-                         Milliseconds timeoutMillis = kNoTimeout)
-        : RemoteCommandRequest(theTarget,
-                               request.getDatabase().toString(),
-                               request.getCommandArgs(),
-                               request.getMetadata(),
-                               txn,
-                               timeoutMillis) {}
+              theTarget, theDbName, theCmdObj, rpc::makeEmptyMetadata(), opCtx, timeoutMillis) {}
 
     std::string toString() const;
 
@@ -109,7 +97,7 @@ struct RemoteCommandRequest {
     // NetworkInterfaces that do user work (i.e. reads, and writes) so that audit and client
     // metadata is propagated. It is allowed to be null if used on NetworkInterfaces without
     // metadata attachment (i.e., replication).
-    OperationContext* txn{nullptr};
+    OperationContext* opCtx{nullptr};
 
     Milliseconds timeout = kNoTimeout;
 
@@ -117,8 +105,7 @@ struct RemoteCommandRequest {
     Date_t expirationDate = kNoExpirationDate;
 };
 
+std::ostream& operator<<(std::ostream& os, const RemoteCommandRequest& response);
+
 }  // namespace executor
-
-std::ostream& operator<<(std::ostream& os, const executor::RemoteCommandRequest& response);
-
 }  // namespace mongo

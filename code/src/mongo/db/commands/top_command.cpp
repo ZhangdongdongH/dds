@@ -42,12 +42,12 @@ namespace {
 
 using namespace mongo;
 
-class TopCommand : public Command {
+class TopCommand : public BasicCommand {
 public:
-    TopCommand() : Command("top", true) {}
+    TopCommand() : BasicCommand("top") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool adminOnly() const {
         return true;
@@ -55,26 +55,24 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual void help(std::stringstream& help) const {
-        help << "usage by collection, in micros ";
+    std::string help() const override {
+        return "usage by collection, in micros ";
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::top);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& db,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         {
             BSONObjBuilder b(result.subobjStart("totals"));
             b.append("note", "all times in microseconds");
-            Top::get(txn->getClient()->getServiceContext()).append(b);
+            Top::get(opCtx->getClient()->getServiceContext()).append(b);
             b.done();
         }
         return true;

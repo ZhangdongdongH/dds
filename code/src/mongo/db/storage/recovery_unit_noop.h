@@ -43,7 +43,7 @@ public:
     void commitUnitOfWork() final {
         for (auto& change : _changes) {
             try {
-                change->commit();
+                change->commit(boost::none);
             } catch (...) {
                 std::terminate();
             }
@@ -79,6 +79,8 @@ public:
     virtual SnapshotId getSnapshotId() const {
         return SnapshotId();
     }
+
+    virtual void setOrderedCommit(bool orderedCommit) {}
 
 private:
     std::vector<std::unique_ptr<Change>> _changes;

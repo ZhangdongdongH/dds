@@ -53,19 +53,6 @@ AM_CONDITIONAL([HAVE_BUILTIN_EXTENSION_ZSTD],
     [test "$wt_cv_with_builtin_extension_zstd" = "yes"])
 AC_MSG_RESULT($with_builtins)
 
-AH_TEMPLATE(
-    HAVE_CRC32_HARDWARE, [Define to 1 to configure CRC32 hardware support.])
-AC_MSG_CHECKING(if --enable-crc32-hardware option specified)
-AC_ARG_ENABLE(crc32-hardware,
-	AC_HELP_STRING([--enable-crc32-hardware],
-	    [Enable CRC32 hardware support.]), r=$enableval, r=yes)
-case "$r" in
-no)	wt_cv_enable_crc32_hardware=no;;
-*)	AC_DEFINE(HAVE_CRC32_HARDWARE)
-	wt_cv_enable_crc32_hardware=yes;;
-esac
-AC_MSG_RESULT($wt_cv_enable_crc32_hardware)
-
 AH_TEMPLATE(HAVE_DIAGNOSTIC, [Define to 1 for diagnostic tests.])
 AC_MSG_CHECKING(if --enable-diagnostic option specified)
 AC_ARG_ENABLE(diagnostic,
@@ -244,17 +231,14 @@ no)	wt_cv_enable_strict=no;;
 esac
 AC_MSG_RESULT($wt_cv_enable_strict)
 
-AH_TEMPLATE(HAVE_VERBOSE, [Enable verbose message configuration.])
-AC_MSG_CHECKING(if --enable-verbose option specified)
-AC_ARG_ENABLE(verbose,
-	[AS_HELP_STRING([--enable-verbose],
-	    [Enable verbose message configuration.])], r=$enableval, r=no)
-case "$r" in
-no)	wt_cv_enable_verbose=no;;
-*)	AC_DEFINE(HAVE_VERBOSE)
-	wt_cv_enable_verbose=yes;;
-esac
-AC_MSG_RESULT($wt_cv_enable_verbose)
+AC_MSG_CHECKING(if --with-timestamp-size option specified)
+AC_ARG_WITH(timestamp-size,
+	[AS_HELP_STRING([--with-timestamp-size=NUM],
+	    [Size of transaction timestamps in bytes, default 8.])],
+	    [with_timestamp_size=$withval],
+	    [with_timestamp_size=8])
+AC_MSG_RESULT($with_timestamp_size)
+AC_DEFINE_UNQUOTED(WT_TIMESTAMP_SIZE, [$with_timestamp_size], [Size of a transaction timestamp in bytes])
 
 AC_MSG_CHECKING(if --enable-zlib option specified)
 AC_ARG_ENABLE(zlib,

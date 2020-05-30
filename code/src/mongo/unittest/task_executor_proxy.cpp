@@ -57,8 +57,8 @@ void TaskExecutorProxy::join() {
     _executor->join();
 }
 
-std::string TaskExecutorProxy::getDiagnosticString() const {
-    return _executor->getDiagnosticString();
+void TaskExecutorProxy::appendDiagnosticBSON(mongo::BSONObjBuilder* builder) const {
+    _executor->appendDiagnosticBSON(builder);
 }
 
 Date_t TaskExecutorProxy::now() {
@@ -82,6 +82,12 @@ void TaskExecutorProxy::waitForEvent(const EventHandle& event) {
     _executor->waitForEvent(event);
 }
 
+StatusWith<stdx::cv_status> TaskExecutorProxy::waitForEvent(OperationContext* opCtx,
+                                                            const EventHandle& event,
+                                                            Date_t deadline) {
+    return _executor->waitForEvent(opCtx, event, deadline);
+}
+
 StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorProxy::scheduleWork(
     const CallbackFn& work) {
     return _executor->scheduleWork(work);
@@ -93,8 +99,10 @@ StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorProxy::scheduleWo
 }
 
 StatusWith<executor::TaskExecutor::CallbackHandle> TaskExecutorProxy::scheduleRemoteCommand(
-    const executor::RemoteCommandRequest& request, const RemoteCommandCallbackFn& cb) {
-    return _executor->scheduleRemoteCommand(request, cb);
+    const executor::RemoteCommandRequest& request,
+    const RemoteCommandCallbackFn& cb,
+    const transport::BatonHandle& baton) {
+    return _executor->scheduleRemoteCommand(request, cb, baton);
 }
 
 void TaskExecutorProxy::cancel(const CallbackHandle& cbHandle) {

@@ -40,7 +40,7 @@
 #include "mongo/db/exec/write_stage_common.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/query/canonical_query.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
@@ -71,12 +71,12 @@ bool shouldRestartDeleteIfNoLongerMatches(const DeleteStageParams& params) {
 // static
 const char* DeleteStage::kStageType = "DELETE";
 
-DeleteStage::DeleteStage(OperationContext* txn,
+DeleteStage::DeleteStage(OperationContext* opCtx,
                          const DeleteStageParams& params,
                          WorkingSet* ws,
                          Collection* collection,
                          PlanStage* child)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _params(params),
       _ws(ws),
       _collection(collection),
@@ -130,15 +130,10 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
 
             case PlanStage::FAILURE:
             case PlanStage::DEAD:
+                // The stage which produces a failure is responsible for allocating a working set
+                // member with error details.
+                invariant(WorkingSet::INVALID_ID != id);
                 *out = id;
-
-                // If a stage fails, it may create a status WSM to indicate why it failed, in which
-                // case 'id' is valid.  If ID is invalid, we create our own error message.
-                if (WorkingSet::INVALID_ID == id) {
-                    const std::string errmsg = "delete stage failed to read in results from child";
-                    *out = WorkingSetCommon::allocateStatusMember(
-                        _ws, Status(ErrorCodes::InternalError, errmsg));
-                }
                 return status;
 
             case PlanStage::NEED_TIME:
@@ -177,7 +172,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     try {
         docStillMatches = write_stage_common::ensureStillMatches(
             _collection, getOpCtx(), _ws, id, _params.canonicalQuery);
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         // There was a problem trying to detect if the document still exists, so retry.
         memberFreer.Dismiss();
         return prepareToRetryWSM(id, out);
@@ -207,7 +202,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     WorkingSetCommon::prepareForSnapshotChange(_ws);
     try {
         child()->saveState();
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         std::terminate();
     }
 
@@ -215,9 +210,16 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     if (!_params.isExplain) {
         try {
             WriteUnitOfWork wunit(getOpCtx());
-            _collection->deleteDocument(getOpCtx(), recordId, _params.opDebug, _params.fromMigrate);
+            _collection->deleteDocument(getOpCtx(),
+                                        _params.stmtId,
+                                        recordId,
+                                        _params.opDebug,
+                                        _params.fromMigrate,
+                                        false,
+                                        _params.returnDeleted ? Collection::StoreDeletedDoc::On
+                                                              : Collection::StoreDeletedDoc::Off);
             wunit.commit();
-        } catch (const WriteConflictException& wce) {
+        } catch (const WriteConflictException&) {
             memberFreer.Dismiss();  // Keep this member around so we can retry deleting it.
             return prepareToRetryWSM(id, out);
         }
@@ -236,7 +238,7 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
     // outside of the WriteUnitOfWork.
     try {
         child()->restoreState();
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         // Note we don't need to retry anything in this case since the delete already was committed.
         // However, we still need to return the deleted document (if it was requested).
         if (_params.returnDeleted) {
@@ -266,10 +268,10 @@ PlanStage::StageState DeleteStage::doWork(WorkingSetID* out) {
 void DeleteStage::doRestoreState() {
     invariant(_collection);
     const NamespaceString& ns(_collection->ns());
-    uassert(28537,
+    uassert(ErrorCodes::PrimarySteppedDown,
             str::stream() << "Demoted from primary while removing from " << ns.ns(),
             !getOpCtx()->writesAreReplicated() ||
-                repl::getGlobalReplicationCoordinator()->canAcceptWritesFor(ns));
+                repl::ReplicationCoordinator::get(getOpCtx())->canAcceptWritesFor(getOpCtx(), ns));
 }
 
 unique_ptr<PlanStageStats> DeleteStage::getStats() {

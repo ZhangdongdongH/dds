@@ -32,8 +32,8 @@
 
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/platform/random.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -43,8 +43,7 @@ namespace mongo {
 namespace {
 
 /**
- * Type representing the per-thread PRNG used by fail-points.  Required because TSP_* macros,
- * below, only let you create one thread-specific object per type.
+ * Type representing the per-thread PRNG used by fail-points.
  */
 class FailPointPRNG {
 public:
@@ -58,29 +57,26 @@ public:
         return _prng.nextInt32() & ~(1 << 31);
     }
 
+    static FailPointPRNG* current() {
+        if (!_failPointPrng)
+            _failPointPrng = stdx::make_unique<FailPointPRNG>();
+        return _failPointPrng.get();
+    }
+
 private:
     PseudoRandom _prng;
+    static thread_local std::unique_ptr<FailPointPRNG> _failPointPrng;
 };
 
-}  // namespace
-
-
-TSP_DECLARE(FailPointPRNG, failPointPrng);
-TSP_DEFINE(FailPointPRNG, failPointPrng);
-
-namespace {
-
-int32_t prngNextPositiveInt32() {
-    return failPointPrng.getMake()->nextPositiveInt32();
-}
+thread_local std::unique_ptr<FailPointPRNG> FailPointPRNG::_failPointPrng;
 
 }  // namespace
 
 void FailPoint::setThreadPRNGSeed(int32_t seed) {
-    failPointPrng.getMake()->resetSeed(seed);
+    FailPointPRNG::current()->resetSeed(seed);
 }
 
-FailPoint::FailPoint() : _fpInfo(0), _mode(off), _timesOrPeriod(0) {}
+FailPoint::FailPoint() = default;
 
 void FailPoint::shouldFailCloseBlock() {
     _fpInfo.subtractAndFetch(1);
@@ -145,34 +141,43 @@ void FailPoint::disableFailPoint() {
     } while (expectedCurrentVal != currentVal);
 }
 
-FailPoint::RetCode FailPoint::slowShouldFailOpenBlock() {
+FailPoint::RetCode FailPoint::slowShouldFailOpenBlock(
+    stdx::function<bool(const BSONObj&)> cb) noexcept {
     ValType localFpInfo = _fpInfo.addAndFetch(1);
 
     if ((localFpInfo & ACTIVE_BIT) == 0) {
         return slowOff;
     }
 
+    if (cb && !cb(getData())) {
+        return userIgnored;
+    }
+
     switch (_mode) {
         case alwaysOn:
             return slowOn;
-
         case random: {
             const AtomicInt32::WordType maxActivationValue = _timesOrPeriod.load();
-            if (prngNextPositiveInt32() < maxActivationValue) {
+            if (FailPointPRNG::current()->nextPositiveInt32() < maxActivationValue)
                 return slowOn;
-            }
+
             return slowOff;
         }
         case nTimes: {
-            AtomicInt32::WordType newVal = _timesOrPeriod.subtractAndFetch(1);
-
-            if (newVal <= 0) {
+            if (_timesOrPeriod.subtractAndFetch(1) <= 0)
                 disableFailPoint();
-            }
 
             return slowOn;
         }
+        case skip: {
+            // Ensure that once the skip counter reaches within some delta from 0 we don't continue
+            // decrementing it unboundedly because at some point it will roll over and become
+            // positive again
+            if (_timesOrPeriod.load() <= 0 || _timesOrPeriod.subtractAndFetch(1) < 0)
+                return slowOn;
 
+            return slowOff;
+        }
         default:
             error() << "FailPoint Mode not supported: " << static_cast<int>(_mode);
             fassertFailed(16444);
@@ -214,6 +219,23 @@ StatusWith<std::tuple<FailPoint::Mode, FailPoint::ValType, BSONObj>> FailPoint::
 
             if (longVal > std::numeric_limits<int>::max()) {
                 return {ErrorCodes::BadValue, "'times' option to 'mode' is too large"};
+            }
+            val = static_cast<int>(longVal);
+        } else if (modeObj.hasField("skip")) {
+            mode = FailPoint::skip;
+
+            long long longVal;
+            auto status = bsonExtractIntegerField(modeObj, "skip", &longVal);
+            if (!status.isOK()) {
+                return status;
+            }
+
+            if (longVal < 0) {
+                return {ErrorCodes::BadValue, "'skip' option to 'mode' must be positive"};
+            }
+
+            if (longVal > std::numeric_limits<int>::max()) {
+                return {ErrorCodes::BadValue, "'skip' option to 'mode' is too large"};
             }
             val = static_cast<int>(longVal);
         } else if (modeObj.hasField("activationProbability")) {

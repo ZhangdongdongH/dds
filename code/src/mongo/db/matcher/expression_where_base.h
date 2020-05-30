@@ -42,13 +42,21 @@ public:
         BSONObj scope;  // Owned.
     };
 
-    WhereMatchExpressionBase(WhereParams params);
+    explicit WhereMatchExpressionBase(WhereParams params);
 
-    //
-    // Methods inherited from MatchExpression.
-    //
+    size_t numChildren() const final {
+        return 0;
+    }
 
-    bool matchesSingleElement(const BSONElement& e) const final {
+    MatchExpression* getChild(size_t i) const final {
+        MONGO_UNREACHABLE;
+    }
+
+    std::vector<MatchExpression*>* getChildVector() final {
+        return nullptr;
+    }
+
+    bool matchesSingleElement(const BSONElement& e, MatchDetails* details = nullptr) const final {
         return false;
     }
 
@@ -57,6 +65,10 @@ public:
     void serialize(BSONObjBuilder* out) const final;
 
     bool equivalent(const MatchExpression* other) const final;
+
+    MatchCategory getCategory() const final {
+        return MatchCategory::kOther;
+    }
 
 protected:
     const std::string& getCode() const {
@@ -68,6 +80,10 @@ protected:
     }
 
 private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
+
     const std::string _code;
     const BSONObj _scope;  // Owned.
 };

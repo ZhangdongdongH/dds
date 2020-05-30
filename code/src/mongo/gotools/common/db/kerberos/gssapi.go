@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Package kerberos implements authentication to MongoDB using kerberos
 package kerberos
 
@@ -15,8 +21,7 @@ func AddKerberosOpts(opts options.ToolOptions, dialInfo *mgo.DialInfo) {
 	if dialInfo == nil {
 		return
 	}
-	if opts.Kerberos == nil || opts.Kerberos.Service == "" ||
-		opts.Kerberos.ServiceHost == "" {
+	if opts.Kerberos == nil {
 		return
 	}
 	if opts.Auth == nil || (opts.Auth.Mechanism != authMechanism &&

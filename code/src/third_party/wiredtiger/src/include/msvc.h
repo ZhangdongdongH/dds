@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -13,14 +13,15 @@
 
 #define	inline __inline
 
+/* MSVC Doesn't provide __func__, it has __FUNCTION__ */
+#ifdef _MSC_VER
+#define	__func__	__FUNCTION__
+#endif
+
 #define	WT_PTRDIFFT_FMT	"Id"			/* ptrdiff_t format string */
 #define	WT_SIZET_FMT	"Iu"			/* size_t format string */
 
-/*
- * Add MSVC-specific attributes and pragmas to types and function declarations.
- */
-#define	WT_COMPILER_TYPE_ALIGN(x)	__declspec(align(x))
-
+/* MSVC-specific attributes. */
 #define	WT_PACKED_STRUCT_BEGIN(name)					\
 	__pragma(pack(push,1))						\
 	struct name {

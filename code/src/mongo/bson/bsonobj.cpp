@@ -33,6 +33,7 @@
 
 #include "mongo/base/data_range.h"
 #include "mongo/bson/bson_validate.h"
+#include "mongo/bson/bsonelement_comparator_interface.h"
 #include "mongo/db/json.h"
 #include "mongo/util/allocator.h"
 #include "mongo/util/hex.h"
@@ -41,7 +42,49 @@
 #include "mongo/util/stringutils.h"
 
 namespace mongo {
+
+namespace {
+
+template <class ObjectIterator>
+int compareObjects(const BSONObj& firstObj,
+                   const BSONObj& secondObj,
+                   const BSONObj& idxKey,
+                   BSONObj::ComparisonRulesSet rules,
+                   const StringData::ComparatorInterface* comparator) {
+    if (firstObj.isEmpty())
+        return secondObj.isEmpty() ? 0 : -1;
+    if (secondObj.isEmpty())
+        return 1;
+
+    ObjectIterator firstIter(firstObj);
+    ObjectIterator secondIter(secondObj);
+    ObjectIterator idxKeyIter(idxKey);
+
+    while (true) {
+        BSONElement l = firstIter.next();
+        BSONElement r = secondIter.next();
+
+        if (l.eoo())
+            return r.eoo() ? 0 : -1;
+        if (r.eoo())
+            return 1;
+
+        auto x = l.woCompare(r, rules, comparator);
+
+        if (idxKeyIter.more() && idxKeyIter.next().number() < 0)
+            x = -x;
+
+        if (x != 0)
+            return x;
+    }
+
+    MONGO_UNREACHABLE;
+}
+
+}  // namespace
+
 using namespace std;
+
 /* BSONObj ------------------------------------------------------------*/
 
 void BSONObj::_assertInvalid() const {
@@ -55,7 +98,7 @@ void BSONObj::_assertInvalid() const {
         ss << " First element: " << e.toString();
     } catch (...) {
     }
-    massert(10334, ss.str(), 0);
+    massert(ErrorCodes::BSONObjectTooLarge, ss.str(), 0);
 }
 
 BSONObj BSONObj::copy() const {
@@ -103,7 +146,7 @@ bool BSONObj::valid(BSONVersion version) const {
 
 int BSONObj::woCompare(const BSONObj& r,
                        const Ordering& o,
-                       bool considerFieldName,
+                       ComparisonRulesSet rules,
                        const StringData::ComparatorInterface* comparator) const {
     if (isEmpty())
         return r.isEmpty() ? 0 : -1;
@@ -125,7 +168,7 @@ int BSONObj::woCompare(const BSONObj& r,
 
         int x;
         {
-            x = l.woCompare(r, considerFieldName, comparator);
+            x = l.woCompare(r, rules, comparator);
             if (o.descending(mask))
                 x = -x;
         }
@@ -139,47 +182,11 @@ int BSONObj::woCompare(const BSONObj& r,
 /* well ordered compare */
 int BSONObj::woCompare(const BSONObj& r,
                        const BSONObj& idxKey,
-                       bool considerFieldName,
+                       ComparisonRulesSet rules,
                        const StringData::ComparatorInterface* comparator) const {
-    if (isEmpty())
-        return r.isEmpty() ? 0 : -1;
-    if (r.isEmpty())
-        return 1;
-
-    bool ordered = !idxKey.isEmpty();
-
-    BSONObjIterator i(*this);
-    BSONObjIterator j(r);
-    BSONObjIterator k(idxKey);
-    while (1) {
-        // so far, equal...
-
-        BSONElement l = i.next();
-        BSONElement r = j.next();
-        BSONElement o;
-        if (ordered)
-            o = k.next();
-        if (l.eoo())
-            return r.eoo() ? 0 : -1;
-        if (r.eoo())
-            return 1;
-
-        int x;
-        /*
-                    if( ordered && o.type() == String && strcmp(o.valuestr(), "ascii-proto") == 0 &&
-                        l.type() == String && r.type() == String ) {
-                        // note: no negative support yet, as this is just sort of a POC
-                        x = _stricmp(l.valuestr(), r.valuestr());
-                    }
-                    else*/ {
-            x = l.woCompare(r, considerFieldName, comparator);
-            if (ordered && o.number() < 0)
-                x = -x;
-        }
-        if (x != 0)
-            return x;
-    }
-    return -1;
+    return (rules & ComparisonRules::kIgnoreFieldOrder)
+        ? compareObjects<BSONObjIteratorSorted>(*this, r, idxKey, rules, comparator)
+        : compareObjects<BSONObjIterator>(*this, r, idxKey, rules, comparator);
 }
 
 bool BSONObj::isPrefixOf(const BSONObj& otherObj,
@@ -376,7 +383,7 @@ BSONObj BSONObj::replaceFieldNames(const BSONObj& names) const {
     return b.obj();
 }
 
-Status BSONObj::_okForStorage(bool root, bool deep) const {
+Status BSONObj::storageValidEmbedded() const {
     BSONObjIterator i(*this);
 
     // The first field is special in the case of a DBRef where the first field must be $ref
@@ -413,39 +420,23 @@ Status BSONObj::_okForStorage(bool root, bool deep) const {
             }
         }
 
-        // Do not allow "." in the field name
-        if (strchr(name, '.')) {
-            return Status(ErrorCodes::DottedFieldName,
-                          str::stream() << name << " is not valid for storage.");
-        }
-
-        // (SERVER-9502) Do not allow storing an _id field with a RegEx type or
-        // Array type in a root document
-        if (root && (e.type() == RegEx || e.type() == Array || e.type() == Undefined) &&
-            str::equals(name, "_id")) {
-            return Status(ErrorCodes::InvalidIdField,
-                          str::stream() << name
-                                        << " is not valid for storage because it is of type "
-                                        << typeName(e.type()));
-        }
-
-        if (deep && e.mayEncapsulate()) {
+        if (e.mayEncapsulate()) {
             switch (e.type()) {
                 case Object:
                 case Array: {
-                    Status s = e.embeddedObject()._okForStorage(false, true);
+                    Status s = e.embeddedObject().storageValidEmbedded();
                     // TODO: combine field names for better error messages
                     if (!s.isOK())
                         return s;
                 } break;
                 case CodeWScope: {
-                    Status s = e.codeWScopeObject()._okForStorage(false, true);
+                    Status s = e.codeWScopeObject().storageValidEmbedded();
                     // TODO: combine field names for better error messages
                     if (!s.isOK())
                         return s;
                 } break;
                 default:
-                    uassert(12579, "unhandled cases in BSONObj okForStorage", 0);
+                    uassert(12579, "unhandled cases in BSONObj storageValidEmbedded", 0);
             }
         }
 
@@ -517,6 +508,26 @@ bool BSONObj::getObjectID(BSONElement& e) const {
         return true;
     }
     return false;
+}
+
+BSONObj BSONObj::addField(const BSONElement& field) const {
+    if (!field.ok())
+        return copy();
+    BSONObjBuilder b;
+    StringData name = field.fieldNameStringData();
+    bool added = false;
+    for (auto e : *this) {
+        if (e.fieldNameStringData() == name) {
+            if (!added)
+                b.append(field);
+            added = true;
+        } else {
+            b.append(e);
+        }
+    }
+    if (!added)
+        b.append(field);
+    return b.obj();
 }
 
 BSONObj BSONObj::removeField(StringData name) const {
@@ -597,7 +608,7 @@ void BSONObj::toString(
     bool first = true;
     while (1) {
         massert(10327, "Object does not end with EOO", i.moreWithEOO());
-        BSONElement e = i.next(true);
+        BSONElement e = i.next();
         massert(10328, "Invalid element size", e.size() > 0);
         massert(10329, "Element too large", e.size() < (1 << 30));
         int offset = (int)(e.rawdata() - this->objdata());

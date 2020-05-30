@@ -28,7 +28,9 @@
 
 #pragma once
 
+#include <memory>
 #include <queue>
+#include <vector>
 
 #include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
@@ -38,7 +40,7 @@
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 
@@ -100,7 +102,7 @@ public:
     bool isEOF() final;
     StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final;
     std::unique_ptr<PlanStageStats> getStats() final;
@@ -110,7 +112,7 @@ protected:
     /**
      * Subclasses of NearStage must provide basics + a stats object which gets owned here.
      */
-    NearStage(OperationContext* txn,
+    NearStage(OperationContext* opCtx,
               const char* typeName,
               StageType type,
               WorkingSet* workingSet,
@@ -127,7 +129,7 @@ protected:
      *
      * Returns !OK on failure to create next stage.
      */
-    virtual StatusWith<CoveredInterval*> nextInterval(OperationContext* txn,
+    virtual StatusWith<CoveredInterval*> nextInterval(OperationContext* opCtx,
                                                       WorkingSet* workingSet,
                                                       Collection* collection) = 0;
 
@@ -146,7 +148,7 @@ protected:
      * Return errors if an error occurs.
      * Can't return ADVANCED.
      */
-    virtual StageState initialize(OperationContext* txn,
+    virtual StageState initialize(OperationContext* opCtx,
                                   WorkingSet* workingSet,
                                   Collection* collection,
                                   WorkingSetID* out) = 0;
@@ -182,7 +184,7 @@ private:
 
     // May need to track disklocs from the child stage to do our own deduping, also to do
     // invalidation of buffered results.
-    unordered_map<RecordId, WorkingSetID, RecordId::Hasher> _seenDocuments;
+    stdx::unordered_map<RecordId, WorkingSetID, RecordId::Hasher> _seenDocuments;
 
     // Stats for the stage covering this interval
     // This is owned by _specificStats
@@ -203,7 +205,7 @@ private:
     //
     // All children intervals except the last active one are only used by getStats(),
     // because they are all EOF.
-    OwnedPointerVector<CoveredInterval> _childrenIntervals;
+    std::vector<std::unique_ptr<CoveredInterval>> _childrenIntervals;
 };
 
 /**

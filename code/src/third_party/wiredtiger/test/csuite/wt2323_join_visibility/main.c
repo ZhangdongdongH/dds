@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -92,10 +92,12 @@ main(int argc, char *argv[])
 	TEST_OPTS *opts, _opts;
 	const char *tablename;
 
+	/* Ignore unless requested */
+	if (!testutil_is_flag_set("TESTUTIL_ENABLE_LONG_TESTS"))
+		return (EXIT_SUCCESS);
+
 	opts = &_opts;
 	sharedopts = &_sharedopts;
-	if (testutil_disable_long_tests())
-		return (0);
 	memset(opts, 0, sizeof(*opts));
 	memset(sharedopts, 0, sizeof(*sharedopts));
 
@@ -105,14 +107,18 @@ main(int argc, char *argv[])
 	tablename = strchr(opts->uri, ':');
 	testutil_assert(tablename != NULL);
 	tablename++;
-	snprintf(sharedopts->posturi, sizeof(sharedopts->posturi),
-	    "index:%s:post", tablename);
-	snprintf(sharedopts->baluri, sizeof(sharedopts->baluri),
-	    "index:%s:bal", tablename);
-	snprintf(sharedopts->flaguri, sizeof(sharedopts->flaguri),
-	    "index:%s:flag", tablename);
-	snprintf(sharedopts->joinuri, sizeof(sharedopts->joinuri),
-	    "join:%s", opts->uri);
+	testutil_check(__wt_snprintf(
+	    sharedopts->posturi, sizeof(sharedopts->posturi),
+	    "index:%s:post", tablename));
+	testutil_check(__wt_snprintf(
+	    sharedopts->baluri, sizeof(sharedopts->baluri),
+	    "index:%s:bal", tablename));
+	testutil_check(__wt_snprintf(
+	    sharedopts->flaguri, sizeof(sharedopts->flaguri),
+	    "index:%s:flag", tablename));
+	testutil_check(__wt_snprintf(
+	    sharedopts->joinuri, sizeof(sharedopts->joinuri),
+	    "join:%s", opts->uri));
 
 	testutil_check(wiredtiger_open(opts->home, NULL,
 	    "create,cache_size=1G", &opts->conn));
@@ -180,8 +186,8 @@ test_join(TEST_OPTS *opts, SHARED_OPTS *sharedopts, bool bloom,
 		insert_args[i].nthread = N_INSERT_THREAD;
 		insert_args[i].testopts = opts;
 		insert_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&insert_tid[i], NULL,
-		    thread_insert, (void *)&insert_args[i]));
+		testutil_check(pthread_create(
+		    &insert_tid[i], NULL, thread_insert, &insert_args[i]));
 	}
 
 	for (i = 0; i < N_JOIN_THREAD; ++i) {
@@ -189,8 +195,8 @@ test_join(TEST_OPTS *opts, SHARED_OPTS *sharedopts, bool bloom,
 		join_args[i].nthread = N_JOIN_THREAD;
 		join_args[i].testopts = opts;
 		join_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&join_tid[i], NULL,
-		    thread_join, (void *)&join_args[i]));
+		testutil_check(pthread_create(
+		    &join_tid[i], NULL, thread_join, &join_args[i]));
 	}
 
 	/*
@@ -317,7 +323,7 @@ static void *thread_join(void *arg)
 	SHARED_OPTS *sharedopts;
 	TEST_OPTS *opts;
 	THREAD_ARGS *threadargs;
-	WT_CURSOR *postcur, *balcur, *flagcur, *joincur;
+	WT_CURSOR *balcur, *flagcur, *joincur, *postcur;
 	WT_SESSION *session;
 	int bal, flag, key, key2, post, ret;
 	char cfg[128];
@@ -349,19 +355,21 @@ static void *thread_join(void *arg)
 		balcur->set_key(balcur, 0);
 		testutil_check(balcur->search(balcur));
 		if (sharedopts->bloom)
-			sprintf(cfg, "compare=lt,strategy=bloom,count=%d",
-			    N_RECORDS);
+			testutil_check(__wt_snprintf(cfg, sizeof(cfg),
+			    "compare=lt,strategy=bloom,count=%d", N_RECORDS));
 		else
-			sprintf(cfg, "compare=lt");
+			testutil_check(__wt_snprintf(
+			    cfg, sizeof(cfg), "compare=lt"));
 		testutil_check(session->join(session, joincur, balcur, cfg));
 
 		flagcur->set_key(flagcur, 0);
 		testutil_check(flagcur->search(flagcur));
 		if (sharedopts->bloom)
-			sprintf(cfg, "compare=eq,strategy=bloom,count=%d",
-			    N_RECORDS);
+			testutil_check(__wt_snprintf(cfg, sizeof(cfg),
+			    "compare=eq,strategy=bloom,count=%d", N_RECORDS));
 		else
-			sprintf(cfg, "compare=eq");
+			testutil_check(__wt_snprintf(
+			    cfg, sizeof(cfg), "compare=eq"));
 		testutil_check(session->join(session, joincur, flagcur, cfg));
 
 		/* Expect no values returned */

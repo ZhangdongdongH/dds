@@ -28,6 +28,7 @@
 
 #include "mongo/db/exec/count_scan.h"
 
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -51,7 +52,7 @@ BSONObj replaceBSONFieldNames(const BSONObj& replace, const BSONObj& fieldNames)
     invariant(replace.nFields() == fieldNames.nFields());
 
     BSONObjBuilder bob;
-    BSONObjIterator iter = fieldNames.begin();
+    auto iter = fieldNames.begin();
 
     for (const BSONElement& el : replace) {
         bob.appendAs(el, (*iter++).fieldNameStringData());
@@ -68,12 +69,12 @@ using stdx::make_unique;
 // static
 const char* CountScan::kStageType = "COUNT_SCAN";
 
-CountScan::CountScan(OperationContext* txn, const CountScanParams& params, WorkingSet* workingSet)
-    : PlanStage(kStageType, txn),
+CountScan::CountScan(OperationContext* opCtx, const CountScanParams& params, WorkingSet* workingSet)
+    : PlanStage(kStageType, opCtx),
       _workingSet(workingSet),
       _descriptor(params.descriptor),
       _iam(params.descriptor->getIndexCatalog()->getIndex(params.descriptor)),
-      _shouldDedup(params.descriptor->isMultikey(txn)),
+      _shouldDedup(params.descriptor->isMultikey(opCtx)),
       _params(params) {
     _specificStats.keyPattern = _params.descriptor->keyPattern();
     if (BSONElement collationElement = _params.descriptor->getInfoElement("collation")) {
@@ -81,8 +82,8 @@ CountScan::CountScan(OperationContext* txn, const CountScanParams& params, Worki
         _specificStats.collation = collationElement.Obj().getOwned();
     }
     _specificStats.indexName = _params.descriptor->indexName();
-    _specificStats.isMultiKey = _params.descriptor->isMultikey(txn);
-    _specificStats.multiKeyPaths = _params.descriptor->getMultikeyPaths(txn);
+    _specificStats.isMultiKey = _params.descriptor->isMultikey(opCtx);
+    _specificStats.multiKeyPaths = _params.descriptor->getMultikeyPaths(opCtx);
     _specificStats.isUnique = _params.descriptor->unique();
     _specificStats.isSparse = _params.descriptor->isSparse();
     _specificStats.isPartial = _params.descriptor->isPartial();
@@ -114,7 +115,7 @@ PlanStage::StageState CountScan::doWork(WorkingSetID* out) {
         } else {
             entry = _cursor->next(kWantLoc);
         }
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         if (needInit) {
             // Release our cursor and try again next time.
             _cursor.reset();
@@ -156,7 +157,6 @@ void CountScan::doRestoreState() {
         _cursor->restore();
 
     // This can change during yielding.
-    // TODO this isn't sufficient. See SERVER-17678.
     _shouldDedup = _descriptor->isMultikey(getOpCtx());
 }
 
@@ -170,7 +170,7 @@ void CountScan::doReattachToOperationContext() {
         _cursor->reattachToOperationContext(getOpCtx());
 }
 
-void CountScan::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void CountScan::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // The only state we're responsible for holding is what RecordIds to drop.  If a document
     // mutates the underlying index cursor will deal with it.
     if (INVALIDATION_MUTATION == type) {
@@ -179,7 +179,7 @@ void CountScan::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
 
     // If we see this RecordId again, it may not be the same document it was before, so we want
     // to return it if we see it again.
-    unordered_set<RecordId, RecordId::Hasher>::iterator it = _returned.find(dl);
+    stdx::unordered_set<RecordId, RecordId::Hasher>::iterator it = _returned.find(dl);
     if (it != _returned.end()) {
         _returned.erase(it);
     }

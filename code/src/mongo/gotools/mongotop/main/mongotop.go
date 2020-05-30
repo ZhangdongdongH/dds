@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Main package for the mongotop tool.
 package main
 
@@ -17,14 +23,14 @@ import (
 func main() {
 	// initialize command-line opts
 	opts := options.New("mongotop", mongotop.Usage,
-		options.EnabledOptions{Auth: true, Connection: true, Namespace: false})
+		options.EnabledOptions{Auth: true, Connection: true, Namespace: false, URI: true})
 	opts.UseReadOnlyHostDescription()
 
 	// add mongotop-specific options
 	outputOpts := &mongotop.Output{}
 	opts.AddOptions(outputOpts)
 
-	args, err := opts.Parse()
+	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
 		log.Logvf(log.Always, "error parsing command line options: %v", err)
 		log.Logvf(log.Always, "try 'mongotop --help' for more information")
@@ -43,6 +49,9 @@ func main() {
 
 	log.SetVerbosity(opts.Verbosity)
 	signals.Handle()
+
+	// verify uri options and log them
+	opts.URI.LogUnsupportedOptions()
 
 	if len(args) > 1 {
 		log.Logvf(log.Always, "too many positional arguments")
@@ -64,14 +73,13 @@ func main() {
 	}
 
 	if opts.Auth.Username != "" && opts.Auth.Source == "" && !opts.Auth.RequiresExternalDB() {
+		if opts.URI != nil && opts.URI.ConnectionString != "" {
+			log.Logvf(log.Always, "authSource is required when authenticating against a non $external database")
+			os.Exit(util.ExitBadOptions)
+		}
 		log.Logvf(log.Always, "--authenticationDatabase is required when authenticating against a non $external database")
 		os.Exit(util.ExitBadOptions)
 	}
-
-	// connect directly, unless a replica set name is explicitly specified
-	_, setName := util.ParseConnectionString(opts.Host)
-	opts.Direct = (setName == "")
-	opts.ReplicaSetName = setName
 
 	// create a session provider to connect to the db
 	sessionProvider, err := db.NewSessionProvider(*opts)
@@ -80,7 +88,7 @@ func main() {
 		os.Exit(util.ExitError)
 	}
 
-	if setName == "" {
+	if opts.ReplicaSetName == "" {
 		sessionProvider.SetReadPreference(mgo.PrimaryPreferred)
 	}
 

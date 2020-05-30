@@ -35,6 +35,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/bson/dotted_path_support.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/db/geo/hash.h"
 #include "mongo/db/index/expression_keys_private.h"
@@ -68,7 +69,7 @@ void HaystackAccessMethod::doGetKeys(const BSONObj& obj,
     ExpressionKeysPrivate::getHaystackKeys(obj, _geoField, _otherFields, _bucketSize, keys);
 }
 
-void HaystackAccessMethod::searchCommand(OperationContext* txn,
+void HaystackAccessMethod::searchCommand(OperationContext* opCtx,
                                          Collection* collection,
                                          const BSONObj& nearObj,
                                          double maxDistance,
@@ -87,7 +88,7 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
     }
     int scale = static_cast<int>(ceil(maxDistance / _bucketSize));
 
-    GeoHaystackSearchHopper hopper(txn, nearObj, maxDistance, limit, _geoField, collection);
+    GeoHaystackSearchHopper hopper(opCtx, nearObj, maxDistance, limit, _geoField, collection);
 
     long long btreeMatches = 0;
 
@@ -107,17 +108,16 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
 
             BSONObj key = bb.obj();
 
-            unordered_set<RecordId, RecordId::Hasher> thisPass;
+            stdx::unordered_set<RecordId, RecordId::Hasher> thisPass;
 
 
-            unique_ptr<PlanExecutor> exec(
-                InternalPlanner::indexScan(txn,
-                                           collection,
-                                           _descriptor,
-                                           key,
-                                           key,
-                                           BoundInclusion::kIncludeBothStartAndEndKeys,
-                                           PlanExecutor::YIELD_MANUAL));
+            auto exec = InternalPlanner::indexScan(opCtx,
+                                                   collection,
+                                                   _descriptor,
+                                                   key,
+                                                   key,
+                                                   BoundInclusion::kIncludeBothStartAndEndKeys,
+                                                   PlanExecutor::NO_YIELD);
             PlanExecutor::ExecState state;
             BSONObj obj;
             RecordId loc;
@@ -125,7 +125,7 @@ void HaystackAccessMethod::searchCommand(OperationContext* txn,
                 if (hopper.limitReached()) {
                     break;
                 }
-                pair<unordered_set<RecordId, RecordId::Hasher>::iterator, bool> p =
+                pair<stdx::unordered_set<RecordId, RecordId::Hasher>::iterator, bool> p =
                     thisPass.insert(loc);
                 // If a new element was inserted (haven't seen the RecordId before), p.second
                 // is true.

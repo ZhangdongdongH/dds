@@ -28,7 +28,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <boost/config.hpp>
 #include <string>
 
 #include "mongo/base/system_error.h"
@@ -44,25 +43,22 @@ class MongoErrorCategoryImpl final : public std::error_category {
 public:
     MongoErrorCategoryImpl() = default;
 
-    const char* name() const BOOST_NOEXCEPT override {
+    const char* name() const noexcept override {
         return "mongo";
     }
 
     std::string message(int ev) const override {
-        return ErrorCodes::errorString(ErrorCodes::fromInt(ev));
+        return ErrorCodes::errorString(ErrorCodes::Error(ev));
     }
 
     // We don't really want to override this function, but to override the second we need to,
-    // otherwise there will be issues with overload resolution. Additionally, the use of
-    // BOOST_NOEXCEPT is necessitated by the libc++/libstdc++ STL having 'noexcept' on the
-    // overridden methods, but not the Dinkumware STL as of MSVC 2013.
-    bool equivalent(const int code,
-                    const std::error_condition& condition) const BOOST_NOEXCEPT override {
+    // otherwise there will be issues with overload resolution.
+    bool equivalent(const int code, const std::error_condition& condition) const noexcept override {
         return std::error_category::equivalent(code, condition);
     }
 
-    bool equivalent(const std::error_code& code, int condition) const BOOST_NOEXCEPT override {
-        switch (ErrorCodes::fromInt(condition)) {
+    bool equivalent(const std::error_code& code, int condition) const noexcept override {
+        switch (ErrorCodes::Error(condition)) {
             case ErrorCodes::OK:
                 // Make ErrorCodes::OK to be equivalent to the default constructed error code.
                 return code == std::error_code();
@@ -81,11 +77,11 @@ const std::error_category& mongoErrorCategory() {
 }
 
 std::error_code make_error_code(ErrorCodes::Error code) {
-    return std::error_code(ErrorCodes::fromInt(code), mongoErrorCategory());
+    return std::error_code(ErrorCodes::Error(code), mongoErrorCategory());
 }
 
 std::error_condition make_error_condition(ErrorCodes::Error code) {
-    return std::error_condition(ErrorCodes::fromInt(code), mongoErrorCategory());
+    return std::error_condition(ErrorCodes::Error(code), mongoErrorCategory());
 }
 
 }  // namespace mongo

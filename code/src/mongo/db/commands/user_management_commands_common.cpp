@@ -57,7 +57,7 @@ void redactPasswordData(mutablebson::Element parent) {
     const auto pwdFieldName = "pwd"_sd;
     for (mmb::Element pwdElement = mmb::findFirstChildNamed(parent, pwdFieldName); pwdElement.ok();
          pwdElement = mmb::findElementNamed(pwdElement.rightSibling(), pwdFieldName)) {
-        pwdElement.setValueString("xxx");
+        pwdElement.setValueString("xxx").transitional_ignore();
     }
 }
 
@@ -110,6 +110,20 @@ Status checkAuthorizedToRevokePrivileges(AuthorizationSession* authzSession,
     return Status::OK();
 }
 
+Status checkAuthorizedToSetRestrictions(AuthorizationSession* authzSession,
+                                        bool hasAuthRestriction,
+                                        StringData dbname) {
+    if (hasAuthRestriction) {
+        if (!authzSession->isAuthorizedForActionsOnResource(
+                ResourcePattern::forDatabaseName(dbname),
+                ActionType::setAuthenticationRestriction)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+    }
+
+    return Status::OK();
+}
+
 Status checkAuthForCreateUserCommand(Client* client,
                                      const std::string& dbname,
                                      const BSONObj& cmdObj) {
@@ -127,7 +141,18 @@ Status checkAuthForCreateUserCommand(Client* client,
                                     << args.userName.getDB());
     }
 
-    return checkAuthorizedToGrantRoles(authzSession, args.roles);
+    status = checkAuthorizedToGrantRoles(authzSession, args.roles);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.userName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForUpdateUserCommand(Client* client,
@@ -140,7 +165,7 @@ Status checkAuthForUpdateUserCommand(Client* client,
         return status;
     }
 
-    if (args.hasHashedPassword) {
+    if (args.hasPassword) {
         if (!authzSession->isAuthorizedToChangeOwnPasswordAsUser(args.userName) &&
             !authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(args.userName.getDB()),
@@ -172,7 +197,16 @@ Status checkAuthForUpdateUserCommand(Client* client,
                           "authorized to revoke any role in the system");
         }
 
-        return checkAuthorizedToGrantRoles(authzSession, args.roles);
+        status = checkAuthorizedToGrantRoles(authzSession, args.roles);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.userName.getDB());
+    if (!status.isOK()) {
+        return status;
     }
 
     return Status::OK();
@@ -214,7 +248,18 @@ Status checkAuthForCreateRoleCommand(Client* client,
         return status;
     }
 
-    return checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    status = checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.roleName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForUpdateRoleCommand(Client* client,
@@ -241,7 +286,18 @@ Status checkAuthForUpdateRoleCommand(Client* client,
         return status;
     }
 
-    return checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    status = checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.roleName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForGrantRolesToRoleCommand(Client* client,
@@ -363,12 +419,19 @@ Status checkAuthForUsersInfoCommand(Client* client,
         return status;
     }
 
-    if (args.allForDB) {
+    if (args.target == auth::UsersInfoArgs::Target::kDB) {
         if (!authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(dbname), ActionType::viewUser)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "Not authorized to view users from the " << dbname
                                         << " database");
+        }
+    } else if (args.target == auth::UsersInfoArgs::Target::kGlobal) {
+        if (!authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                            ActionType::viewUser)) {
+            return Status(ErrorCodes::Unauthorized,
+                          str::stream() << "Not authorized to view users from all"
+                                        << " databases");
         }
     } else {
         for (size_t i = 0; i < args.userNames.size(); ++i) {
@@ -504,15 +567,6 @@ Status checkAuthForMergeAuthzCollectionsCommand(Client* client, const BSONObj& c
             ActionType::find)) {
         return Status(ErrorCodes::Unauthorized,
                       str::stream() << "Not authorized to read " << args.rolesCollName);
-    }
-    return Status::OK();
-}
-
-Status checkAuthForAuthSchemaUpgradeCommand(Client* client) {
-    AuthorizationSession* authzSession = AuthorizationSession::get(client);
-    if (!authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                        ActionType::authSchemaUpgrade)) {
-        return Status(ErrorCodes::Unauthorized, "Not authorized to run authSchemaUpgrade command.");
     }
     return Status::OK();
 }

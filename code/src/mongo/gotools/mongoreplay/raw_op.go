@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoreplay
 
 import (
@@ -6,7 +12,10 @@ import (
 	"io"
 
 	mgo "github.com/10gen/llmgo"
+	"github.com/10gen/llmgo/bson"
 )
+
+const maxBSONSize = 16 * 1024 * 1024 // 16MB - maximum BSON document size
 
 // RawOp may be exactly the same as OpUnknown.
 type RawOp struct {
@@ -49,6 +58,16 @@ func (op *RawOp) FromReader(r io.Reader) error {
 	return err
 }
 
+type CommandReplyStruct struct {
+	Cursor struct {
+		Id         int64    `bson:"id"`
+		Ns         string   `bson:"ns"`
+		FirstBatch bson.Raw `bson:"firstBatch,omitempty"`
+		NextBatch  bson.Raw `bson:"nextBatch,omitempty"`
+	} `bson:"cursor"`
+	Ok int `bson:"ok"`
+}
+
 // ShortReplyFromReader reads an op from the given reader. It only holds on
 // to header-related information and the first document.
 func (op *RawOp) ShortenReply() error {
@@ -66,18 +85,51 @@ func (op *RawOp) ShortenReply() error {
 			return nil
 		}
 		firstDocSize := getInt32(op.Body, 20+MsgHeaderLen)
+		if 20+MsgHeaderLen+int(firstDocSize) > len(op.Body) || firstDocSize > maxBSONSize {
+			return fmt.Errorf("the size of the first document is greater then the size of the message")
+		}
 		op.Body = op.Body[0:(20 + MsgHeaderLen + firstDocSize)]
 
 	case OpCodeCommandReply:
-		commandReplyDocSize := getInt32(op.Body, MsgHeaderLen)
-		metadataDocSize := getInt32(op.Body, int(commandReplyDocSize)+MsgHeaderLen)
-		if op.Header.MessageLength <= commandReplyDocSize+metadataDocSize+MsgHeaderLen {
-			//there are no reply docs
+		// unmarshal the needed fields for replacing into the buffer
+		commandReply := &CommandReplyStruct{}
+
+		err := bson.Unmarshal(op.Body[MsgHeaderLen:], commandReply)
+		if err != nil {
+			return fmt.Errorf("unmarshaling op to shorten: %v", err)
+		}
+		switch {
+		case commandReply.Cursor.FirstBatch.Data != nil:
+			commandReply.Cursor.FirstBatch.Data, _ = bson.Marshal([0]byte{})
+
+		case commandReply.Cursor.NextBatch.Data != nil:
+			commandReply.Cursor.NextBatch.Data, _ = bson.Marshal([0]byte{})
+
+		default:
+			// it's not a findReply so we don't care about it
 			return nil
 		}
-		firstOutputDocSize := getInt32(op.Body, int(commandReplyDocSize+metadataDocSize)+MsgHeaderLen)
-		shortReplySize := commandReplyDocSize + metadataDocSize + firstOutputDocSize + MsgHeaderLen
-		op.Body = op.Body[0:shortReplySize]
+
+		out, err := bson.Marshal(commandReply)
+		if err != nil {
+			return err
+		}
+
+		// calculate the new sizes for offsets into the new buffer
+		commandReplySize := getInt32(op.Body, MsgHeaderLen)
+		newCommandReplySize := getInt32(out, 0)
+		sizeDiff := commandReplySize - newCommandReplySize
+		newSize := op.Header.MessageLength - sizeDiff
+		newBody := make([]byte, newSize)
+
+		// copy the new data into a buffer that will replace the old buffer
+		copy(newBody, op.Body[:MsgHeaderLen])
+		copy(newBody[MsgHeaderLen:], out)
+		copy(newBody[MsgHeaderLen+newCommandReplySize:], op.Body[MsgHeaderLen+commandReplySize:])
+		// update the size of this message in the headers
+		SetInt32(newBody, 0, newSize)
+		op.Header.MessageLength = newSize
+		op.Body = newBody
 
 	default:
 		return fmt.Errorf("unexpected op type : %v", op.Header.OpCode)
@@ -116,6 +168,8 @@ func (op *RawOp) Parse() (Op, error) {
 		parsedOp = &CommandOp{Header: op.Header}
 	case OpCodeCommandReply:
 		parsedOp = &CommandReplyOp{Header: op.Header}
+	case OpCodeMessage:
+		parsedOp = &MsgOp{Header: op.Header}
 	default:
 		return nil, nil
 	}
@@ -124,15 +178,45 @@ func (op *RawOp) Parse() (Op, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Special case to check if this commandOp contains a cursor, which
-	// means it needs to be remapped at some point.
-	if commandOp, ok := parsedOp.(*CommandOp); ok {
-		if commandOp.CommandName == "getMore" {
-			return &CommandGetMore{
-				CommandOp: *commandOp,
-			}, nil
+
+	parsedOp, err = maybeChangeOpToGetMore(parsedOp)
+	if err != nil {
+		return nil, err
+	}
+
+	if op, ok := parsedOp.(*MsgOp); ok && op.Header.ResponseTo != 0 {
+		op.CommandName = "reply"
+		parsedOp = &MsgOpReply{
+			MsgOp: *op,
 		}
 	}
 	return parsedOp, nil
 
+}
+
+// maybeChangeOpToGetMore determines if the op is a more specific case of the Op
+// interface and should be returned as a type of getmore
+func maybeChangeOpToGetMore(parsedOp Op) (Op, error) {
+
+	switch castOp := parsedOp.(type) {
+	case *CommandOp:
+		if castOp.CommandName == "getMore" {
+			return &CommandGetMore{
+				CommandOp: *castOp,
+			}, nil
+		}
+	case *MsgOp:
+		id, err := castOp.getCommandName()
+		if err != nil {
+			return nil, err
+		}
+		if id == "getMore" {
+			return &MsgOpGetMore{
+				MsgOp: *castOp,
+			}, nil
+		}
+	}
+
+	// not any special case, return the original op
+	return parsedOp, nil
 }

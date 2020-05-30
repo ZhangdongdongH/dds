@@ -36,12 +36,12 @@
 namespace mongo {
 namespace {
 
-class CmdReplSetGetStatus : public Command {
+class CmdReplSetGetStatus : public ErrmsgCommandDeprecated {
 public:
-    CmdReplSetGetStatus() : Command("replSetGetStatus") {}
+    CmdReplSetGetStatus() : ErrmsgCommandDeprecated("replSetGetStatus") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -53,26 +53,25 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "Not supported through mongos";
+    std::string help() const override {
+        return "Not supported through mongos";
     }
 
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj) {
+                                       const BSONObj& cmdObj) const {
         // Require no auth since this command isn't supported in mongos
         return Status::OK();
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const std::string& dbname,
+                           const BSONObj& cmdObj,
+                           std::string& errmsg,
+                           BSONObjBuilder& result) {
         if (cmdObj["forShell"].trueValue()) {
             LastError::get(cc()).disable();
-            ClusterLastErrorInfo::get(cc()).disableForCommand();
+            ClusterLastErrorInfo::get(cc())->disableForCommand();
         }
 
         errmsg = "replSetGetStatus is not supported through mongos";

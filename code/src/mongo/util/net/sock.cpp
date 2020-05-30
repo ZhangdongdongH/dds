@@ -33,18 +33,26 @@
 
 #include "mongo/util/net/sock.h"
 
+#include <algorithm>
+
 #if !defined(_WIN32)
 #include <arpa/inet.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/un.h>
 #if defined(__OpenBSD__)
 #include <sys/uio.h>
 #endif
+#else
+#include <mstcpip.h>
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #endif
 
 #include "mongo/config.h"
@@ -56,11 +64,11 @@
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/message.h"
+#include "mongo/util/net/private/socket_poll.h"
 #include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/socket_poll.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/net/ssl_manager.h"
-#include "mongo/util/quick_exit.h"
+#include "mongo/util/winutil.h"
 
 namespace mongo {
 
@@ -69,15 +77,37 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
-MONGO_FP_DECLARE(throwSockExcep);
+MONGO_FAIL_POINT_DEFINE(throwSockExcep);
 
-static bool ipv6 = false;
-void enableIPv6(bool state) {
-    ipv6 = state;
+namespace {
+
+// Provides a cross-platform function for setting a file descriptor/socket to non-blocking mode.
+bool setBlock(int fd, bool block) {
+#ifdef _WIN32
+    u_long ioMode = block ? 0 : 1;
+    return (NO_ERROR == ::ioctlsocket(fd, FIONBIO, &ioMode));
+#else
+    int flags = fcntl(fd, F_GETFL, fd);
+    if (block) {
+        return (-1 != fcntl(fd, F_SETFL, (flags & ~O_NONBLOCK)));
+    } else {
+        return (-1 != fcntl(fd, F_SETFL, (flags | O_NONBLOCK)));
+    }
+#endif
 }
-bool IPv6Enabled() {
-    return ipv6;
+
+void networkWarnWithDescription(const Socket& socket, StringData call, int errorCode = -1) {
+#ifdef _WIN32
+    if (errorCode == -1) {
+        errorCode = WSAGetLastError();
+    }
+#endif
+    auto ewd = errnoWithDescription(errorCode);
+    warning() << "Failed to connect to " << socket.remoteAddr().getAddr() << ":"
+              << socket.remoteAddr().getPort() << ", in(" << call << "), reason: " << ewd;
 }
+
+const double kMaxConnectTimeoutMS = 5000;
 
 void setSockTimeouts(int sock, double secs) {
     bool report = shouldLog(logger::LogSeverity::Debug(4));
@@ -104,23 +134,14 @@ void setSockTimeouts(int sock, double secs) {
 #endif
 }
 
-#if defined(_WIN32)
 void disableNagle(int sock) {
     int x = 1;
-    if (setsockopt(sock, IPPROTO_TCP, TCP_NODELAY, (char*)&x, sizeof(x)))
-        error() << "disableNagle failed: " << errnoWithDescription();
-    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
-        error() << "SO_KEEPALIVE failed: " << errnoWithDescription();
-}
+#ifdef _WIN32
+    const int level = IPPROTO_TCP;
+#elif defined(SOL_TCP)
+    const int level = SOL_TCP;
 #else
-
-void disableNagle(int sock) {
-    int x = 1;
-
-#ifdef SOL_TCP
-    int level = SOL_TCP;
-#else
-    int level = SOL_SOCKET;
+    const int level = SOL_SOCKET;
 #endif
 
     if (setsockopt(sock, level, TCP_NODELAY, (char*)&x, sizeof(x)))
@@ -129,92 +150,31 @@ void disableNagle(int sock) {
 #ifdef SO_KEEPALIVE
     if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&x, sizeof(x)))
         error() << "SO_KEEPALIVE failed: " << errnoWithDescription();
-
-#ifdef __linux__
-    socklen_t len = sizeof(x);
-    if (getsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, &len))
-        error() << "can't get TCP_KEEPIDLE: " << errnoWithDescription();
-
-    if (x > 300) {
-        x = 300;
-        if (setsockopt(sock, level, TCP_KEEPIDLE, (char*)&x, sizeof(x))) {
-            error() << "can't set TCP_KEEPIDLE: " << errnoWithDescription();
-        }
-    }
-
-    len = sizeof(x);  // just in case it changed
-    if (getsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, &len))
-        error() << "can't get TCP_KEEPINTVL: " << errnoWithDescription();
-
-    if (x > 300) {
-        x = 300;
-        if (setsockopt(sock, level, TCP_KEEPINTVL, (char*)&x, sizeof(x))) {
-            error() << "can't set TCP_KEEPINTVL: " << errnoWithDescription();
-        }
-    }
 #endif
-#endif
+
+    setSocketKeepAliveParams(sock);
 }
 
-#endif
-
-string getAddrInfoStrError(int code) {
-#if !defined(_WIN32)
-    return gai_strerror(code);
+int socketGetLastError() {
+#ifdef _WIN32
+    return WSAGetLastError();
 #else
-    /* gai_strerrorA is not threadsafe on windows. don't use it. */
-    return errnoWithDescription(code);
+    return errno;
 #endif
 }
 
-// --- SockAddr
-
-string makeUnixSockPath(int port) {
-    return mongoutils::str::stream() << serverGlobalParams.socket << "/mongodb-" << port << ".sock";
-}
-
-
-// If an ip address is passed in, just return that.  If a hostname is passed
-// in, look up its ip and return that.  Returns "" on failure.
-string hostbyname(const char* hostname) {
-    SockAddr sockAddr(hostname, 0);
-    if (!sockAddr.isValid() || sockAddr.getAddr() == "0.0.0.0")
-        return "";
-    else
-        return sockAddr.getAddr();
-}
-
-//  --- my --
-
-DiagStr& _hostNameCached = *(new DiagStr);  // this is also written to from commands/cloud.cpp
-
-string getHostName() {
-    char buf[256];
-    int ec = gethostname(buf, 127);
-    if (ec || *buf == 0) {
-        log() << "can't get this server's hostname " << errnoWithDescription();
-        return "";
+SockAddr getLocalAddrForBoundSocketFd(int fd) {
+    SockAddr result;
+    int rc = getsockname(fd, result.raw(), &result.addressSize);
+    if (rc != 0) {
+        warning() << "Could not resolve local address for socket with fd " << fd << ": "
+                  << getAddrInfoStrError(socketGetLastError());
+        result = SockAddr();
     }
-    return buf;
+    return result;
 }
 
-/** we store our host name once */
-string getHostNameCached() {
-    string temp = _hostNameCached.get();
-    if (_hostNameCached.empty()) {
-        temp = getHostName();
-        _hostNameCached = temp;
-    }
-    return temp;
-}
-
-string prettyHostName() {
-    StringBuilder s;
-    s << getHostNameCached();
-    if (serverGlobalParams.port != ServerGlobalParams::DefaultDBPort)
-        s << ':' << mongo::serverGlobalParams.port;
-    return s.str();
-}
+}  // namespace
 
 #ifdef MSG_NOSIGNAL
 const int portSendFlags = MSG_NOSIGNAL;
@@ -225,25 +185,6 @@ const int portRecvFlags = 0;
 #endif
 
 // ------------ Socket -----------------
-
-static int socketGetLastError() {
-#ifdef _WIN32
-    return WSAGetLastError();
-#else
-    return errno;
-#endif
-}
-
-static SockAddr getLocalAddrForBoundSocketFd(int fd) {
-    SockAddr result;
-    int rc = getsockname(fd, result.raw(), &result.addressSize);
-    if (rc != 0) {
-        warning() << "Could not resolve local address for socket with fd " << fd << ": "
-                  << getAddrInfoStrError(socketGetLastError());
-        result = SockAddr();
-    }
-    return result;
-}
 
 Socket::Socket(int fd, const SockAddr& remote)
     : _fd(fd),
@@ -311,9 +252,9 @@ SSLPeerInfo Socket::doSSLHandshake(const char* firstBytes, int len) {
         return SSLPeerInfo();
     fassert(16506, _fd != INVALID_SOCKET);
     if (_sslConnection.get()) {
-        throw SocketException(SocketException::RECV_ERROR,
-                              "Attempt to call SSL_accept on already secure Socket from " +
-                                  remoteString());
+        throwSocketError(SocketErrorKind::RECV_ERROR,
+                         "Attempt to call SSL_accept on already secure Socket from " +
+                             remoteString());
     }
     _sslConnection.reset(_sslManager->accept(this, firstBytes, len));
     return _sslManager->parseAndValidatePeerCertificateDeprecated(_sslConnection.get(), "");
@@ -323,88 +264,100 @@ std::string Socket::getSNIServerName() const {
     if (!_sslConnection)
         return "";
 
-    if (!_sslConnection->ssl)
-        return "";
-
-    const char* name = SSL_get_servername(_sslConnection->ssl, TLSEXT_NAMETYPE_host_name);
-    if (!name)
-        return "";
-
-    return name;
+    return _sslConnection->getSNIServerName();
 }
 #endif
-
-class ConnectBG : public BackgroundJob {
-public:
-    ConnectBG(int sock, SockAddr remote) : _sock(sock), _remote(remote) {}
-
-    void run() {
-#if defined(_WIN32)
-        if ((_res = _connect()) == SOCKET_ERROR) {
-            _errnoWithDescription = errnoWithDescription();
-        }
-#else
-        while ((_res = _connect()) == -1) {
-            const int error = errno;
-            if (error != EINTR) {
-                _errnoWithDescription = errnoWithDescription(error);
-                break;
-            }
-        }
-#endif
-    }
-
-    std::string name() const {
-        return "ConnectBG";
-    }
-    std::string getErrnoWithDescription() const {
-        return _errnoWithDescription;
-    }
-    int inError() const {
-        return _res;
-    }
-
-private:
-    int _connect() const {
-        return ::connect(_sock, _remote.raw(), _remote.addressSize);
-    }
-
-    int _sock;
-    int _res;
-    SockAddr _remote;
-    std::string _errnoWithDescription;
-};
 
 bool Socket::connect(SockAddr& remote) {
     _remote = remote;
 
-    _fd = socket(remote.getType(), SOCK_STREAM, 0);
+    _fd = ::socket(remote.getType(), SOCK_STREAM, 0);
     if (_fd == INVALID_SOCKET) {
-        LOG(_logLevel) << "ERROR: connect invalid socket " << errnoWithDescription();
+        networkWarnWithDescription(*this, "socket");
+        return false;
+    }
+
+    if (!setBlock(_fd, false)) {
+        networkWarnWithDescription(*this, "set socket to non-blocking mode");
+        return false;
+    }
+
+    const Milliseconds connectTimeoutMillis(static_cast<int64_t>(
+        _timeout > 0 ? std::min(kMaxConnectTimeoutMS, (_timeout * 1000)) : kMaxConnectTimeoutMS));
+    const Date_t expiration = Date_t::now() + connectTimeoutMillis;
+
+    bool connectSucceeded = ::connect(_fd, _remote.raw(), _remote.addressSize) == 0;
+
+    if (!connectSucceeded) {
+#ifdef _WIN32
+        if (WSAGetLastError() != WSAEWOULDBLOCK) {
+            networkWarnWithDescription(*this, "connect");
+            return false;
+        }
+#else
+        if (errno != EINTR && errno != EINPROGRESS) {
+            networkWarnWithDescription(*this, "connect");
+            return false;
+        }
+#endif
+
+        pollfd pfd;
+        pfd.fd = _fd;
+        pfd.events = POLLOUT;
+
+        while (true) {
+            const auto timeout = std::max(Milliseconds(0), expiration - Date_t::now());
+
+            int pollReturn = socketPoll(&pfd, 1, timeout.count());
+#ifdef _WIN32
+            if (pollReturn == SOCKET_ERROR) {
+                networkWarnWithDescription(*this, "poll");
+                return false;
+            }
+#else
+            if (pollReturn == -1) {
+                if (errno != EINTR) {
+                    networkWarnWithDescription(*this, "poll");
+                    return false;
+                }
+
+                // EINTR in poll, try again
+                continue;
+            }
+#endif
+            // No activity for the full duration of the timeout.
+            if (pollReturn == 0) {
+                warning() << "Failed to connect to " << _remote.getAddr() << ":"
+                          << _remote.getPort() << " after " << connectTimeoutMillis
+                          << " milliseconds, giving up.";
+                return false;
+            }
+
+            // We had a result, see if there's an error on the socket.
+            int optVal;
+            socklen_t optLen = sizeof(optVal);
+            if (::getsockopt(
+                    _fd, SOL_SOCKET, SO_ERROR, reinterpret_cast<char*>(&optVal), &optLen) == -1) {
+                networkWarnWithDescription(*this, "getsockopt");
+                return false;
+            }
+            if (optVal != 0) {
+                networkWarnWithDescription(*this, "checking socket for error after poll", optVal);
+                return false;
+            }
+
+            // We had activity and we don't have errors on the socket, we're connected.
+            break;
+        }
+    }
+
+    if (!setBlock(_fd, true)) {
+        networkWarnWithDescription(*this, "could not set socket to blocking mode");
         return false;
     }
 
     if (_timeout > 0) {
         setTimeout(_timeout);
-    }
-
-    static const unsigned int connectTimeoutMillis = 5000;
-    ConnectBG bg(_fd, remote);
-    bg.go();
-    if (bg.wait(connectTimeoutMillis)) {
-        if (bg.inError()) {
-            warning() << "Failed to connect to " << _remote.getAddr() << ":" << _remote.getPort()
-                      << ", reason: " << bg.getErrnoWithDescription();
-            close();
-            return false;
-        }
-    } else {
-        // time out the connect
-        close();
-        bg.wait();  // so bg stays in scope until bg thread terminates
-        warning() << "Failed to connect to " << _remote.getAddr() << ":" << _remote.getPort()
-                  << " after " << connectTimeoutMillis << " milliseconds, giving up.";
-        return false;
     }
 
     if (remote.getType() != AF_UNIX)
@@ -515,15 +468,7 @@ void Socket::send(const vector<pair<char*, int>>& data, const char* context) {
         }
 
         if (ret == -1) {
-            if (errno != EAGAIN || _timeout == 0) {
-                LOG(_logLevel) << "Socket " << context << " send() " << errnoWithDescription()
-                               << ' ' << remoteString();
-                throw SocketException(SocketException::SEND_ERROR, remoteString());
-            } else {
-                LOG(_logLevel) << "Socket " << context << " send() remote timeout "
-                               << remoteString();
-                throw SocketException(SocketException::SEND_TIMEOUT, remoteString());
-            }
+            handleSendError(ret, context);
         } else {
             struct iovec*& i = meta.msg_iov;
             while (ret > 0) {
@@ -595,18 +540,18 @@ void Socket::handleSendError(int ret, const char* context) {
     if ((mongo_errno == EAGAIN || mongo_errno == EWOULDBLOCK) && _timeout != 0) {
 #endif
         LOG(_logLevel) << "Socket " << context << " send() timed out " << remoteString();
-        throw SocketException(SocketException::SEND_TIMEOUT, remoteString());
+        throwSocketError(SocketErrorKind::SEND_TIMEOUT, remoteString());
     } else if (mongo_errno != EINTR) {
         LOG(_logLevel) << "Socket " << context << " send() " << errnoWithDescription(mongo_errno)
                        << ' ' << remoteString();
-        throw SocketException(SocketException::SEND_ERROR, remoteString());
+        throwSocketError(SocketErrorKind::SEND_ERROR, remoteString());
     }
 }
 
 void Socket::handleRecvError(int ret, int len) {
     if (ret == 0) {
         LOG(3) << "Socket recv() conn closed? " << remoteString();
-        throw SocketException(SocketException::CLOSED, remoteString());
+        throwSocketError(SocketErrorKind::CLOSED, remoteString());
     }
 
 // ret < 0
@@ -629,11 +574,11 @@ void Socket::handleRecvError(int ret, int len) {
 #endif
         // this is a timeout
         LOG(_logLevel) << "Socket recv() timeout  " << remoteString();
-        throw SocketException(SocketException::RECV_TIMEOUT, remoteString());
+        throwSocketError(SocketErrorKind::RECV_TIMEOUT, remoteString());
     }
 
     LOG(_logLevel) << "Socket recv() " << errnoWithDescription(e) << " " << remoteString();
-    throw SocketException(SocketException::RECV_ERROR, remoteString());
+    throwSocketError(SocketErrorKind::RECV_ERROR, remoteString());
 }
 
 void Socket::setTimeout(double secs) {
@@ -769,17 +714,5 @@ bool Socket::isStillConnected() {
 
     return false;
 }
-
-#if defined(_WIN32)
-struct WinsockInit {
-    WinsockInit() {
-        WSADATA d;
-        if (WSAStartup(MAKEWORD(2, 2), &d) != 0) {
-            log() << "ERROR: wsastartup failed " << errnoWithDescription();
-            quickExit(EXIT_NTSERVICE_ERROR);
-        }
-    }
-} winsock_init;
-#endif
 
 }  // namespace mongo

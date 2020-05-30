@@ -35,7 +35,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/util/net/message.h"
+#include "mongo/rpc/message.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -84,8 +84,7 @@ struct RemoteCommandResponse {
     Status status = Status::OK();
 };
 
+std::ostream& operator<<(std::ostream& os, const RemoteCommandResponse& request);
+
 }  // namespace executor
-
-std::ostream& operator<<(std::ostream& os, const executor::RemoteCommandResponse& request);
-
 }  // namespace mongo

@@ -43,14 +43,14 @@ namespace repl {
 
 using executor::RemoteCommandRequest;
 using LockGuard = stdx::lock_guard<stdx::mutex>;
-using CallbackHandle = ReplicationExecutor::CallbackHandle;
-using EventHandle = ReplicationExecutor::EventHandle;
-using RemoteCommandCallbackArgs = ReplicationExecutor::RemoteCommandCallbackArgs;
-using RemoteCommandCallbackFn = ReplicationExecutor::RemoteCommandCallbackFn;
+using CallbackHandle = executor::TaskExecutor::CallbackHandle;
+using EventHandle = executor::TaskExecutor::EventHandle;
+using RemoteCommandCallbackArgs = executor::TaskExecutor::RemoteCommandCallbackArgs;
+using RemoteCommandCallbackFn = executor::TaskExecutor::RemoteCommandCallbackFn;
 
-ScatterGatherRunner::ScatterGatherRunner(ScatterGatherAlgorithm* algorithm,
-                                         ReplicationExecutor* executor)
-    : _executor(executor), _impl(std::make_shared<RunnerImpl>(algorithm, executor)) {}
+ScatterGatherRunner::ScatterGatherRunner(std::shared_ptr<ScatterGatherAlgorithm> algorithm,
+                                         executor::TaskExecutor* executor)
+    : _executor(executor), _impl(std::make_shared<RunnerImpl>(std::move(algorithm), executor)) {}
 
 Status ScatterGatherRunner::run() {
     auto finishEvh = start();
@@ -79,9 +79,9 @@ void ScatterGatherRunner::cancel() {
 /**
  * Scatter gather runner implementation.
  */
-ScatterGatherRunner::RunnerImpl::RunnerImpl(ScatterGatherAlgorithm* algorithm,
-                                            ReplicationExecutor* executor)
-    : _executor(executor), _algorithm(algorithm) {}
+ScatterGatherRunner::RunnerImpl::RunnerImpl(std::shared_ptr<ScatterGatherAlgorithm> algorithm,
+                                            executor::TaskExecutor* executor)
+    : _executor(executor), _algorithm(std::move(algorithm)) {}
 
 StatusWith<EventHandle> ScatterGatherRunner::RunnerImpl::start(
     const RemoteCommandCallbackFn processResponseCB) {
@@ -124,7 +124,7 @@ void ScatterGatherRunner::RunnerImpl::cancel() {
 }
 
 void ScatterGatherRunner::RunnerImpl::processResponse(
-    const ReplicationExecutor::RemoteCommandCallbackArgs& cbData) {
+    const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData) {
     LockGuard lk(_mutex);
 
     if (!_sufficientResponsesReceived.isValid()) {
@@ -138,10 +138,6 @@ void ScatterGatherRunner::RunnerImpl::processResponse(
     std::swap(*iter, _callbacks.back());
     _callbacks.pop_back();
 
-    if (cbData.response.status == ErrorCodes::CallbackCanceled) {
-        return;
-    }
-
     _algorithm->processResponse(cbData.request, cbData.response);
     if (_algorithm->hasReceivedSufficientResponses()) {
         _signalSufficientResponsesReceived();
@@ -152,9 +148,9 @@ void ScatterGatherRunner::RunnerImpl::processResponse(
 
 void ScatterGatherRunner::RunnerImpl::_signalSufficientResponsesReceived() {
     if (_sufficientResponsesReceived.isValid()) {
-        std::for_each(_callbacks.begin(),
-                      _callbacks.end(),
-                      stdx::bind(&ReplicationExecutor::cancel, _executor, stdx::placeholders::_1));
+        for (const CallbackHandle& cbh : _callbacks) {
+            _executor->cancel(cbh);
+        };
         // Clear _callbacks to break the cycle of shared_ptr.
         _callbacks.clear();
         _executor->signalEvent(_sufficientResponsesReceived);

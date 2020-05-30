@@ -29,19 +29,18 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/commands.h"
-#include "mongo/s/catalog/catalog_cache.h"
-#include "mongo/s/config.h"
+#include "mongo/s/catalog_cache.h"
 #include "mongo/s/grid.h"
 
 namespace mongo {
 namespace {
 
-class FlushRouterConfigCmd : public Command {
+class FlushRouterConfigCmd : public BasicCommand {
 public:
-    FlushRouterConfigCmd() : Command("flushRouterConfig", false, "flushrouterconfig") {}
+    FlushRouterConfigCmd() : BasicCommand("flushRouterConfig", "flushrouterconfig") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     virtual bool adminOnly() const {
@@ -53,25 +52,23 @@ public:
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "flush all router config";
+    std::string help() const override {
+        return "flush all router config";
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::flushRouterConfig);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
-        grid.catalogCache()->invalidateAll();
+        Grid::get(opCtx)->catalogCache()->purgeAllDatabases();
 
         result.appendBool("flushed", true);
         return true;

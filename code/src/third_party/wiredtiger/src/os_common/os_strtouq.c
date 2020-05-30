@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -14,6 +14,7 @@
  */
 uint64_t
 __wt_strtouq(const char *nptr, char **endptr, int base)
+    WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 #if defined(HAVE_STRTOUQ)
 	return (strtouq(nptr, endptr, base));

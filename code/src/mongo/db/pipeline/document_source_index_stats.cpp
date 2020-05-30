@@ -32,14 +32,14 @@
 
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
 #include "mongo/db/server_options.h"
-#include "mongo/util/net/sock.h"
+#include "mongo/util/net/socket_utils.h"
 
 namespace mongo {
 
 using boost::intrusive_ptr;
 
 REGISTER_DOCUMENT_SOURCE(indexStats,
-                         LiteParsedDocumentSourceDefault::parse,
+                         DocumentSourceIndexStats::LiteParsed::parse,
                          DocumentSourceIndexStats::createFromBson);
 
 const char* DocumentSourceIndexStats::getSourceName() const {
@@ -50,7 +50,7 @@ DocumentSource::GetNextResult DocumentSourceIndexStats::getNext() {
     pExpCtx->checkForInterrupt();
 
     if (_indexStatsMap.empty()) {
-        _indexStatsMap = _mongod->getIndexStats(pExpCtx->opCtx, pExpCtx->ns);
+        _indexStatsMap = pExpCtx->mongoProcessInterface->getIndexStats(pExpCtx->opCtx, pExpCtx->ns);
         _indexStatsIter = _indexStatsMap.begin();
     }
 
@@ -70,8 +70,7 @@ DocumentSource::GetNextResult DocumentSourceIndexStats::getNext() {
 }
 
 DocumentSourceIndexStats::DocumentSourceIndexStats(const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
-      _processName(str::stream() << getHostNameCached() << ":" << serverGlobalParams.port) {}
+    : DocumentSource(pExpCtx), _processName(getHostNameCachedAndPort()) {}
 
 intrusive_ptr<DocumentSource> DocumentSourceIndexStats::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& pExpCtx) {
@@ -81,7 +80,8 @@ intrusive_ptr<DocumentSource> DocumentSourceIndexStats::createFromBson(
     return new DocumentSourceIndexStats(pExpCtx);
 }
 
-Value DocumentSourceIndexStats::serialize(bool explain) const {
+Value DocumentSourceIndexStats::serialize(
+    boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value(DOC(getSourceName() << Document()));
 }
 }

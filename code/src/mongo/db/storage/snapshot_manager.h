@@ -34,12 +34,9 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/storage/snapshot_name.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
-
-class RecoveryUnit;
 
 /**
  * Manages snapshots that can be read from at a later time.
@@ -50,46 +47,25 @@ class RecoveryUnit;
 class SnapshotManager {
 public:
     /**
-     * Prepares the passed-in OperationContext for snapshot creation.
-     *
-     * The passed-in OperationContext will be associated with a point-in-time that can be used
-     * for creating a snapshot later.
-     *
-     * This must be the first method called after starting a ScopedTransaction, and it is
-     * illegal to start a WriteUnitOfWork inside of the same ScopedTransaction.
-     */
-    virtual Status prepareForCreateSnapshot(OperationContext* txn) = 0;
-
-    /**
-     * Creates a new named snapshot representing the same point-in-time captured in
-     * prepareForCreateSnapshot().
-     *
-     * Must be called in the same ScopedTransaction as prepareForCreateSnapshot.
-     *
-     * Caller guarantees that this name must compare greater than all existing snapshots.
-     */
-    virtual Status createSnapshot(OperationContext* txn, const SnapshotName& name) = 0;
-
-    /**
      * Sets the snapshot to be used for committed reads.
      *
      * Implementations are allowed to assume that all older snapshots have names that compare
      * less than the passed in name, and newer ones compare greater.
      *
      * This is called while holding a very hot mutex. Therefore it should avoid doing any work that
-     * can be done later. In particular, cleaning up of old snapshots should be deferred until
-     * cleanupUnneededSnapshots is called.
+     * can be done later.
      */
-    virtual void setCommittedSnapshot(const SnapshotName& name) = 0;
+    virtual void setCommittedSnapshot(const Timestamp& timestamp) = 0;
 
     /**
-     * Cleans up all snapshots older than the current committed snapshot.
-     *
-     * Operations that have already begun using an older snapshot must continue to work using that
-     * snapshot until they would normally start using a newer one. Any implementation that allows
-     * that without an unbounded growth of snapshots is permitted.
+     *  Sets the snapshot for the last stable timestamp for reading on secondaries.
      */
-    virtual void cleanupUnneededSnapshots() = 0;
+    virtual void setLocalSnapshot(const Timestamp& timestamp) = 0;
+
+    /**
+     * Returns the local snapshot timestamp.
+     */
+    virtual boost::optional<Timestamp> getLocalSnapshot() = 0;
 
     /**
      * Drops all snapshots and clears the "committed" snapshot.

@@ -1,5 +1,3 @@
-// ephemeral_for_test_init.cpp
-
 /**
  *    Copyright (C) 2014 MongoDB Inc.
  *
@@ -31,10 +29,10 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/base/init.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_engine.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
+#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_options.h"
 
 namespace mongo {
@@ -46,6 +44,10 @@ public:
     virtual ~EphemeralForTestFactory() {}
     virtual StorageEngine* create(const StorageGlobalParams& params,
                                   const StorageEngineLockFile* lockFile) const {
+        uassert(ErrorCodes::InvalidOptions,
+                "ephemeralForTest does not support --groupCollections",
+                !params.groupCollections);
+
         KVStorageEngineOptions options;
         options.directoryPerDB = params.directoryperdb;
         options.forRepair = params.repair;
@@ -66,13 +68,10 @@ public:
     }
 };
 
+ServiceContext::ConstructorActionRegisterer registerEphemeralForTest(
+    "RegisterEphemeralForTestEngine", [](ServiceContext* service) {
+        registerStorageEngine(service, std::make_unique<EphemeralForTestFactory>());
+    });
+
 }  // namespace
-
-MONGO_INITIALIZER_WITH_PREREQUISITES(EphemeralForTestEngineInit, ("SetGlobalEnvironment"))
-(InitializerContext* context) {
-    getGlobalServiceContext()->registerStorageEngine("ephemeralForTest",
-                                                     new EphemeralForTestFactory());
-    return Status::OK();
-}
-
 }  // namespace mongo

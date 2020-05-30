@@ -34,6 +34,7 @@
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/remote_command_request.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/util/assert_util.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -43,8 +44,8 @@ Status TaskExecutorTest::getDetectableErrorStatus() {
     return Status(ErrorCodes::InternalError, "Not mutated");
 }
 
-void TaskExecutorTest::assertRemoteCommandNameEquals(StringData cmdName,
-                                                     const RemoteCommandRequest& request) {
+RemoteCommandRequest TaskExecutorTest::assertRemoteCommandNameEquals(
+    StringData cmdName, const RemoteCommandRequest& request) {
     auto&& cmdObj = request.cmdObj;
     ASSERT_FALSE(cmdObj.isEmpty());
     if (cmdName != cmdObj.firstElementFieldName()) {
@@ -53,6 +54,7 @@ void TaskExecutorTest::assertRemoteCommandNameEquals(StringData cmdName,
             << cmdObj.firstElementFieldName() << "\" instead: " << request.toString();
         FAIL(msg);
     }
+    return request;
 }
 
 TaskExecutorTest::~TaskExecutorTest() = default;
@@ -61,42 +63,29 @@ void TaskExecutorTest::setUp() {
     auto net = stdx::make_unique<NetworkInterfaceMock>();
     _net = net.get();
     _executor = makeTaskExecutor(std::move(net));
-    _executorState = LifecycleState::kPreStart;
 }
 
 void TaskExecutorTest::tearDown() {
-    if (_executorState == LifecycleState::kRunning) {
-        shutdownExecutorThread();
-    }
-    if (_executorState == LifecycleState::kJoinRequired) {
-        joinExecutorThread();
-    }
-    invariant(_executorState == LifecycleState::kPreStart ||
-              _executorState == LifecycleState::kShutdownComplete);
-    _executor.reset();
+    _executor.reset(nullptr);
+    _net = nullptr;
 }
 
 void TaskExecutorTest::launchExecutorThread() {
-    invariant(_executorState == LifecycleState::kPreStart);
     _executor->startup();
-    _executorState = LifecycleState::kRunning;
     postExecutorThreadLaunch();
 }
 
 void TaskExecutorTest::shutdownExecutorThread() {
-    invariant(_executorState == LifecycleState::kRunning);
     _executor->shutdown();
-    _executorState = LifecycleState::kJoinRequired;
 }
 
 void TaskExecutorTest::joinExecutorThread() {
-    // Tests may call shutdown() directly, bypassing the state change in shutdownExecutorThread().
-    invariant(_executorState == LifecycleState::kRunning ||
-              _executorState == LifecycleState::kJoinRequired);
     _net->exitNetwork();
-    _executorState = LifecycleState::kJoining;
     _executor->join();
-    _executorState = LifecycleState::kShutdownComplete;
+}
+
+void TaskExecutorTest::_doTest() {
+    MONGO_UNREACHABLE;
 }
 
 void TaskExecutorTest::postExecutorThreadLaunch() {}

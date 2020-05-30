@@ -40,11 +40,12 @@
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/server_parameters.h"
+#include "mongo/platform/compiler.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/grid.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/background.h"
+#include "mongo/util/concurrency/idle_thread_block.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 #include "mongo/util/time_support.h"
@@ -53,48 +54,48 @@ namespace mongo {
 namespace {
 
 // How often to check with the config servers whether authorization information has changed.
-std::atomic<int> userCacheInvalidationIntervalSecs(30);  // NOLINT 30 second default
+AtomicInt32 userCacheInvalidationIntervalSecs(30);  // 30 second default
 stdx::mutex invalidationIntervalMutex;
 stdx::condition_variable invalidationIntervalChangedCondition;
 Date_t lastInvalidationTime;
 
 class ExportedInvalidationIntervalParameter
     : public ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime> {
+    using Base = ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>;
+
 public:
     ExportedInvalidationIntervalParameter()
-        : ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>(
-              ServerParameterSet::getGlobal(),
-              "userCacheInvalidationIntervalSecs",
-              &userCacheInvalidationIntervalSecs) {}
+        : Base(ServerParameterSet::getGlobal(),
+               "userCacheInvalidationIntervalSecs",
+               &userCacheInvalidationIntervalSecs) {}
 
-    virtual Status validate(const int& potentialNewValue) {
-        if (potentialNewValue < 1 || potentialNewValue > 86400) {
-            return Status(ErrorCodes::BadValue,
-                          "userCacheInvalidationIntervalSecs must be between 1 "
-                          "and 86400 (24 hours)");
-        }
-        return Status::OK();
-    }
+    // Don't hide Base::set(const BSONElement&)
+    using Base::set;
 
-    // Without this the compiler complains that defining set(const int&)
-    // hides set(const BSONElement&)
-    using ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>::set;
-
-    virtual Status set(const int& newValue) {
+    Status set(const int& newValue) override {
         stdx::unique_lock<stdx::mutex> lock(invalidationIntervalMutex);
-        Status status =
-            ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime>::set(newValue);
+        Status status = Base::set(newValue);
         invalidationIntervalChangedCondition.notify_all();
         return status;
     }
+};
 
-} exportedIntervalParam;
+MONGO_COMPILER_VARIABLE_UNUSED auto _exportedInterval =
+    (new ExportedInvalidationIntervalParameter())
+        -> withValidator([](const int& potentialNewValue) {
+            if (potentialNewValue < 1 || potentialNewValue > 86400) {
+                return Status(ErrorCodes::BadValue,
+                              "userCacheInvalidationIntervalSecs must be between 1 "
+                              "and 86400 (24 hours)");
+            }
+            return Status::OK();
+        });
 
-StatusWith<OID> getCurrentCacheGeneration(OperationContext* txn) {
+StatusWith<OID> getCurrentCacheGeneration(OperationContext* opCtx) {
     try {
         BSONObjBuilder result;
-        const bool ok = grid.catalogClient(txn)->runUserManagementReadCommand(
-            txn, "admin", BSON("_getUserCacheGeneration" << 1), &result);
+        const bool ok = Grid::get(opCtx)->catalogClient()->runUserManagementReadCommand(
+            opCtx, "admin", BSON("_getUserCacheGeneration" << 1), &result);
         if (!ok) {
             return getStatusFromCommandResult(result.obj());
         }
@@ -112,13 +113,13 @@ UserCacheInvalidator::UserCacheInvalidator(AuthorizationManager* authzManager)
     : _authzManager(authzManager) {}
 
 UserCacheInvalidator::~UserCacheInvalidator() {
-    invariant(inShutdown());
+    invariant(globalInShutdownDeprecated());
     // Wait to stop running.
     wait();
 }
 
-void UserCacheInvalidator::initialize(OperationContext* txn) {
-    StatusWith<OID> currentGeneration = getCurrentCacheGeneration(txn);
+void UserCacheInvalidator::initialize(OperationContext* opCtx) {
+    StatusWith<OID> currentGeneration = getCurrentCacheGeneration(opCtx);
     if (currentGeneration.isOK()) {
         _previousCacheGeneration = currentGeneration.getValue();
         return;
@@ -146,6 +147,7 @@ void UserCacheInvalidator::run() {
             lastInvalidationTime + Seconds(userCacheInvalidationIntervalSecs.load());
         Date_t now = Date_t::now();
         while (now < sleepUntil) {
+            MONGO_IDLE_THREAD_BLOCK;
             invalidationIntervalChangedCondition.wait_until(lock, sleepUntil.toSystemTimePoint());
             sleepUntil = lastInvalidationTime + Seconds(userCacheInvalidationIntervalSecs.load());
             now = Date_t::now();
@@ -153,12 +155,12 @@ void UserCacheInvalidator::run() {
         lastInvalidationTime = now;
         lock.unlock();
 
-        if (inShutdown()) {
+        if (globalInShutdownDeprecated()) {
             break;
         }
 
-        auto txn = cc().makeOperationContext();
-        StatusWith<OID> currentGeneration = getCurrentCacheGeneration(txn.get());
+        auto opCtx = cc().makeOperationContext();
+        StatusWith<OID> currentGeneration = getCurrentCacheGeneration(opCtx.get());
         if (!currentGeneration.isOK()) {
             if (currentGeneration.getStatus().code() == ErrorCodes::CommandNotFound) {
                 warning() << "_getUserCacheGeneration command not found on config server(s), "

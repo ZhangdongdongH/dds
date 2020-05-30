@@ -33,6 +33,7 @@
 #include <boost/filesystem/operations.hpp>
 #include <iostream>
 
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/lock_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/storage/mmap_v1/data_file.h"
@@ -43,6 +44,7 @@
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage/storage_options.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/util/scopeguard.h"
 #include "mongo/util/timer.h"
 
 namespace MMapTests {
@@ -73,13 +75,17 @@ public:
         } catch (...) {
         }
 
-        MMAPV1LockerImpl lockState;
-        Lock::GlobalWrite lk(&lockState);
+        auto opCtx = cc().makeOperationContext();
+        Lock::GlobalWrite lk(opCtx.get());
 
         {
-            DurableMappedFile f;
+            DurableMappedFile f(opCtx.get());
+            ON_BLOCK_EXIT([&f, &opCtx] {
+                LockMongoFilesExclusive lock(opCtx.get());
+                f.close(opCtx.get());
+            });
             unsigned long long len = 256 * 1024 * 1024;
-            verify(f.create(fn, len));
+            verify(f.create(opCtx.get(), fn, len));
             {
                 char* p = (char*)f.getView();
                 verify(p);
@@ -92,12 +98,12 @@ public:
                 char* w = (char*)f.view_write();
                 strcpy(w + 6, "world");
             }
-            MongoFileFinder ff;
+            MongoFileFinder ff(opCtx.get());
             ASSERT(ff.findByPath(fn));
             ASSERT(ff.findByPath("asdf") == 0);
         }
         {
-            MongoFileFinder ff;
+            MongoFileFinder ff(opCtx.get());
             ASSERT(ff.findByPath(fn) == 0);
         }
 
@@ -111,9 +117,14 @@ public:
         Timer t;
         for (int i = 0; i < N; i++) {
             // Every 4 iterations we pass the sequential hint.
-            DurableMappedFile f{i % 4 == 1 ? MongoFile::Options::SEQUENTIAL
+            DurableMappedFile f{opCtx.get(),
+                                i % 4 == 1 ? MongoFile::Options::SEQUENTIAL
                                            : MongoFile::Options::NONE};
-            verify(f.open(fn));
+            ON_BLOCK_EXIT([&f, &opCtx] {
+                LockMongoFilesExclusive lock(opCtx.get());
+                f.close(opCtx.get());
+            });
+            verify(f.open(opCtx.get(), fn));
             {
                 char* p = (char*)f.getView();
                 verify(p);
@@ -182,7 +193,7 @@ class All : public Suite {
 public:
     All() : Suite("mmap") {}
     void setupTests() {
-        if (!getGlobalServiceContext()->getGlobalStorageEngine()->isMmapV1())
+        if (!getGlobalServiceContext()->getStorageEngine()->isMmapV1())
             return;
 
         add<LeakTest>();
@@ -298,4 +309,4 @@ SuiteInstance<All> myall;
     } myall;
 
 #endif
-}
+}  // namespace MMapTests

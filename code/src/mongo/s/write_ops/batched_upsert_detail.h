@@ -29,11 +29,8 @@
 #pragma once
 
 #include <string>
-#include <vector>
 
-#include "mongo/base/string_data.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/s/bson_serializable.h"
 
 namespace mongo {
 
@@ -41,7 +38,7 @@ namespace mongo {
  * This class represents the layout and content of an idem inside the 'upserted' array
  * of a write command's response (see batched_command_response.h)
  */
-class BatchedUpsertDetail : public BSONSerializable {
+class BatchedUpsertDetail {
     MONGO_DISALLOW_COPYING(BatchedUpsertDetail);
 
 public:
@@ -57,7 +54,6 @@ public:
     //
 
     BatchedUpsertDetail();
-    virtual ~BatchedUpsertDetail();
 
     /** Copies all the fields present in 'this' to 'other'. */
     void cloneTo(BatchedUpsertDetail* other) const;
@@ -66,11 +62,9 @@ public:
     // bson serializable interface implementation
     //
 
-    virtual bool isValid(std::string* errMsg) const;
-    virtual BSONObj toBSON() const;
-    virtual bool parseBSON(const BSONObj& source, std::string* errMsg);
-    virtual void clear();
-    virtual std::string toString() const;
+    BSONObj toBSON() const;
+    bool parseBSON(const BSONObj& source, std::string* errMsg);
+    void clear();
 
     //
     // individual field accessors

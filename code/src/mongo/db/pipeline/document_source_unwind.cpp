@@ -183,7 +183,6 @@ intrusive_ptr<DocumentSourceUnwind> DocumentSourceUnwind::create(
                                  FieldPath(unwindPath),
                                  preserveNullAndEmptyArrays,
                                  indexPath ? FieldPath(*indexPath) : boost::optional<FieldPath>()));
-    source->injectExpressionContext(expCtx);
     return source;
 }
 
@@ -237,10 +236,10 @@ DocumentSource::GetModPathsReturn DocumentSourceUnwind::getModifiedPaths() const
     if (_indexPath) {
         modifiedFields.insert(_indexPath->fullPath());
     }
-    return {GetModPathsReturn::Type::kFiniteSet, std::move(modifiedFields)};
+    return {GetModPathsReturn::Type::kFiniteSet, std::move(modifiedFields), {}};
 }
 
-Value DocumentSourceUnwind::serialize(bool explain) const {
+Value DocumentSourceUnwind::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     return Value(DOC(getSourceName() << DOC(
                          "path" << _unwindPath.fullPathWithPrefix() << "preserveNullAndEmptyArrays"
                                 << (_preserveNullAndEmptyArrays ? Value(true) : Value())

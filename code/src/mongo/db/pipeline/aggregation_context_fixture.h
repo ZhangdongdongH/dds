@@ -31,10 +31,8 @@
 #include <boost/intrusive_ptr.hpp>
 #include <memory>
 
-#include "mongo/db/client.h"
-#include "mongo/db/pipeline/expression_context.h"
-#include "mongo/db/query/query_test_service_context.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
@@ -43,21 +41,25 @@ namespace mongo {
 /**
  * Test fixture which provides an ExpressionContext for use in testing.
  */
-class AggregationContextFixture : public unittest::Test {
+class AggregationContextFixture : public ServiceContextTest {
 public:
     AggregationContextFixture()
-        : _queryServiceContext(stdx::make_unique<QueryTestServiceContext>()),
-          _opCtx(_queryServiceContext->makeOperationContext()),
-          _expCtx(new ExpressionContext(
-              _opCtx.get(), AggregationRequest(NamespaceString("unittests.pipeline_test"), {}))) {}
+        : AggregationContextFixture(NamespaceString("unittests.pipeline_test")) {}
+
+    AggregationContextFixture(NamespaceString nss) {
+        TimeZoneDatabase::set(getServiceContext(), std::make_unique<TimeZoneDatabase>());
+        // Must instantiate ExpressionContext _after_ setting the TZ database on the service
+        // context.
+        _expCtx = new ExpressionContext(_opCtx.get(), nullptr);
+        _expCtx->ns = std::move(nss);
+    }
 
     boost::intrusive_ptr<ExpressionContext> getExpCtx() {
         return _expCtx.get();
     }
 
 private:
-    std::unique_ptr<QueryTestServiceContext> _queryServiceContext;
-    ServiceContext::UniqueOperationContext _opCtx;
+    ServiceContext::UniqueOperationContext _opCtx = makeOperationContext();
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 };
 }  // namespace mongo

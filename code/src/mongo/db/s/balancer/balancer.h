@@ -30,6 +30,7 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy.h"
+#include "mongo/db/s/balancer/balancer_random.h"
 #include "mongo/db/s/balancer/migration_manager.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
@@ -46,9 +47,7 @@ class Status;
 
 /**
  * The balancer is a background task that tries to keep the number of chunks across all
- * servers of the cluster even. Although every mongos will have one balancer running, only one
- * of them will be active at the any given point in time. The balancer uses a distributed lock
- * for that coordination.
+ * servers of the cluster even.
  *
  * The balancer does act continuously but in "rounds". At a given round, it would decide if
  * there is an imbalance by checking the difference in chunks between the most and least
@@ -76,41 +75,44 @@ public:
     /**
      * Invoked when the config server primary enters the 'PRIMARY' state and is invoked while the
      * caller is holding the global X lock. Kicks off the main balancer thread and returns
-     * immediately.
+     * immediately. Auto-balancing (if enabled) should commence shortly, and manual migrations will
+     * be processed and run.
      *
      * Must only be called if the balancer is in the stopped state (i.e., just constructed or
-     * onDrainComplete has been called before). Any code in this call must not try to acquire any
-     * locks or to wait on operations, which acquire locks.
+     * waitForBalancerToStop has been called before). Any code in this call must not try to acquire
+     * any locks or to wait on operations, which acquire locks.
      */
-    void onTransitionToPrimary(OperationContext* txn);
+    void initiateBalancer(OperationContext* opCtx);
 
     /**
      * Invoked when this node which is currently serving as a 'PRIMARY' steps down and is invoked
      * while the global X lock is held. Requests the main balancer thread to stop and returns
-     * immediately without waiting for it to terminate.
+     * immediately without waiting for it to terminate. Once the balancer has stopped, manual
+     * migrations will be rejected.
      *
      * This method might be called multiple times in succession, which is what happens as a result
      * of incomplete transition to primary so it is resilient to that.
      *
-     * The onDrainComplete method must be called afterwards in order to wait for the main balancer
-     * thread to terminate and to allow onTransitionToPrimary to be called again.
+     * The waitForBalancerToStop method must be called afterwards in order to wait for the main
+     * balancer thread to terminate and to allow initiateBalancer to be called again.
      */
-    void onStepDownFromPrimary();
+    void interruptBalancer();
 
     /**
      * Invoked when a node on its way to becoming a primary finishes draining and is about to
      * acquire the global X lock in order to allow writes. Waits for the balancer thread to
-     * terminate and primes the balancer so that onTransitionToPrimary can be called.
+     * terminate and primes the balancer so that initiateBalancer can be called.
      *
-     * This method is called without any locks held.
+     * This must not be called while holding any locks!
      */
-    void onDrainComplete(OperationContext* txn);
+    void waitForBalancerToStop();
 
     /**
      * Potentially blocking method, which will return immediately if the balancer is not running a
-     * balancer round and will block until the current round completes otherwise.
+     * balancer round and will block until the current round completes otherwise. If the operation
+     * context's deadline is exceeded, it will throw an ExceededTimeLimit exception.
      */
-    void joinCurrentRound(OperationContext* txn);
+    void joinCurrentRound(OperationContext* opCtx);
 
     /**
      * Blocking call, which requests the balancer to move a single chunk to a more appropriate
@@ -118,7 +120,7 @@ public:
      * will actually move because it may already be at the best shard. An error will be returned if
      * the attempt to find a better shard or the actual migration fail for any reason.
      */
-    Status rebalanceSingleChunk(OperationContext* txn, const ChunkType& chunk);
+    Status rebalanceSingleChunk(OperationContext* opCtx, const ChunkType& chunk);
 
     /**
      * Blocking call, which requests the balancer to move a single chunk to the specified location
@@ -128,7 +130,7 @@ public:
      * NOTE: This call disregards the balancer enabled/disabled status and will proceed with the
      *       move regardless. If should be used only for user-initiated moves.
      */
-    Status moveSingleChunk(OperationContext* txn,
+    Status moveSingleChunk(OperationContext* opCtx,
                            const ChunkType& chunk,
                            const ShardId& newShardId,
                            uint64_t maxChunkSizeBytes,
@@ -138,7 +140,7 @@ public:
     /**
      * Appends the runtime state of the balancer instance to the specified builder.
      */
-    void report(OperationContext* txn, BSONObjBuilder* builder);
+    void report(OperationContext* opCtx, BSONObjBuilder* builder);
 
 private:
     /**
@@ -163,39 +165,39 @@ private:
     /**
      * Signals the beginning and end of a balancing round.
      */
-    void _beginRound(OperationContext* txn);
-    void _endRound(OperationContext* txn, Seconds waitTimeout);
+    void _beginRound(OperationContext* opCtx);
+    void _endRound(OperationContext* opCtx, Seconds waitTimeout);
 
     /**
      * Blocks the caller for the specified timeout or until the balancer condition variable is
      * signaled, whichever comes first.
      */
-    void _sleepFor(OperationContext* txn, Seconds waitTimeout);
+    void _sleepFor(OperationContext* opCtx, Seconds waitTimeout);
 
     /**
      * Returns true if all the servers listed in configdb as being shards are reachable and are
      * distinct processes (no hostname mixup).
      */
-    bool _checkOIDs(OperationContext* txn);
+    bool _checkOIDs(OperationContext* opCtx);
 
     /**
      * Iterates through all chunks in all collections and ensures that no chunks straddle tag
      * boundary. If any do, they will be split.
      */
-    Status _enforceTagRanges(OperationContext* txn);
+    Status _enforceTagRanges(OperationContext* opCtx);
 
     /**
      * Schedules migrations for the specified set of chunks and returns how many chunks were
      * successfully processed.
      */
-    int _moveChunks(OperationContext* txn,
+    int _moveChunks(OperationContext* opCtx,
                     const BalancerChunkSelectionPolicy::MigrateInfoVector& candidateChunks);
 
     /**
      * Performs a split on the chunk with min value "minKey". If the split fails, it is marked as
      * jumbo.
      */
-    void _splitOrMarkJumbo(OperationContext* txn,
+    void _splitOrMarkJumbo(OperationContext* opCtx,
                            const NamespaceString& nss,
                            const BSONObj& minKey);
 
@@ -236,11 +238,15 @@ private:
     // Number of moved chunks in last round
     int _balancedLastTime;
 
-    // Source for cluster statistics
+    // Source of randomness when metadata needs to be randomized.
+    BalancerRandomSource _random;
+
+    // Source for cluster statistics. Depends on the source of randomness above so it should be
+    // created after it and destroyed before it.
     std::unique_ptr<ClusterStatistics> _clusterStats;
 
-    // Balancer policy. Depends on the cluster statistics instance above so it should be created
-    // after it and destroyed before it.
+    // Balancer policy. Depends on the cluster statistics instance and source of randomness above so
+    // it should be created after them and destroyed before them.
     std::unique_ptr<BalancerChunkSelectionPolicy> _chunkSelectionPolicy;
 
     // Migration manager used to schedule and manage migrations

@@ -39,61 +39,75 @@ namespace repl {
 DataReplicatorExternalStateMock::DataReplicatorExternalStateMock()
     : multiApplyFn([](OperationContext*,
                       const MultiApplier::Operations& ops,
-                      MultiApplier::ApplyOperationFn) { return ops.back().getOpTime(); }) {}
+                      OplogApplier::Observer*) { return ops.back().getOpTime(); }) {}
 
 executor::TaskExecutor* DataReplicatorExternalStateMock::getTaskExecutor() const {
     return taskExecutor;
-}
-
-OldThreadPool* DataReplicatorExternalStateMock::getDbWorkThreadPool() const {
-    return dbWorkThreadPool;
 }
 
 OpTimeWithTerm DataReplicatorExternalStateMock::getCurrentTermAndLastCommittedOpTime() {
     return {currentTerm, lastCommittedOpTime};
 }
 
-void DataReplicatorExternalStateMock::processMetadata(const rpc::ReplSetMetadata& metadata) {
-    metadataProcessed = metadata;
+void DataReplicatorExternalStateMock::processMetadata(
+    const rpc::ReplSetMetadata& replMetadata, boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
+    replMetadataProcessed = replMetadata;
+    if (oqMetadata) {
+        oqMetadataProcessed = oqMetadata.get();
+    }
+    metadataWasProcessed = true;
 }
 
-bool DataReplicatorExternalStateMock::shouldStopFetching(const HostAndPort& source,
-                                                         const rpc::ReplSetMetadata& metadata) {
+bool DataReplicatorExternalStateMock::shouldStopFetching(
+    const HostAndPort& source,
+    const rpc::ReplSetMetadata& replMetadata,
+    boost::optional<rpc::OplogQueryMetadata> oqMetadata) {
     lastSyncSourceChecked = source;
-    syncSourceLastOpTime = metadata.getLastOpVisible();
-    syncSourceHasSyncSource = metadata.getSyncSourceIndex() != -1;
+
+    // If OplogQueryMetadata was provided, use its values, otherwise use the ones in
+    // ReplSetMetadata.
+    if (oqMetadata) {
+        syncSourceLastOpTime = oqMetadata->getLastOpApplied();
+        syncSourceHasSyncSource = oqMetadata->getSyncSourceIndex() != -1;
+    } else {
+        syncSourceLastOpTime = replMetadata.getLastOpVisible();
+        syncSourceHasSyncSource = replMetadata.getSyncSourceIndex() != -1;
+    }
     return shouldStopFetchingResult;
 }
 
 std::unique_ptr<OplogBuffer> DataReplicatorExternalStateMock::makeInitialSyncOplogBuffer(
-    OperationContext* txn) const {
+    OperationContext* opCtx) const {
     return stdx::make_unique<OplogBufferBlockingQueue>();
 }
 
-std::unique_ptr<OplogBuffer> DataReplicatorExternalStateMock::makeSteadyStateOplogBuffer(
-    OperationContext* txn) const {
-    return stdx::make_unique<OplogBufferBlockingQueue>();
+StatusWith<OplogApplier::Operations> DataReplicatorExternalStateMock::getNextApplierBatch(
+    OperationContext* opCtx, OplogBuffer* oplogBuffer) {
+    OplogApplier::Operations ops;
+    OplogBuffer::Value op;
+    // For testing only. Return a single batch containing all of the operations in the oplog buffer.
+    while (oplogBuffer->tryPop(opCtx, &op)) {
+        OplogEntry entry(op);
+        // The "InitialSyncerPassesThroughGetNextApplierBatchInLockError" test case expects
+        // ErrorCodes::BadValue on an unexpected oplog entry version.
+        if (entry.getVersion() != OplogEntry::kOplogVersion) {
+            return {ErrorCodes::BadValue, ""};
+        }
+        ops.push_back(entry);
+    }
+    return std::move(ops);
 }
 
-StatusWith<ReplicaSetConfig> DataReplicatorExternalStateMock::getCurrentConfig() const {
-    return replSetConfig;
+StatusWith<ReplSetConfig> DataReplicatorExternalStateMock::getCurrentConfig() const {
+    return replSetConfigResult;
 }
 
-StatusWith<OpTime> DataReplicatorExternalStateMock::_multiApply(
-    OperationContext* txn,
-    MultiApplier::Operations ops,
-    MultiApplier::ApplyOperationFn applyOperation) {
-    return multiApplyFn(txn, std::move(ops), applyOperation);
-}
-
-Status DataReplicatorExternalStateMock::_multiSyncApply(MultiApplier::OperationPtrs* ops) {
-    return Status::OK();
-}
-
-Status DataReplicatorExternalStateMock::_multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                                               const HostAndPort& source,
-                                                               AtomicUInt32* fetchCount) {
-    return Status::OK();
+StatusWith<OpTime> DataReplicatorExternalStateMock::_multiApply(OperationContext* opCtx,
+                                                                MultiApplier::Operations ops,
+                                                                OplogApplier::Observer* observer,
+                                                                const HostAndPort& source,
+                                                                ThreadPool* writerPool) {
+    return multiApplyFn(opCtx, std::move(ops), observer);
 }
 
 }  // namespace repl

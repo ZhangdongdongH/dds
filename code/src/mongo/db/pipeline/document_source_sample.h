@@ -33,24 +33,35 @@
 
 namespace mongo {
 
-class DocumentSourceSample final : public DocumentSource, public SplittableDocumentSource {
+class DocumentSourceSample final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
+    static constexpr StringData kStageName = "$sample"_sd;
+
     GetNextResult getNext() final;
-    const char* getSourceName() const final;
-    Value serialize(bool explain = false) const final;
+    const char* getSourceName() const final {
+        return kStageName.rawData();
+    }
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kBlocking,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kWritesTmpData,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
+    }
 
     GetDepsReturn getDependencies(DepsTracker* deps) const final {
         return SEE_NEXT;
     }
 
     boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final;
 
     long long getSampleSize() const {
         return _size;
     }
-
-    void doInjectExpressionContext() final;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& expCtx);

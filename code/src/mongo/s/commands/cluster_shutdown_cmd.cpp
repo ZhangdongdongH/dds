@@ -36,19 +36,17 @@ namespace {
 
 class ClusterShutdownCmd : public CmdShutdown {
 public:
-    virtual void help(std::stringstream& help) const {
-        help << "shutdown the database.  must be ran against admin db and "
-             << "either (1) ran from localhost or (2) authenticated.";
+    std::string help() const override {
+        return "shutdown the database.  must be ran against admin db and "
+               "either (1) ran from localhost or (2) authenticated.";
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         // Never returns
-        shutdownHelper();
+        shutdownHelper(cmdObj);
         return true;
     }
 

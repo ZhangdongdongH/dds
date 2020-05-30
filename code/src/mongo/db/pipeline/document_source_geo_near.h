@@ -33,9 +33,11 @@
 
 namespace mongo {
 
-class DocumentSourceGeoNear : public DocumentSourceNeedsMongod, public SplittableDocumentSource {
+class DocumentSourceGeoNear : public DocumentSource, public NeedsMergerDocumentSource {
 public:
     static const long long kDefaultLimit;
+
+    static constexpr StringData kKeyFieldName = "key"_sd;
 
     // virtuals from DocumentSource
     GetNextResult getNext() final;
@@ -46,18 +48,28 @@ public:
      */
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
                                                      Pipeline::SourceContainer* container) final;
-    bool isValidInitialSource() const final {
-        return true;
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kAnyShard,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kAllowed);
+
+        constraints.requiresInputDocSource = false;
+        return constraints;
     }
-    Value serialize(bool explain = false) const final;
+
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
     BSONObjSet getOutputSorts() final {
         return SimpleBSONObjComparator::kInstance.makeBSONObjSet(
             {BSON(distanceField->fullPath() << -1)});
     }
 
-    // Virtuals for SplittableDocumentSource
+    // Virtuals for NeedsMergerDocumentSource
     boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final;
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pCtx);
@@ -95,6 +107,10 @@ private:
     bool spherical;
     double distanceMultiplier;
     std::unique_ptr<FieldPath> includeLocs;
+
+    // The field path over which the command should run, extracted from the 'key' parameter passed
+    // by the user. Or the empty string the user did not provide a 'key'.
+    std::string keyFieldPath;
 
     // these fields are used while processing the results
     BSONObj cmdOutput;

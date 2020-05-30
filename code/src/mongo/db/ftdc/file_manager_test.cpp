@@ -50,8 +50,10 @@
 
 namespace mongo {
 
+class FTDCFileManagerTest : public ServiceContextTest {};
+
 // Test a full buffer
-TEST(FTDCFileManagerTest, TestFull) {
+TEST_F(FTDCFileManagerTest, TestFull) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 300;
@@ -111,7 +113,7 @@ TEST(FTDCFileManagerTest, TestFull) {
                                                     Date_t()));
     }
 
-    mgr->close();
+    mgr->close().transitional_ignore();
 
     auto files = scanDirectory(dir);
 
@@ -149,7 +151,7 @@ void ValidateInterimFileHasData(const boost::filesystem::path& dir, bool hasData
 }
 
 // Test a normal restart
-TEST(FTDCFileManagerTest, TestNormalRestart) {
+TEST_F(FTDCFileManagerTest, TestNormalRestart) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 1000;
@@ -211,7 +213,7 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
                                                         Date_t()));
         }
 
-        mgr->close();
+        mgr->close().transitional_ignore();
 
         // Validate the interim file does not have data
         ValidateInterimFileHasData(dir, false);
@@ -219,7 +221,7 @@ TEST(FTDCFileManagerTest, TestNormalRestart) {
 }
 
 // Test a restart after a crash with a corrupt archive file
-TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
+TEST_F(FTDCFileManagerTest, TestCorruptCrashRestart) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxFileSizeBytes = 1000;
@@ -281,7 +283,7 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
                                                         Date_t()));
         }
 
-        mgr->close();
+        mgr->close().transitional_ignore();
 
         auto swFile = mgr->generateArchiveFileName(dir, "0test-crash");
         ASSERT_OK(swFile);
@@ -296,7 +298,7 @@ TEST(FTDCFileManagerTest, TestCorruptCrashRestart) {
 }
 
 // Test a restart with a good interim file, and validate we have all the data
-TEST(FTDCFileManagerTest, TestNormalCrashInterim) {
+TEST_F(FTDCFileManagerTest, TestNormalCrashInterim) {
     Client* client = &cc();
     FTDCConfig c;
     c.maxSamplesPerInterimMetricChunk = 3;
@@ -378,11 +380,11 @@ TEST(FTDCFileManagerTest, TestNormalCrashInterim) {
 
     // Validate old file
     std::vector<BSONObj> docs1 = {mdoc1, sdoc1, sdoc1};
-    ValidateDocumentList(files[0], docs1);
+    ValidateDocumentList(files[0], docs1, FTDCValidationMode::kStrict);
 
     // Validate new file
     std::vector<BSONObj> docs2 = {sdoc2, sdoc2, sdoc2, sdoc2};
-    ValidateDocumentList(files[1], docs2);
+    ValidateDocumentList(files[1], docs2, FTDCValidationMode::kStrict);
 }
 
 }  // namespace mongo

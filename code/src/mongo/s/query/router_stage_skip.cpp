@@ -34,14 +34,16 @@
 
 namespace mongo {
 
-RouterStageSkip::RouterStageSkip(std::unique_ptr<RouterExecStage> child, long long skip)
-    : RouterExecStage(std::move(child)), _skip(skip) {
+RouterStageSkip::RouterStageSkip(OperationContext* opCtx,
+                                 std::unique_ptr<RouterExecStage> child,
+                                 long long skip)
+    : RouterExecStage(opCtx, std::move(child)), _skip(skip) {
     invariant(skip > 0);
 }
 
-StatusWith<ClusterQueryResult> RouterStageSkip::next() {
+StatusWith<ClusterQueryResult> RouterStageSkip::next(RouterExecStage::ExecContext execContext) {
     while (_skippedSoFar < _skip) {
-        auto next = getChildStage()->next();
+        auto next = getChildStage()->next(execContext);
         if (!next.isOK()) {
             return next;
         }
@@ -50,30 +52,10 @@ StatusWith<ClusterQueryResult> RouterStageSkip::next() {
             return next;
         }
 
-        if (next.getValue().getViewDefinition()) {
-            return next;
-        }
-
         ++_skippedSoFar;
     }
 
-    return getChildStage()->next();
-}
-
-void RouterStageSkip::kill() {
-    getChildStage()->kill();
-}
-
-bool RouterStageSkip::remotesExhausted() {
-    return getChildStage()->remotesExhausted();
-}
-
-Status RouterStageSkip::setAwaitDataTimeout(Milliseconds awaitDataTimeout) {
-    return getChildStage()->setAwaitDataTimeout(awaitDataTimeout);
-}
-
-void RouterStageSkip::setOperationContext(OperationContext* txn) {
-    return getChildStage()->setOperationContext(txn);
+    return getChildStage()->next(execContext);
 }
 
 }  // namespace mongo

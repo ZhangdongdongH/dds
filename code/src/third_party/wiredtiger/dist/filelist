@@ -30,6 +30,7 @@ src/btree/bt_io.c
 src/btree/bt_misc.c
 src/btree/bt_ovfl.c
 src/btree/bt_page.c
+src/btree/bt_random.c
 src/btree/bt_read.c
 src/btree/bt_rebalance.c
 src/btree/bt_ret.c
@@ -71,6 +72,7 @@ src/conn/conn_dhandle.c
 src/conn/conn_handle.c
 src/conn/conn_log.c
 src/conn/conn_open.c
+src/conn/conn_reconfig.c
 src/conn/conn_stat.c
 src/conn/conn_sweep.c
 src/cursor/cur_backup.c
@@ -94,6 +96,7 @@ src/evict/evict_stat.c
 src/log/log.c
 src/log/log_auto.c
 src/log/log_slot.c
+src/log/log_sys.c
 src/lsm/lsm_cursor.c
 src/lsm/lsm_cursor_bulk.c
 src/lsm/lsm_manager.c
@@ -109,6 +112,7 @@ src/meta/meta_ext.c
 src/meta/meta_table.c
 src/meta/meta_track.c
 src/meta/meta_turtle.c
+src/optrack/optrack.c
 src/os_common/filename.c
 src/os_common/os_abort.c
 src/os_common/os_alloc.c
@@ -132,6 +136,7 @@ src/os_posix/os_path.c			POSIX_HOST
 src/os_posix/os_priv.c			POSIX_HOST
 src/os_posix/os_setvbuf.c		POSIX_HOST
 src/os_posix/os_sleep.c			POSIX_HOST
+src/os_posix/os_snprintf.c		POSIX_HOST
 src/os_posix/os_thread.c		POSIX_HOST
 src/os_posix/os_time.c			POSIX_HOST
 src/os_posix/os_yield.c			POSIX_HOST
@@ -151,7 +156,6 @@ src/os_win/os_snprintf.c		WINDOWS_HOST
 src/os_win/os_thread.c			WINDOWS_HOST
 src/os_win/os_time.c			WINDOWS_HOST
 src/os_win/os_utf8.c			WINDOWS_HOST
-src/os_win/os_vsnprintf.c		WINDOWS_HOST
 src/os_win/os_winerr.c			WINDOWS_HOST
 src/os_win/os_yield.c			WINDOWS_HOST
 src/packing/pack_api.c
@@ -159,6 +163,7 @@ src/packing/pack_impl.c
 src/packing/pack_stream.c
 src/reconcile/rec_track.c
 src/reconcile/rec_write.c
+src/schema/schema_alter.c
 src/schema/schema_create.c
 src/schema/schema_drop.c
 src/schema/schema_list.c
@@ -177,21 +182,26 @@ src/session/session_salvage.c
 src/support/cond_auto.c
 src/support/crypto.c
 src/support/err.c
+src/support/generation.c
 src/support/global.c
 src/support/hash_city.c
 src/support/hash_fnv.c
 src/support/hazard.c
 src/support/hex.c
 src/support/huffman.c
+src/support/modify.c
 src/support/mtx_rw.c
 src/support/pow.c
 src/support/rand.c
 src/support/scratch.c
 src/support/stat.c
 src/support/thread_group.c
+src/support/time.c
 src/txn/txn.c
 src/txn/txn_ckpt.c
 src/txn/txn_ext.c
 src/txn/txn_log.c
 src/txn/txn_nsnap.c
 src/txn/txn_recover.c
+src/txn/txn_rollback_to_stable.c
+src/txn/txn_timestamp.c

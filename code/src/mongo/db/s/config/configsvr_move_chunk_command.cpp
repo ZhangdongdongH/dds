@@ -36,6 +36,7 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/s/balancer/balancer.h"
 #include "mongo/s/request_types/balance_chunk_request_type.h"
 #include "mongo/util/log.h"
@@ -47,17 +48,17 @@ namespace {
 using std::string;
 using str::stream;
 
-class ConfigSvrMoveChunkCommand : public Command {
+class ConfigSvrMoveChunkCommand : public BasicCommand {
 public:
-    ConfigSvrMoveChunkCommand() : Command("_configsvrMoveChunk") {}
+    ConfigSvrMoveChunkCommand() : BasicCommand("_configsvrMoveChunk") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is exported by the sharding config server. Do not call "
-                "directly. Requests the balancer to move or rebalance a single chunk.";
+    std::string help() const override {
+        return "Internal command, which is exported by the sharding config server. Do not call "
+               "directly. Requests the balancer to move or rebalance a single chunk.";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -70,7 +71,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -78,23 +79,26 @@ public:
         return Status::OK();
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& unusedDbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+
         auto request = uassertStatusOK(BalanceChunkRequest::parseFromConfigCommand(cmdObj));
 
         if (request.hasToShardId()) {
-            uassertStatusOK(Balancer::get(txn)->moveSingleChunk(txn,
-                                                                request.getChunk(),
-                                                                request.getToShardId(),
-                                                                request.getMaxChunkSizeBytes(),
-                                                                request.getSecondaryThrottle(),
-                                                                request.getWaitForDelete()));
+            uassertStatusOK(Balancer::get(opCtx)->moveSingleChunk(opCtx,
+                                                                  request.getChunk(),
+                                                                  request.getToShardId(),
+                                                                  request.getMaxChunkSizeBytes(),
+                                                                  request.getSecondaryThrottle(),
+                                                                  request.getWaitForDelete()));
         } else {
-            uassertStatusOK(Balancer::get(txn)->rebalanceSingleChunk(txn, request.getChunk()));
+            uassertStatusOK(Balancer::get(opCtx)->rebalanceSingleChunk(opCtx, request.getChunk()));
         }
 
         return true;

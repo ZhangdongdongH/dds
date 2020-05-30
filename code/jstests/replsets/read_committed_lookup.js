@@ -22,6 +22,7 @@ load("jstests/libs/read_committed_lib.js");  // For testReadCommittedLookup
 
     if (!startSetIfSupportsReadMajority(rst)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        rst.stopSet();
         return;
     }
 
@@ -34,11 +35,12 @@ load("jstests/libs/read_committed_lib.js");  // For testReadCommittedLookup
             {_id: 2, host: nodes[2], arbiterOnly: true},
         ]
     };
-    updateConfigIfNotDurable(config);
+
     rst.initiate(config);
 
-    let shardSecondary = rst.liveNodes.slaves[0];
+    let shardSecondary = rst._slaves[0];
 
     testReadCommittedLookup(rst.getPrimary().getDB("test"), shardSecondary, rst);
 
+    rst.stopSet();
 })();

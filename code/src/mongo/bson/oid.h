@@ -31,6 +31,7 @@
 
 #include <string>
 
+#include "mongo/base/data_range.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/bson/util/builder.h"
@@ -139,6 +140,27 @@ public:
         return o;
     }
 
+    /**
+     * This method creates and initializes an OID from a string, throwing a BadValue exception if
+     * the string is not a valid OID.
+     */
+    static OID createFromString(StringData input) {
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "Invalid string length for parsing to OID, expected 24 but found "
+                              << input.size(),
+                input.size() == 24);
+        for (auto digit : input) {
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "Invalid character found in hex string: " << digit,
+                    ('0' <= digit && digit <= '9') || ('a' <= digit && digit <= 'f') ||
+                        ('A' <= digit && digit <= 'F'));
+        }
+
+        OID result;
+        result.init(input.toString());
+        return result;
+    }
+
     /** sets the contents to a new oid / randomized value */
     void init();
 
@@ -203,6 +225,10 @@ public:
         return ConstDataView(_data);
     }
 
+    ConstDataRange toCDR() const {
+        return ConstDataRange(_data, kOIDSize);
+    }
+
 private:
     // Internal mutable view
     DataView _view() {
@@ -235,8 +261,6 @@ enum JsonStringFormat {
     /** 10gen format, which is close to JS format.  This form is understandable by
         javascript running inside the Mongo server via eval() */
     TenGen,
-    /** Javascript JSON compatible */
-    JS
 };
 
 inline bool operator==(const OID& lhs, const OID& rhs) {

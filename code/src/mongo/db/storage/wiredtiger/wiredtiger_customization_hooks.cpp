@@ -31,26 +31,20 @@
 
 #include "mongo/db/storage/wiredtiger/wiredtiger_customization_hooks.h"
 
-#include <boost/filesystem/path.hpp>
-
 #include "mongo/base/init.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/storage/data_protector.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
-
-/* Make a WiredTigerCustomizationHooks pointer a decoration on the global ServiceContext */
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetWiredTigerCustomizationHooks, ("SetGlobalEnvironment"))
-(InitializerContext* context) {
-    auto customizationHooks = stdx::make_unique<EmptyWiredTigerCustomizationHooks>();
-    WiredTigerCustomizationHooks::set(getGlobalServiceContext(), std::move(customizationHooks));
-
-    return Status::OK();
-}
-
 namespace {
+
+ServiceContext::ConstructorActionRegisterer setWiredTigerCustomizationHooks{
+    "SetWiredTigerCustomizationHooks", [](ServiceContext* service) {
+        auto customizationHooks = stdx::make_unique<WiredTigerCustomizationHooks>();
+        WiredTigerCustomizationHooks::set(service, std::move(customizationHooks));
+    }};
+
 const auto getCustomizationHooks =
     ServiceContext::declareDecoration<std::unique_ptr<WiredTigerCustomizationHooks>>();
 }  // namespace
@@ -66,37 +60,14 @@ WiredTigerCustomizationHooks* WiredTigerCustomizationHooks::get(ServiceContext* 
     return getCustomizationHooks(service).get();
 }
 
-EmptyWiredTigerCustomizationHooks::~EmptyWiredTigerCustomizationHooks() {}
+WiredTigerCustomizationHooks::~WiredTigerCustomizationHooks() {}
 
-bool EmptyWiredTigerCustomizationHooks::enabled() const {
+bool WiredTigerCustomizationHooks::enabled() const {
     return false;
 }
 
-bool EmptyWiredTigerCustomizationHooks::restartRequired() {
-    return false;
-}
-
-std::string EmptyWiredTigerCustomizationHooks::getTableCreateConfig(StringData tableName) {
+std::string WiredTigerCustomizationHooks::getTableCreateConfig(StringData tableName) {
     return "";
 }
 
-std::unique_ptr<DataProtector> EmptyWiredTigerCustomizationHooks::getDataProtector() {
-    return std::unique_ptr<DataProtector>();
-}
-
-boost::filesystem::path EmptyWiredTigerCustomizationHooks::getProtectedPathSuffix() {
-    return "";
-}
-
-Status EmptyWiredTigerCustomizationHooks::protectTmpData(
-    const uint8_t* in, size_t inLen, uint8_t* out, size_t outLen, size_t* resultLen) {
-    return Status(ErrorCodes::InternalError,
-                  "Customization hooks must be enabled to use preprocessTmpData.");
-}
-
-Status EmptyWiredTigerCustomizationHooks::unprotectTmpData(
-    const uint8_t* in, size_t inLen, uint8_t* out, size_t outLen, size_t* resultLen) {
-    return Status(ErrorCodes::InternalError,
-                  "Customization hooks must be enabled to use postprocessTmpData.");
-}
 }  // namespace mongo

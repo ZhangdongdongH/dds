@@ -35,7 +35,6 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/query/index_bounds.h"
 #include "mongo/db/record_id.h"
-#include "mongo/platform/unordered_set.h"
 
 namespace mongo {
 
@@ -74,7 +73,7 @@ struct DistinctParams {
  */
 class DistinctScan final : public PlanStage {
 public:
-    DistinctScan(OperationContext* txn, const DistinctParams& params, WorkingSet* workingSet);
+    DistinctScan(OperationContext* opCtx, const DistinctParams& params, WorkingSet* workingSet);
 
     StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;

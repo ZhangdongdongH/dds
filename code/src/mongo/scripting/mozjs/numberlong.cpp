@@ -33,6 +33,7 @@
 #include <boost/optional.hpp>
 #include <js/Conversions.h>
 
+#include "mongo/base/parse_number.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
 #include "mongo/scripting/mozjs/valuereader.h"
@@ -59,7 +60,7 @@ void NumberLongInfo::finalize(JSFreeOp* fop, JSObject* obj) {
     auto numLong = static_cast<int64_t*>(JS_GetPrivate(obj));
 
     if (numLong)
-        delete numLong;
+        getScope(fop)->trackedDelete(numLong);
 }
 
 int64_t NumberLongInfo::ToNumberLong(JSContext* cx, JS::HandleValue thisv) {
@@ -170,7 +171,10 @@ void NumberLongInfo::construct(JSContext* cx, JS::CallArgs args) {
             // For string values we call strtoll because we expect non-number string
             // values to fail rather than return 0 (which is the behavior of ToInt64).
             std::string str = ValueWriter(cx, arg).toString();
-            numLong = parseLL(str.c_str());
+
+            // Call parseNumberFromStringWithBase() function to convert string to a number
+            Status status = parseNumberFromStringWithBase(str, 10, &numLong);
+            uassert(ErrorCodes::BadValue, "could not convert string to long long", status.isOK());
         } else {
             numLong = ValueWriter(cx, arg).toInt64();
         }
@@ -190,7 +194,7 @@ void NumberLongInfo::construct(JSContext* cx, JS::CallArgs args) {
         numLong = (top << 32) + bot;
     }
 
-    JS_SetPrivate(thisv, new int64_t(numLong));
+    JS_SetPrivate(thisv, scope->trackedNew<int64_t>(numLong));
 
     args.rval().setObjectOrNull(thisv);
 }

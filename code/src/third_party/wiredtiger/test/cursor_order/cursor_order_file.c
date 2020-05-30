@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2018 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -34,30 +34,26 @@ file_create(SHARED_CONFIG *cfg, const char *name)
 	WT_CONNECTION *conn;
 	WT_SESSION *session;
 	int ret;
-	char *p, *end, config[128];
+	char config[128];
 
 	conn = cfg->conn;
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	p = config;
-	end = config + sizeof(config);
-	p += snprintf(p, (size_t)(end - p),
+	testutil_check(__wt_snprintf(config, sizeof(config),
 	    "key_format=%s,"
 	    "internal_page_max=%d,"
 	    "split_deepen_min_child=200,"
-	    "leaf_page_max=%d,",
-	    cfg->ftype == ROW ? "S" : "r", 16 * 1024, 128 * 1024);
-	if (cfg->ftype == FIX)
-		(void)snprintf(p, (size_t)(end - p), ",value_format=3t");
+	    "leaf_page_max=%d,"
+	    "%s",
+	    cfg->ftype == ROW ? "S" : "r", 16 * 1024, 128 * 1024,
+	    cfg->ftype == FIX ? ",value_format=3t" : ""));
 
 	if ((ret = session->create(session, name, config)) != 0)
 		if (ret != EEXIST)
 			testutil_die(ret, "session.create");
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }
 
 void
@@ -67,25 +63,24 @@ load(SHARED_CONFIG *cfg, const char *name)
 	WT_CURSOR *cursor;
 	WT_ITEM *value, _value;
 	WT_SESSION *session;
+	size_t len;
+	uint64_t keyno;
 	char keybuf[64], valuebuf[64];
-	int64_t keyno;
-	int ret;
 
 	conn = cfg->conn;
 
 	file_create(cfg, name);
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret =
-	    session->open_cursor(session, name, NULL, "bulk", &cursor)) != 0)
-		testutil_die(ret, "cursor.open");
+	testutil_check(
+	    session->open_cursor(session, name, NULL, "bulk", &cursor));
 
 	value = &_value;
-	for (keyno = 1; keyno <= (int64_t)cfg->nkeys; ++keyno) {
+	for (keyno = 1; keyno <= cfg->nkeys; ++keyno) {
 		if (cfg->ftype == ROW) {
-			snprintf(keybuf, sizeof(keybuf), "%016u", (u_int)keyno);
+			testutil_check(__wt_snprintf(
+			    keybuf, sizeof(keybuf), "%016" PRIu64, keyno));
 			cursor->set_key(cursor, keybuf);
 		} else
 			cursor->set_key(cursor, (uint32_t)keyno);
@@ -93,23 +88,21 @@ load(SHARED_CONFIG *cfg, const char *name)
 		if (cfg->ftype == FIX)
 			cursor->set_value(cursor, 0x01);
 		else {
-			value->size = (uint32_t)snprintf(
-			    valuebuf, sizeof(valuebuf), "%37u", (u_int)keyno);
+			testutil_check(__wt_snprintf_len_set(
+			    valuebuf, sizeof(valuebuf),
+			    &len, "%37" PRIu64, keyno));
+			value->size = (uint32_t)len;
 			cursor->set_value(cursor, value);
 		}
-		if ((ret = cursor->insert(cursor)) != 0)
-			testutil_die(ret, "cursor.insert");
+		testutil_check(cursor->insert(cursor));
 	}
 
 	/* Setup the starting key range for the workload phase. */
 	cfg->key_range = cfg->nkeys;
-	if ((ret = cursor->close(cursor)) != 0)
-		testutil_die(ret, "cursor.close");
-	if ((ret = session->checkpoint(session, NULL)) != 0)
-		testutil_die(ret, "session.checkpoint");
+	testutil_check(cursor->close(cursor));
+	testutil_check(session->checkpoint(session, NULL));
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }
 
 void
@@ -117,16 +110,12 @@ verify(SHARED_CONFIG *cfg, const char *name)
 {
 	WT_CONNECTION *conn;
 	WT_SESSION *session;
-	int ret;
 
 	conn = cfg->conn;
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret = session->verify(session, name, NULL)) != 0)
-		testutil_die(ret, "session.create");
+	testutil_check(session->verify(session, name, NULL));
 
-	if ((ret = session->close(session, NULL)) != 0)
-		testutil_die(ret, "session.close");
+	testutil_check(session->close(session, NULL));
 }

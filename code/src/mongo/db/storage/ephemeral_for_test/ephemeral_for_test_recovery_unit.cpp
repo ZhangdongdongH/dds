@@ -32,7 +32,6 @@
 
 #include "mongo/db/storage/ephemeral_for_test/ephemeral_for_test_recovery_unit.h"
 
-#include "mongo/db/repl/replication_coordinator_global.h"
 #include "mongo/db/storage/sorted_data_interface.h"
 #include "mongo/util/log.h"
 
@@ -41,7 +40,7 @@ namespace mongo {
 void EphemeralForTestRecoveryUnit::commitUnitOfWork() {
     try {
         for (Changes::iterator it = _changes.begin(), end = _changes.end(); it != end; ++it) {
-            (*it)->commit();
+            (*it)->commit(boost::none);
         }
         _changes.clear();
     } catch (...) {
@@ -68,7 +67,7 @@ void EphemeralForTestRecoveryUnit::abortUnitOfWork() {
     }
 }
 
-Status EphemeralForTestRecoveryUnit::setReadFromMajorityCommittedSnapshot() {
+Status EphemeralForTestRecoveryUnit::obtainMajorityCommittedSnapshot() {
     return Status::OK();
 }
 }

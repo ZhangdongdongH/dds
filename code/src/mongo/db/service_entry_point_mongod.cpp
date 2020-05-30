@@ -1,5 +1,5 @@
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2017 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -26,141 +26,101 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
 
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/service_entry_point_mongod.h"
 
-#include <vector>
-
-#include "mongo/db/client.h"
-#include "mongo/db/dbmessage.h"
-#include "mongo/db/instance.h"
-#include "mongo/stdx/thread.h"
-#include "mongo/transport/service_entry_point_utils.h"
-#include "mongo/transport/session.h"
-#include "mongo/transport/ticket.h"
-#include "mongo/transport/transport_layer.h"
-#include "mongo/util/exit.h"
+#include "mongo/db/commands/fsync_locked.h"
+#include "mongo/db/concurrency/global_lock_acquisition_tracker.h"
+#include "mongo/db/curop.h"
+#include "mongo/db/read_concern.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/service_entry_point_common.h"
+#include "mongo/logger/redaction.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/message.h"
-#include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/thread_idle_callback.h"
-#include "mongo/util/quick_exit.h"
-#include "mongo/util/scopeguard.h"
 
 namespace mongo {
-namespace {
 
-// Set up proper headers for formatting an exhaust request, if we need to
-bool setExhaustMessage(Message* m, const DbResponse& dbresponse) {
-    MsgData::View header = dbresponse.response.header();
-    QueryResult::View qr = header.view2ptr();
-    long long cursorid = qr.getCursorId();
-
-    if (!cursorid) {
-        return false;
+class ServiceEntryPointMongod::Hooks final : public ServiceEntryPointCommon::Hooks {
+public:
+    bool lockedForWriting() const override {
+        return mongo::lockedForWriting();
     }
 
-    verify(dbresponse.exhaustNS.size() && dbresponse.exhaustNS[0]);
+    void waitForReadConcern(OperationContext* opCtx,
+                            const CommandInvocation* invocation,
+                            const OpMsgRequest& request) const override {
+        Status rcStatus = mongo::waitForReadConcern(
+            opCtx, repl::ReadConcernArgs::get(opCtx), invocation->allowsAfterClusterTime());
 
-    auto ns = dbresponse.exhaustNS;  // reset() will free this
-
-    m->reset();
-
-    BufBuilder b(512);
-    b.appendNum(static_cast<int>(0) /* size set later in appendData() */);
-    b.appendNum(header.getId());
-    b.appendNum(header.getResponseToMsgId());
-    b.appendNum(static_cast<int>(dbGetMore));
-    b.appendNum(static_cast<int>(0));
-    b.appendStr(ns);
-    b.appendNum(static_cast<int>(0));  // ntoreturn
-    b.appendNum(cursorid);
-
-    MsgData::View(b.buf()).setLen(b.len());
-    m->setData(b.release());
-
-    return true;
-}
-
-}  // namespace
-
-using transport::Session;
-using transport::TransportLayer;
-
-ServiceEntryPointMongod::ServiceEntryPointMongod(TransportLayer* tl) : _tl(tl) {}
-
-void ServiceEntryPointMongod::startSession(transport::SessionHandle session) {
-    // Pass ownership of the transport::SessionHandle into our worker thread. When this
-    // thread exits, the session will end.
-    launchWrappedServiceEntryWorkerThread(
-        std::move(session), [this](const transport::SessionHandle& session) {
-            _nWorkers.fetchAndAdd(1);
-            auto guard = MakeGuard([&] { _nWorkers.fetchAndSubtract(1); });
-
-            _sessionLoop(session);
-        });
-}
-
-void ServiceEntryPointMongod::_sessionLoop(const transport::SessionHandle& session) {
-    Message inMessage;
-    bool inExhaust = false;
-    int64_t counter = 0;
-
-    while (true) {
-        // 1. Source a Message from the client (unless we are exhausting)
-        if (!inExhaust) {
-            inMessage.reset();
-            auto status = session->sourceMessage(&inMessage).wait();
-
-            if (ErrorCodes::isInterruption(status.code()) ||
-                ErrorCodes::isNetworkError(status.code())) {
-                break;
+        if (!rcStatus.isOK()) {
+            if (ErrorCodes::isExceededTimeLimitError(rcStatus.code())) {
+                const int debugLevel =
+                    serverGlobalParams.clusterRole == ClusterRole::ConfigServer ? 0 : 2;
+                LOG(debugLevel) << "Command on database " << request.getDatabase()
+                                << " timed out waiting for read concern to be satisfied. Command: "
+                                << redact(ServiceEntryPointCommon::getRedactedCopyForLogging(
+                                       invocation->definition(), request.body));
             }
 
-            // Our session may have been closed internally.
-            if (status == TransportLayer::TicketSessionClosedStatus) {
-                break;
-            }
-
-            uassertStatusOK(status);
-        }
-
-        // 2. Pass sourced Message up to mongod
-        DbResponse dbresponse;
-        {
-            auto opCtx = cc().makeOperationContext();
-            assembleResponse(opCtx.get(), inMessage, dbresponse, session->remote());
-
-            // opCtx must go out of scope here so that the operation cannot show
-            // up in currentOp results after the response reaches the client
-        }
-
-        // 3. Format our response, if we have one
-        Message& toSink = dbresponse.response;
-        if (!toSink.empty()) {
-            toSink.header().setId(nextMessageId());
-            toSink.header().setResponseToMsgId(inMessage.header().getId());
-
-            // If this is an exhaust cursor, don't source more Messages
-            if (dbresponse.exhaustNS.size() > 0 && setExhaustMessage(&inMessage, dbresponse)) {
-                inExhaust = true;
-            } else {
-                inExhaust = false;
-            }
-
-            // 4. Sink our response to the client
-            uassertStatusOK(session->sinkMessage(toSink).wait());
-        } else {
-            inExhaust = false;
-        }
-
-        if ((counter++ & 0xf) == 0) {
-            markThreadIdle();
+            uassertStatusOK(rcStatus);
         }
     }
+
+    void waitForWriteConcern(OperationContext* opCtx,
+                             const CommandInvocation* invocation,
+                             const repl::OpTime& lastOpBeforeRun,
+                             BSONObjBuilder& commandResponseBuilder) const override {
+        auto lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+        // Ensures that if we tried to do a write, we wait for write concern, even if that write was
+        // a noop.
+        if ((lastOpAfterRun == lastOpBeforeRun) &&
+            GlobalLockAcquisitionTracker::get(opCtx).getGlobalExclusiveLockTaken()) {
+            repl::ReplClientInfo::forClient(opCtx->getClient()).setLastOpToSystemLastOpTime(opCtx);
+            lastOpAfterRun = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
+        }
+
+        WriteConcernResult res;
+        auto waitForWCStatus =
+            mongo::waitForWriteConcern(opCtx, lastOpAfterRun, opCtx->getWriteConcern(), &res);
+
+        CommandHelpers::appendCommandWCStatus(commandResponseBuilder, waitForWCStatus, res);
+
+        // SERVER-22421: This code is to ensure error response backwards compatibility with the
+        // user management commands. This can be removed in 3.6.
+        if (!waitForWCStatus.isOK() && invocation->definition()->isUserManagementCommand()) {
+            BSONObj temp = commandResponseBuilder.asTempObj().copy();
+            commandResponseBuilder.resetToEmpty();
+            CommandHelpers::appendCommandStatusNoThrow(commandResponseBuilder, waitForWCStatus);
+            commandResponseBuilder.appendElementsUnique(temp);
+        }
+    }
+
+    void waitForLinearizableReadConcern(OperationContext* opCtx) const override {
+        // When a linearizable read command is passed in, check to make sure we're reading
+        // from the primary.
+        if (repl::ReadConcernArgs::get(opCtx).getLevel() ==
+            repl::ReadConcernLevel::kLinearizableReadConcern) {
+            uassertStatusOK(mongo::waitForLinearizableReadConcern(opCtx));
+        }
+    }
+
+    void uassertCommandDoesNotSpecifyWriteConcern(const BSONObj& cmd) const override {
+        if (commandSpecifiesWriteConcern(cmd)) {
+            uasserted(ErrorCodes::InvalidOptions, "Command does not support writeConcern");
+        }
+    }
+
+    void attachCurOpErrInfo(OperationContext* opCtx, const BSONObj& replyObj) const override {
+        CurOp::get(opCtx)->debug().errInfo = getStatusFromCommandResult(replyObj);
+    }
+};
+
+DbResponse ServiceEntryPointMongod::handleRequest(OperationContext* opCtx, const Message& m) {
+    return ServiceEntryPointCommon::handleRequest(opCtx, m, Hooks{});
 }
 
 }  // namespace mongo

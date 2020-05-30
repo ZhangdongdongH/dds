@@ -34,28 +34,24 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/util/net/message.h"
-
 
 namespace mongo {
 namespace rpc {
-
 namespace {
+
 const char kOKField[] = "ok";
 const char kCodeField[] = "code";
 const char kCodeNameField[] = "codeName";
 const char kErrorField[] = "errmsg";
 
-// similar to appendCommandStatus (duplicating logic here to avoid cyclic library
-// dependency)
-BSONObj augmentReplyWithStatus(const Status& status, const BSONObj& reply) {
+// Similar to appendCommandStatusNoThrow (duplicating logic here to avoid cyclic library dependency)
+BSONObj augmentReplyWithStatus(const Status& status, BSONObj reply) {
     auto okField = reply.getField(kOKField);
     if (!okField.eoo() && okField.trueValue()) {
         return reply;
     }
 
-    BSONObjBuilder bob;
-    bob.appendElements(reply);
+    BSONObjBuilder bob(std::move(reply));
     if (okField.eoo()) {
         bob.append(kOKField, status.isOK() ? 1.0 : 0.0);
     }
@@ -63,28 +59,33 @@ BSONObj augmentReplyWithStatus(const Status& status, const BSONObj& reply) {
         return bob.obj();
     }
 
-    if (!reply.hasField(kErrorField)) {
+    if (!bob.asTempObj().hasField(kErrorField)) {
         bob.append(kErrorField, status.reason());
     }
 
-    if (!reply.hasField(kCodeField)) {
+    if (!bob.asTempObj().hasField(kCodeField)) {
         bob.append(kCodeField, status.code());
         bob.append(kCodeNameField, ErrorCodes::errorString(status.code()));
     }
 
+    if (auto extraInfo = status.extraInfo()) {
+        extraInfo->serialize(&bob);
+    }
+
     return bob.obj();
 }
-}
+
+}  // namespace
 
 ReplyBuilderInterface& ReplyBuilderInterface::setCommandReply(StatusWith<BSONObj> commandReply) {
     auto reply = commandReply.isOK() ? std::move(commandReply.getValue()) : BSONObj();
-    return setRawCommandReply(augmentReplyWithStatus(commandReply.getStatus(), reply));
+    return setRawCommandReply(augmentReplyWithStatus(commandReply.getStatus(), std::move(reply)));
 }
 
 ReplyBuilderInterface& ReplyBuilderInterface::setCommandReply(Status nonOKStatus,
-                                                              const BSONObj& extraErrorInfo) {
+                                                              BSONObj extraErrorInfo) {
     invariant(!nonOKStatus.isOK());
-    return setRawCommandReply(augmentReplyWithStatus(nonOKStatus, extraErrorInfo));
+    return setRawCommandReply(augmentReplyWithStatus(nonOKStatus, std::move(extraErrorInfo)));
 }
 
 }  // namespace rpc

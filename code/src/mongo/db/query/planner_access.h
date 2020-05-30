@@ -185,9 +185,9 @@ public:
     /**
      * Return a CollectionScanNode that scans as requested in 'query'.
      */
-    static QuerySolutionNode* makeCollectionScan(const CanonicalQuery& query,
-                                                 bool tailable,
-                                                 const QueryPlannerParams& params);
+    static std::unique_ptr<QuerySolutionNode> makeCollectionScan(const CanonicalQuery& query,
+                                                                 bool tailable,
+                                                                 const QueryPlannerParams& params);
 
     /**
      * Return a plan that uses the provided index as a proxy for a collection scan.
@@ -293,9 +293,6 @@ public:
      * that node uses.  Child nodes that use the same index are adjacent to one another to
      * facilitate grouping of index scans.  As such, the processing for AND and OR is
      * almost identical.
-     *
-     * See tagForSort and sortUsingTags in index_tag.h for details on ordering the children
-     * of OR and AND.
      *
      * Does not take ownership of 'root' but may remove children from it.
      */

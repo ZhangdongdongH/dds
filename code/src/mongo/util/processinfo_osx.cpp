@@ -38,7 +38,6 @@
 #include <mach/mach_host.h>
 #include <mach/mach_init.h>
 #include <mach/mach_traps.h>
-#include <mach/shared_region.h>
 #include <mach/task.h>
 #include <mach/task_info.h>
 #include <mach/vm_map.h>
@@ -65,7 +64,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the scheduler
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     long nprocs = sysconf(_SC_NPROCESSORS_ONLN);
     if (nprocs)
         return nprocs;

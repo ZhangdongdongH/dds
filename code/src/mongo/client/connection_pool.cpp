@@ -53,7 +53,9 @@ const Minutes kMaxConnectionAge(30);
 
 ConnectionPool::ConnectionPool(int messagingPortTags,
                                std::unique_ptr<executor::NetworkConnectionHook> hook)
-    : _messagingPortTags(messagingPortTags), _hook(std::move(hook)) {}
+    : _messagingPortTags(messagingPortTags),
+      _lastCleanUpTime(Date_t::now()),
+      _hook(std::move(hook)) {}
 
 ConnectionPool::ConnectionPool(int messagingPortTags)
     : ConnectionPool(messagingPortTags, nullptr) {}
@@ -103,7 +105,7 @@ void ConnectionPool::closeAllInUseConnections() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     for (ConnectionList::iterator iter = _inUseConnections.begin(); iter != _inUseConnections.end();
          ++iter) {
-        iter->conn->port().shutdown();
+        iter->conn->shutdown();
     }
 }
 
@@ -175,7 +177,7 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
             0,      // socket timeout
             {},     // MongoURI
             [this, target](const executor::RemoteCommandResponse& isMasterReply) {
-                return _hook->validateHost(target, isMasterReply);
+                return _hook->validateHost(target, BSONObj(), isMasterReply);
             }));
     } else {
         conn.reset(new DBClientConnection());
@@ -187,7 +189,7 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
     conn->setSoTimeout(durationCount<Milliseconds>(timeout) / 1000.0);
 
     uassertStatusOK(conn->connect(target, StringData()));
-    conn->port().setTag(conn->port().getTag() | _messagingPortTags);
+    conn->setTags(_messagingPortTags);
 
     if (isInternalAuthSet()) {
         conn->auth(getInternalUserAuthParams());
@@ -200,10 +202,9 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
         if (postConnectRequest != boost::none) {
             auto start = Date_t::now();
             auto reply =
-                conn->runCommandWithMetadata(postConnectRequest->dbname,
-                                             postConnectRequest->cmdObj.firstElementFieldName(),
-                                             postConnectRequest->metadata,
-                                             postConnectRequest->cmdObj);
+                conn->runCommand(OpMsgRequest::fromDBAndBody(postConnectRequest->dbname,
+                                                             postConnectRequest->cmdObj,
+                                                             postConnectRequest->metadata));
 
             auto rcr = executor::RemoteCommandResponse(reply->getCommandReply().getOwned(),
                                                        reply->getMetadata().getOwned(),

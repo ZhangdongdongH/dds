@@ -78,16 +78,14 @@ private:
 
 class GeoMatchExpression : public LeafMatchExpression {
 public:
-    GeoMatchExpression() : LeafMatchExpression(GEO), _canSkipValidation(false) {}
+    GeoMatchExpression(StringData path, const GeoExpression* query, const BSONObj& rawObj);
+    GeoMatchExpression(StringData path,
+                       std::shared_ptr<const GeoExpression> query,
+                       const BSONObj& rawObj);
 
     virtual ~GeoMatchExpression() {}
 
-    /**
-     * Takes ownership of the passed-in GeoExpression.
-     */
-    Status init(StringData path, const GeoExpression* query, const BSONObj& rawObj);
-
-    virtual bool matchesSingleElement(const BSONElement& e) const;
+    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
@@ -108,12 +106,15 @@ public:
     const GeoExpression& getGeoExpression() const {
         return *_query;
     }
-    const BSONObj getRawObj() const {
-        return _rawObj;
-    }
 
 private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
+
+    // The original geo specification provided by the user.
     BSONObj _rawObj;
+
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoExpression> _query;
     bool _canSkipValidation;
@@ -164,13 +165,18 @@ private:
 
 class GeoNearMatchExpression : public LeafMatchExpression {
 public:
-    GeoNearMatchExpression() : LeafMatchExpression(GEO_NEAR) {}
+    GeoNearMatchExpression(StringData path, const GeoNearExpression* query, const BSONObj& rawObj);
+    GeoNearMatchExpression(StringData path,
+                           std::shared_ptr<const GeoNearExpression> query,
+                           const BSONObj& rawObj);
+
     virtual ~GeoNearMatchExpression() {}
 
-    Status init(StringData path, const GeoNearExpression* query, const BSONObj& rawObj);
-
-    // This shouldn't be called and as such will crash.  GeoNear always requires an index.
-    virtual bool matchesSingleElement(const BSONElement& e) const;
+    /**
+     * Stub implementation that should never be called, since geoNear execution requires an
+     * appropriate geo index.
+     */
+    bool matchesSingleElement(const BSONElement&, MatchDetails* details = nullptr) const final;
 
     virtual void debugString(StringBuilder& debug, int level = 0) const;
 
@@ -183,12 +189,15 @@ public:
     const GeoNearExpression& getData() const {
         return *_query;
     }
-    const BSONObj getRawObj() const {
-        return _rawObj;
-    }
 
 private:
+    ExpressionOptimizerFunc getOptimizer() const final {
+        return [](std::unique_ptr<MatchExpression> expression) { return expression; };
+    }
+
+    // The original geo specification provided by the user.
     BSONObj _rawObj;
+
     // Share ownership of our query with all of our clones
     std::shared_ptr<const GeoNearExpression> _query;
 };

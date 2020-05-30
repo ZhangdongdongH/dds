@@ -45,7 +45,7 @@
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index_builder.h"
 #include "mongo/db/jsobj.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -53,7 +53,7 @@ namespace mongo {
 using std::string;
 using std::stringstream;
 
-class CompactCmd : public Command {
+class CompactCmd : public ErrmsgCommandDeprecated {
 public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
@@ -61,40 +61,39 @@ public:
     virtual bool adminOnly() const {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool maintenanceMode() const {
         return true;
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::compact);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
-    virtual void help(stringstream& help) const {
-        help << "compact collection\n"
-                "warning: this operation locks the database and is slow. you can cancel with "
-                "killOp()\n"
-                "{ compact : <collection_name>, [force:<bool>], [validate:<bool>],\n"
-                "  [paddingFactor:<num>], [paddingBytes:<num>] }\n"
-                "  force - allows to run on a replica set primary\n"
-                "  validate - check records are noncorrupt before adding to newly compacting "
-                "extents. slower but safer (defaults to true in this version)\n";
+    std::string help() const override {
+        return "compact collection\n"
+               "warning: this operation locks the database and is slow. you can cancel with "
+               "killOp()\n"
+               "{ compact : <collection_name>, [force:<bool>], [validate:<bool>],\n"
+               "  [paddingFactor:<num>], [paddingBytes:<num>] }\n"
+               "  force - allows to run on a replica set primary\n"
+               "  validate - check records are noncorrupt before adding to newly compacting "
+               "extents. slower but safer (defaults to true in this version)\n";
     }
-    CompactCmd() : Command("compact") {}
+    CompactCmd() : ErrmsgCommandDeprecated("compact") {}
 
-    virtual bool run(OperationContext* txn,
-                     const string& db,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
-        NamespaceString nss = parseNsCollectionRequired(db, cmdObj);
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& db,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
+        NamespaceString nss = CommandHelpers::parseNsCollectionRequired(db, cmdObj);
 
-        repl::ReplicationCoordinator* replCoord = repl::getGlobalReplicationCoordinator();
+        repl::ReplicationCoordinator* replCoord = repl::ReplicationCoordinator::get(opCtx);
         if (replCoord->getMemberState().primary() && !cmdObj["force"].trueValue()) {
             errmsg =
                 "will not run compact on an active replica set primary as this is a slow blocking "
@@ -144,32 +143,28 @@ public:
         if (cmdObj.hasElement("validate"))
             compactOptions.validateDocuments = cmdObj["validate"].trueValue();
 
-        ScopedTransaction transaction(txn, MODE_IX);
-        AutoGetDb autoDb(txn, db, MODE_X);
+        AutoGetDb autoDb(opCtx, db, MODE_X);
         Database* const collDB = autoDb.getDb();
 
-        Collection* collection = collDB ? collDB->getCollection(nss) : nullptr;
+        Collection* collection = collDB ? collDB->getCollection(opCtx, nss) : nullptr;
         auto view =
-            collDB && !collection ? collDB->getViewCatalog()->lookup(txn, nss.ns()) : nullptr;
+            collDB && !collection ? collDB->getViewCatalog()->lookup(opCtx, nss.ns()) : nullptr;
 
         // If db/collection does not exist, short circuit and return.
         if (!collDB || !collection) {
             if (view)
-                return appendCommandStatus(
-                    result, {ErrorCodes::CommandNotSupportedOnView, "can't compact a view"});
+                uasserted(ErrorCodes::CommandNotSupportedOnView, "can't compact a view");
             else
-                return appendCommandStatus(
-                    result, {ErrorCodes::NamespaceNotFound, "collection does not exist"});
+                uasserted(ErrorCodes::NamespaceNotFound, "collection does not exist");
         }
 
-        OldClientContext ctx(txn, nss.ns());
+        OldClientContext ctx(opCtx, nss.ns());
         BackgroundOperation::assertNoBgOpInProgForNs(nss.ns());
 
         log() << "compact " << nss.ns() << " begin, options: " << compactOptions;
 
-        StatusWith<CompactStats> status = collection->compact(txn, &compactOptions);
-        if (!status.isOK())
-            return appendCommandStatus(result, status.getStatus());
+        StatusWith<CompactStats> status = collection->compact(opCtx, &compactOptions);
+        uassertStatusOK(status.getStatus());
 
         if (status.getValue().corruptDocuments > 0)
             result.append("invalidObjects", status.getValue().corruptDocuments);

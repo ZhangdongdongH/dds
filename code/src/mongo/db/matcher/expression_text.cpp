@@ -33,6 +33,7 @@
 #include "mongo/db/matcher/expression_text.h"
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/fts/fts_language.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -41,9 +42,13 @@
 
 namespace mongo {
 
-Status TextMatchExpression::init(OperationContext* txn,
-                                 const NamespaceString& nss,
-                                 TextParams params) {
+TextMatchExpression::TextMatchExpression(fts::FTSQueryImpl ftsQuery)
+    : TextMatchExpressionBase("_fts"), _ftsQuery(ftsQuery) {}
+
+TextMatchExpression::TextMatchExpression(OperationContext* opCtx,
+                                         const NamespaceString& nss,
+                                         TextParams params)
+    : TextMatchExpressionBase("_fts") {
     _ftsQuery.setQuery(std::move(params.query));
     _ftsQuery.setLanguage(std::move(params.language));
     _ftsQuery.setCaseSensitive(params.caseSensitive);
@@ -52,32 +57,34 @@ Status TextMatchExpression::init(OperationContext* txn,
     fts::TextIndexVersion version;
     {
         // Find text index.
-        ScopedTransaction transaction(txn, MODE_IS);
-        AutoGetDb autoDb(txn, nss.db(), MODE_IS);
-        Lock::CollectionLock collLock(txn->lockState(), nss.ns(), MODE_IS);
+        AutoGetDb autoDb(opCtx, nss.db(), MODE_IS);
+        Lock::CollectionLock collLock(opCtx->lockState(), nss.ns(), MODE_IS);
         Database* db = autoDb.getDb();
-        if (!db) {
-            return {ErrorCodes::IndexNotFound,
-                    str::stream() << "text index required for $text query (no such collection '"
-                                  << nss.ns()
-                                  << "')"};
-        }
-        Collection* collection = db->getCollection(nss);
-        if (!collection) {
-            return {ErrorCodes::IndexNotFound,
-                    str::stream() << "text index required for $text query (no such collection '"
-                                  << nss.ns()
-                                  << "')"};
-        }
+
+        uassert(ErrorCodes::IndexNotFound,
+                str::stream() << "text index required for $text query (no such collection '"
+                              << nss.ns()
+                              << "')",
+                db);
+
+        Collection* collection = db->getCollection(opCtx, nss);
+
+        uassert(ErrorCodes::IndexNotFound,
+                str::stream() << "text index required for $text query (no such collection '"
+                              << nss.ns()
+                              << "')",
+                collection);
+
         std::vector<IndexDescriptor*> idxMatches;
-        collection->getIndexCatalog()->findIndexByType(txn, IndexNames::TEXT, idxMatches);
-        if (idxMatches.empty()) {
-            return {ErrorCodes::IndexNotFound, "text index required for $text query"};
-        }
-        if (idxMatches.size() > 1) {
-            return {ErrorCodes::IndexNotFound, "more than one text index found for $text query"};
-        }
+        collection->getIndexCatalog()->findIndexByType(opCtx, IndexNames::TEXT, idxMatches);
+
+        uassert(
+            ErrorCodes::IndexNotFound, "text index required for $text query", !idxMatches.empty());
+        uassert(ErrorCodes::IndexNotFound,
+                "more than one text index found for $text query",
+                idxMatches.size() < 2);
         invariant(idxMatches.size() == 1);
+
         IndexDescriptor* index = idxMatches[0];
         const FTSAccessMethod* fam =
             static_cast<FTSAccessMethod*>(collection->getIndexCatalog()->getIndex(index));
@@ -91,19 +98,14 @@ Status TextMatchExpression::init(OperationContext* txn,
     }
 
     Status parseStatus = _ftsQuery.parse(version);
-    if (!parseStatus.isOK()) {
-        return parseStatus;
-    }
-
-    return setPath("_fts");
+    uassertStatusOK(parseStatus);
 }
 
 std::unique_ptr<MatchExpression> TextMatchExpression::shallowClone() const {
-    auto expr = stdx::make_unique<TextMatchExpression>();
-    // We initialize _ftsQuery here directly rather than calling init(), to avoid needing to examine
+    auto expr = stdx::make_unique<TextMatchExpression>(_ftsQuery);
+    // We use the query-only constructor here directly rather than using the full constructor, to
+    // avoid needing to examine
     // the index catalog.
-    expr->_ftsQuery = _ftsQuery;
-    invariantOK(expr->setPath("_fts"));
     if (getTag()) {
         expr->setTag(getTag()->clone());
     }

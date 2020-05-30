@@ -44,21 +44,24 @@ public:
     ClusterCursorStats() : ServerStatusMetric("cursor") {}
 
     void appendAtLeaf(BSONObjBuilder& b) const final {
+        auto grid = Grid::get(getGlobalServiceContext());
         BSONObjBuilder cursorBob(b.subobjStart(_leafName));
         cursorBob.append("timedOut",
-                         static_cast<long long>(grid.getCursorManager()->cursorsTimedOut()));
+                         static_cast<long long>(grid->getCursorManager()->cursorsTimedOut()));
         {
             BSONObjBuilder openBob(cursorBob.subobjStart("open"));
-            auto stats = grid.getCursorManager()->stats();
-            openBob.append("multiTarget", static_cast<long long>(stats.cursorsSharded));
-            openBob.append("singleTarget", static_cast<long long>(stats.cursorsNotSharded));
+            auto stats = grid->getCursorManager()->stats();
+            openBob.append("multiTarget", static_cast<long long>(stats.cursorsMultiTarget));
+            openBob.append("singleTarget", static_cast<long long>(stats.cursorsSingleTarget));
             openBob.append("pinned", static_cast<long long>(stats.cursorsPinned));
-            openBob.append("total",
-                           static_cast<long long>(stats.cursorsSharded + stats.cursorsNotSharded));
+            openBob.append(
+                "total",
+                static_cast<long long>(stats.cursorsMultiTarget + stats.cursorsSingleTarget));
             openBob.doneFast();
         }
         cursorBob.done();
     }
+
 } clusterCursorStats;
 
 }  // namespace

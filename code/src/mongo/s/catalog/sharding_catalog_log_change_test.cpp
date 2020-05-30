@@ -36,11 +36,9 @@
 #include "mongo/db/commands.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
-#include "mongo/s/catalog/sharding_catalog_client_impl.h"
-#include "mongo/s/catalog/sharding_catalog_test_fixture.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/future.h"
 #include "mongo/util/log.h"
@@ -58,7 +56,7 @@ using unittest::assertGet;
 const Seconds kFutureTimeout{5};
 const HostAndPort configHost{"TestHost1"};
 
-class InfoLoggingTest : public ShardingCatalogTestFixture {
+class InfoLoggingTest : public ShardingTestFixture {
 public:
     enum CollType { ActionLog, ChangeLog };
 
@@ -66,15 +64,16 @@ public:
         : _configCollType(configCollType), _cappedSize(cappedSize) {}
 
     void setUp() override {
-        ShardingCatalogTestFixture::setUp();
+        ShardingTestFixture::setUp();
 
         configTargeter()->setFindHostReturnValue(configHost);
     }
 
 protected:
     void noRetryAfterSuccessfulCreate() {
-        auto future = launchAsync(
-            [this] { log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)); });
+        auto future = launchAsync([this] {
+            log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)).transitional_ignore();
+        });
 
         expectConfigCollectionCreate(configHost, getConfigCollName(), _cappedSize, BSON("ok" << 1));
         expectConfigCollectionInsert(configHost,
@@ -88,8 +87,10 @@ protected:
         future.timed_get(kFutureTimeout);
 
         // Now log another change and confirm that we don't re-attempt to create the collection
-        future = launchAsync(
-            [this] { log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5)); });
+        future = launchAsync([this] {
+            log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5))
+                .transitional_ignore();
+        });
 
         expectConfigCollectionInsert(configHost,
                                      getConfigCollName(),
@@ -103,12 +104,13 @@ protected:
     }
 
     void noRetryCreateIfAlreadyExists() {
-        auto future = launchAsync(
-            [this] { log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)); });
+        auto future = launchAsync([this] {
+            log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)).transitional_ignore();
+        });
 
         BSONObjBuilder createResponseBuilder;
-        Command::appendCommandStatus(createResponseBuilder,
-                                     Status(ErrorCodes::NamespaceExists, "coll already exists"));
+        CommandHelpers::appendCommandStatusNoThrow(
+            createResponseBuilder, Status(ErrorCodes::NamespaceExists, "coll already exists"));
         expectConfigCollectionCreate(
             configHost, getConfigCollName(), _cappedSize, createResponseBuilder.obj());
         expectConfigCollectionInsert(configHost,
@@ -122,8 +124,10 @@ protected:
         future.timed_get(kFutureTimeout);
 
         // Now log another change and confirm that we don't re-attempt to create the collection
-        future = launchAsync(
-            [this] { log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5)); });
+        future = launchAsync([this] {
+            log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5))
+                .transitional_ignore();
+        });
 
         expectConfigCollectionInsert(configHost,
                                      getConfigCollName(),
@@ -137,12 +141,13 @@ protected:
     }
 
     void createFailure() {
-        auto future = launchAsync(
-            [this] { log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)); });
+        auto future = launchAsync([this] {
+            log("moved a chunk", "foo.bar", BSON("min" << 3 << "max" << 4)).transitional_ignore();
+        });
 
         BSONObjBuilder createResponseBuilder;
-        Command::appendCommandStatus(createResponseBuilder,
-                                     Status(ErrorCodes::ExceededTimeLimit, "operation timed out"));
+        CommandHelpers::appendCommandStatusNoThrow(
+            createResponseBuilder, Status(ErrorCodes::ExceededTimeLimit, "operation timed out"));
         expectConfigCollectionCreate(
             configHost, getConfigCollName(), _cappedSize, createResponseBuilder.obj());
 
@@ -150,8 +155,10 @@ protected:
         future.timed_get(kFutureTimeout);
 
         // Now log another change and confirm that we *do* attempt to create the collection
-        future = launchAsync(
-            [this] { log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5)); });
+        future = launchAsync([this] {
+            log("moved a second chunk", "foo.bar", BSON("min" << 4 << "max" << 5))
+                .transitional_ignore();
+        });
 
         expectConfigCollectionCreate(configHost, getConfigCollName(), _cappedSize, BSON("ok" << 1));
         expectConfigCollectionInsert(configHost,
@@ -184,12 +191,12 @@ protected:
 
 class ActionLogTest : public InfoLoggingTest {
 public:
-    ActionLogTest() : InfoLoggingTest(ActionLog, 2 * 1024 * 1024) {}
+    ActionLogTest() : InfoLoggingTest(ActionLog, 20 * 1024 * 1024) {}
 };
 
 class ChangeLogTest : public InfoLoggingTest {
 public:
-    ChangeLogTest() : InfoLoggingTest(ChangeLog, 10 * 1024 * 1024) {}
+    ChangeLogTest() : InfoLoggingTest(ChangeLog, 200 * 1024 * 1024) {}
 };
 
 TEST_F(ActionLogTest, NoRetryAfterSuccessfulCreate) {

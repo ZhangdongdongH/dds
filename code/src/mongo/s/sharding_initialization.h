@@ -28,59 +28,65 @@
 
 #pragma once
 
-#include <cstdint>
-#include <memory>
+#include <boost/optional.hpp>
 
 #include "mongo/base/string_data.h"
 #include "mongo/bson/oid.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-namespace executor {
-class TaskExecutor;
-}  // namespace executor
-
+class CatalogCache;
 class ConnectionString;
 class OperationContext;
 class ShardFactory;
 class Status;
 class ShardingCatalogClient;
-class ShardingCatalogManager;
-using ShardingCatalogManagerBuilder = stdx::function<std::unique_ptr<ShardingCatalogManager>(
-    ShardingCatalogClient*, std::unique_ptr<executor::TaskExecutor>)>;
+
+namespace executor {
+class NetworkInterface;
+class TaskExecutor;
+}  // namespace executor
 
 namespace rpc {
-class ShardingEgressMetadataHook;
-using ShardingEgressMetadataHookBuilder =
-    stdx::function<std::unique_ptr<ShardingEgressMetadataHook>()>;
+class EgressMetadataHook;
+using ShardingEgressMetadataHookBuilder = stdx::function<std::unique_ptr<EgressMetadataHook>()>;
 }  // namespace rpc
 
 /**
  * Fixed process identifier for the dist lock manager running on a config server.
  */
-extern const StringData kDistLockProcessIdForConfigServer;
+constexpr auto kDistLockProcessIdForConfigServer = "ConfigServer"_sd;
 
 /**
  * Generates a uniform string to be used as a process id for the distributed lock manager.
  */
-std::string generateDistLockProcessId(OperationContext* txn);
+std::string generateDistLockProcessId(OperationContext* opCtx);
+
+/**
+ * Constructs a TaskExecutor which contains the required configuration for the sharding subsystem.
+ */
+std::unique_ptr<executor::TaskExecutor> makeShardingTaskExecutor(
+    std::unique_ptr<executor::NetworkInterface> net);
 
 /**
  * Takes in the connection string for reaching the config servers and initializes the global
  * ShardingCatalogClient, ShardingCatalogManager, ShardRegistry, and Grid objects.
  */
-Status initializeGlobalShardingState(OperationContext* txn,
+Status initializeGlobalShardingState(OperationContext* opCtx,
                                      const ConnectionString& configCS,
                                      StringData distLockProcessId,
                                      std::unique_ptr<ShardFactory> shardFactory,
+                                     std::unique_ptr<CatalogCache> catalogCache,
                                      rpc::ShardingEgressMetadataHookBuilder hookBuilder,
-                                     ShardingCatalogManagerBuilder catalogManagerBuilder);
+                                     boost::optional<size_t> taskExecutorPoolSize);
+
 
 /**
- * Tries to contact the config server and reload the shard registry and the cluster ID until it
- * succeeds or is interrupted.
- */
-Status reloadShardRegistryUntilSuccess(OperationContext* txn);
+ * Loads cluster ID and waits for the reload of the Shard Registry.
+*/
+
+Status waitForShardRegistryReload(OperationContext* opCtx);
 
 }  // namespace mongo

@@ -54,26 +54,26 @@ namespace mongo {
  * A class representing a user-specified accummulation, including the field name to put the
  * accumulated result in, which accumulator to use, and the expression used to obtain the input to
  * the Accumulator.
- *
- * TODO SERVER-25980: Do not expose 'factory', instead add a makeAccumulator() method.
  */
 class AccumulationStatement {
 public:
     AccumulationStatement(std::string fieldName,
-                          Accumulator::Factory factory,
-                          boost::intrusive_ptr<Expression> expression)
+                          boost::intrusive_ptr<Expression> expression,
+                          Accumulator::Factory factory)
         : fieldName(std::move(fieldName)),
-          factory(std::move(factory)),
-          expression(std::move(expression)) {}
+          expression(std::move(expression)),
+          _factory(std::move(factory)) {}
 
     /**
      * Parses a BSONElement that is an accumulated field, and returns an AccumulationStatement for
      * that accumulated field.
      *
-     * Throws a UserException if parsing fails.
+     * Throws a AssertionException if parsing fails.
      */
-    static AccumulationStatement parseAccumulationStatement(const BSONElement& elem,
-                                                            const VariablesParseState& vps);
+    static AccumulationStatement parseAccumulationStatement(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const BSONElement& elem,
+        const VariablesParseState& vps);
 
     /**
      * Registers an Accumulator with a parsing function, so that when an accumulator with the given
@@ -91,9 +91,18 @@ public:
      */
     static Accumulator::Factory getFactory(StringData name);
 
+    // The field name is used to store the results of the accumulation in a result document.
     std::string fieldName;
-    Accumulator::Factory factory;
+
+    // The expression to use to obtain the input to the accumulator.
     boost::intrusive_ptr<Expression> expression;
+
+    // Constructs an Accumulator to do actual accumulation.
+    boost::intrusive_ptr<Accumulator> makeAccumulator(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx) const;
+
+private:
+    Accumulator::Factory _factory;
 };
 
 }  // namespace mongo

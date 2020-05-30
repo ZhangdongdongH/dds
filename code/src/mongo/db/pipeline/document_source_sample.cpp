@@ -40,16 +40,14 @@
 namespace mongo {
 using boost::intrusive_ptr;
 
+constexpr StringData DocumentSourceSample::kStageName;
+
 DocumentSourceSample::DocumentSourceSample(const intrusive_ptr<ExpressionContext>& pExpCtx)
     : DocumentSource(pExpCtx), _size(0) {}
 
 REGISTER_DOCUMENT_SOURCE(sample,
                          LiteParsedDocumentSourceDefault::parse,
                          DocumentSourceSample::createFromBson);
-
-const char* DocumentSourceSample::getSourceName() const {
-    return "$sample";
-}
 
 DocumentSource::GetNextResult DocumentSourceSample::getNext() {
     if (_size == 0)
@@ -83,12 +81,8 @@ DocumentSource::GetNextResult DocumentSourceSample::getNext() {
     return _sortStage->getNext();
 }
 
-Value DocumentSourceSample::serialize(bool explain) const {
-    return Value(DOC(getSourceName() << DOC("size" << _size)));
-}
-
-void DocumentSourceSample::doInjectExpressionContext() {
-    _sortStage->injectExpressionContext(pExpCtx);
+Value DocumentSourceSample::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
+    return Value(DOC(kStageName << DOC("size" << _size)));
 }
 
 namespace {
@@ -125,8 +119,13 @@ intrusive_ptr<DocumentSource> DocumentSourceSample::getShardSource() {
     return this;
 }
 
-intrusive_ptr<DocumentSource> DocumentSourceSample::getMergeSource() {
+std::list<intrusive_ptr<DocumentSource>> DocumentSourceSample::getMergeSources() {
     // Just need to merge the pre-sorted documents by their random values.
-    return DocumentSourceSort::create(pExpCtx, randSortSpec, _size);
+    BSONObjBuilder randMergeSortSpec;
+
+    randMergeSortSpec.appendElements(randSortSpec);
+    randMergeSortSpec.append("$mergePresorted", true);
+
+    return {DocumentSourceSort::create(pExpCtx, randMergeSortSpec.obj(), _size)};
 }
 }  // mongo

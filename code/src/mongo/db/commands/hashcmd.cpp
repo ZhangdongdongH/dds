@@ -41,6 +41,7 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/db/hasher.h"
 #include "mongo/db/jsobj.h"
 
@@ -50,21 +51,21 @@ using std::string;
 using std::stringstream;
 
 // Testing only, enabled via command-line.
-class CmdHashElt : public Command {
+class CmdHashElt : public ErrmsgCommandDeprecated {
 public:
-    CmdHashElt() : Command("_hashBSONElement"){};
+    CmdHashElt() : ErrmsgCommandDeprecated("_hashBSONElement"){};
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     // No auth needed because it only works when enabled via command line.
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
-    virtual void help(stringstream& help) const {
-        help << "returns the hash of the first BSONElement val in a BSONObj";
+                                       std::vector<Privilege>* out) const {}
+    std::string help() const override {
+        return "returns the hash of the first BSONElement val in a BSONObj";
     }
 
     /* CmdObj has the form {"hash" : <thingToHash>}
@@ -79,12 +80,11 @@ public:
      *>  "out" : NumberLong(6271151123721111923),
      *>  "ok" : 1 }
      **/
-    bool run(OperationContext* txn,
-             const string& db,
-             BSONObj& cmdObj,
-             int options,
-             string& errmsg,
-             BSONObjBuilder& result) {
+    bool errmsgRun(OperationContext* opCtx,
+                   const string& db,
+                   const BSONObj& cmdObj,
+                   string& errmsg,
+                   BSONObjBuilder& result) {
         result.appendAs(cmdObj.firstElement(), "key");
 
         int seed = 0;
@@ -101,11 +101,5 @@ public:
         return true;
     }
 };
-MONGO_INITIALIZER(RegisterHashEltCmd)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
-        // Leaked intentionally: a Command registers itself when constructed.
-        new CmdHashElt();
-    }
-    return Status::OK();
-}
+MONGO_REGISTER_TEST_COMMAND(CmdHashElt);
 }

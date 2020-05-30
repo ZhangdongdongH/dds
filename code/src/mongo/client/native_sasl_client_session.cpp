@@ -32,7 +32,8 @@
 #include "mongo/base/init.h"
 #include "mongo/client/sasl_client_conversation.h"
 #include "mongo/client/sasl_plain_client_conversation.h"
-#include "mongo/client/sasl_scramsha1_client_conversation.h"
+#include "mongo/client/sasl_scram_client_conversation.h"
+#include "mongo/client/scram_client_cache.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -46,6 +47,10 @@ MONGO_INITIALIZER(NativeSaslClientContext)(InitializerContext* context) {
     SaslClientSession::create = createNativeSaslClientSession;
     return Status::OK();
 }
+
+// Global cache for SCRAM-SHA-1/256 credentials
+auto* scramsha1ClientCache = new SCRAMClientCache<SHA1Block>;
+auto* scramsha256ClientCache = new SCRAMClientCache<SHA256Block>;
 
 }  // namespace
 
@@ -63,7 +68,11 @@ Status NativeSaslClientSession::initialize() {
     if (mechanism == "PLAIN") {
         _saslConversation.reset(new SaslPLAINClientConversation(this));
     } else if (mechanism == "SCRAM-SHA-1") {
-        _saslConversation.reset(new SaslSCRAMSHA1ClientConversation(this));
+        _saslConversation.reset(
+            new SaslSCRAMClientConversationImpl<SHA1Block>(this, scramsha1ClientCache));
+    } else if (mechanism == "SCRAM-SHA-256") {
+        _saslConversation.reset(
+            new SaslSCRAMClientConversationImpl<SHA256Block>(this, scramsha256ClientCache));
     } else {
         return Status(ErrorCodes::BadValue,
                       mongoutils::str::stream() << "SASL mechanism " << mechanism

@@ -26,14 +26,20 @@
  *    then also delete it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
+
+#include "mongo/platform/basic.h"
+
 #include "mongo/util/fail_point_service.h"
 
+#include "mongo/util/assert_util.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
 using std::unique_ptr;
 
-MONGO_FP_DECLARE(dummy);  // used by tests in jstests/fail_point
+MONGO_FAIL_POINT_DEFINE(dummy);  // used by tests in jstests/fail_point
 
 unique_ptr<FailPointRegistry> _fpRegistry(nullptr);
 
@@ -52,4 +58,31 @@ MONGO_INITIALIZER_GENERAL(AllFailPointsRegistered, MONGO_NO_PREREQUISITES, MONGO
 FailPointRegistry* getGlobalFailPointRegistry() {
     return _fpRegistry.get();
 }
+
+void setGlobalFailPoint(const std::string& failPointName, const BSONObj& cmdObj) {
+    FailPointRegistry* registry = getGlobalFailPointRegistry();
+    FailPoint* failPoint = registry->getFailPoint(failPointName);
+
+    if (failPoint == nullptr)
+        uasserted(ErrorCodes::FailPointSetFailed, failPointName + " not found");
+
+    FailPoint::Mode mode;
+    FailPoint::ValType val;
+    BSONObj data;
+    std::tie(mode, val, data) = uassertStatusOK(FailPoint::parseBSON(cmdObj));
+
+    failPoint->setMode(mode, val, data);
+    warning() << "failpoint: " << failPointName << " set to: " << failPoint->toBSON();
 }
+
+FailPointEnableBlock::FailPointEnableBlock(const std::string& failPointName) {
+    _failPoint = getGlobalFailPointRegistry()->getFailPoint(failPointName);
+    invariant(_failPoint != nullptr);
+    _failPoint->setMode(FailPoint::alwaysOn);
+}
+
+FailPointEnableBlock::~FailPointEnableBlock() {
+    _failPoint->setMode(FailPoint::off);
+}
+
+}  // namespace mongo

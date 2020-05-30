@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 // Main package for the mongodump tool.
 package main
 
@@ -20,14 +26,15 @@ const (
 
 func main() {
 	// initialize command-line opts
-	opts := options.New("mongodump", mongodump.Usage, options.EnabledOptions{true, true, true})
+	opts := options.New("mongodump", mongodump.Usage, options.EnabledOptions{Auth: true, Connection: true, Namespace: true, URI: true})
 
 	inputOpts := &mongodump.InputOptions{}
 	opts.AddOptions(inputOpts)
 	outputOpts := &mongodump.OutputOptions{}
 	opts.AddOptions(outputOpts)
+	opts.URI.AddKnownURIParameters(options.KnownURIOptionsReadPreference)
 
-	args, err := opts.Parse()
+	args, err := opts.ParseArgs(os.Args[1:])
 	if err != nil {
 		log.Logvf(log.Always, "error parsing command line options: %v", err)
 		log.Logvf(log.Always, "try 'mongodump --help' for more information")
@@ -53,10 +60,8 @@ func main() {
 	// init logger
 	log.SetVerbosity(opts.Verbosity)
 
-	// connect directly, unless a replica set name is explicitly specified
-	_, setName := util.ParseConnectionString(opts.Host)
-	opts.Direct = (setName == "")
-	opts.ReplicaSetName = setName
+	// verify uri options and log them
+	opts.URI.LogUnsupportedOptions()
 
 	// kick off the progress bar manager
 	progressManager := progress.NewBarWriter(log.Writer(0), progressBarWaitTime, progressBarLength, false)

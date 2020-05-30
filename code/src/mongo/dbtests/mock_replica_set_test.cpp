@@ -28,6 +28,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/dbtests/mock/mock_dbclient_connection.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
 #include "mongo/unittest/unittest.h"
 
@@ -41,9 +42,10 @@ using mongo::BSONObjBuilder;
 using mongo::BSONObjIterator;
 using mongo::ConnectionString;
 using mongo::HostAndPort;
+using mongo::MockDBClientConnection;
 using mongo::MockRemoteDBServer;
 using mongo::MockReplicaSet;
-using mongo::repl::ReplicaSetConfig;
+using mongo::repl::ReplSetConfig;
 
 using std::set;
 using std::string;
@@ -77,8 +79,8 @@ TEST(MockReplicaSetTest, IsMasterNode0) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n0:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("ismaster" << 1), cmdResponse);
+    bool ok =
+        MockDBClientConnection(node).runCommand("foo.bar", BSON("ismaster" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT(cmdResponse["ismaster"].trueValue());
@@ -105,8 +107,8 @@ TEST(MockReplicaSetTest, IsMasterNode1) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n1:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("ismaster" << 1), cmdResponse);
+    bool ok =
+        MockDBClientConnection(node).runCommand("foo.bar", BSON("ismaster" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT(!cmdResponse["ismaster"].trueValue());
@@ -133,8 +135,8 @@ TEST(MockReplicaSetTest, IsMasterNode2) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n2:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("ismaster" << 1), cmdResponse);
+    bool ok =
+        MockDBClientConnection(node).runCommand("foo.bar", BSON("ismaster" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT(!cmdResponse["ismaster"].trueValue());
@@ -161,8 +163,8 @@ TEST(MockReplicaSetTest, ReplSetGetStatusNode0) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n0:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
+    bool ok = MockDBClientConnection(node).runCommand(
+        "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT_EQUALS("n", cmdResponse["set"].str());
@@ -194,8 +196,8 @@ TEST(MockReplicaSetTest, ReplSetGetStatusNode1) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n1:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
+    bool ok = MockDBClientConnection(node).runCommand(
+        "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT_EQUALS("n", cmdResponse["set"].str());
@@ -229,8 +231,8 @@ TEST(MockReplicaSetTest, ReplSetGetStatusNode2) {
 
     BSONObj cmdResponse;
     MockRemoteDBServer* node = replSet.getNode("$n2:27017");
-    const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-    bool ok = node->runCommand(id, "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
+    bool ok = MockDBClientConnection(node).runCommand(
+        "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
     ASSERT(ok);
 
     ASSERT_EQUALS("n", cmdResponse["set"].str());
@@ -257,18 +259,19 @@ TEST(MockReplicaSetTest, ReplSetGetStatusNode2) {
 
 namespace {
 /**
- * Takes a ReplicaSetConfig and a node to remove and returns a new config with equivalent
+ * Takes a ReplSetConfig and a node to remove and returns a new config with equivalent
  * members minus the one specified to be removed.  NOTE: Does not copy over properties of the
  * members other than their id and host.
  */
-ReplicaSetConfig _getConfigWithMemberRemoved(const ReplicaSetConfig& oldConfig,
-                                             const HostAndPort& toRemove) {
+ReplSetConfig _getConfigWithMemberRemoved(const ReplSetConfig& oldConfig,
+                                          const HostAndPort& toRemove) {
     BSONObjBuilder newConfigBuilder;
     newConfigBuilder.append("_id", oldConfig.getReplSetName());
     newConfigBuilder.append("version", oldConfig.getConfigVersion());
+    newConfigBuilder.append("protocolVersion", oldConfig.getProtocolVersion());
 
     BSONArrayBuilder membersBuilder(newConfigBuilder.subarrayStart("members"));
-    for (ReplicaSetConfig::MemberIterator member = oldConfig.membersBegin();
+    for (ReplSetConfig::MemberIterator member = oldConfig.membersBegin();
          member != oldConfig.membersEnd();
          ++member) {
         if (member->getHostAndPort() == toRemove) {
@@ -280,7 +283,7 @@ ReplicaSetConfig _getConfigWithMemberRemoved(const ReplicaSetConfig& oldConfig,
     }
 
     membersBuilder.done();
-    ReplicaSetConfig newConfig;
+    ReplSetConfig newConfig;
     ASSERT_OK(newConfig.initialize(newConfigBuilder.obj()));
     ASSERT_OK(newConfig.validate());
     return newConfig;
@@ -290,17 +293,17 @@ ReplicaSetConfig _getConfigWithMemberRemoved(const ReplicaSetConfig& oldConfig,
 TEST(MockReplicaSetTest, IsMasterReconfigNodeRemoved) {
     MockReplicaSet replSet("n", 3);
 
-    ReplicaSetConfig oldConfig = replSet.getReplConfig();
+    ReplSetConfig oldConfig = replSet.getReplConfig();
     const string hostToRemove("$n1:27017");
-    ReplicaSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
+    ReplSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
     replSet.setConfig(newConfig);
 
     {
         // Check isMaster for node still in set
         BSONObj cmdResponse;
         MockRemoteDBServer* node = replSet.getNode("$n0:27017");
-        const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-        bool ok = node->runCommand(id, "foo.bar", BSON("ismaster" << 1), cmdResponse);
+        bool ok =
+            MockDBClientConnection(node).runCommand("foo.bar", BSON("ismaster" << 1), cmdResponse);
         ASSERT(ok);
 
         ASSERT(cmdResponse["ismaster"].trueValue());
@@ -327,8 +330,8 @@ TEST(MockReplicaSetTest, IsMasterReconfigNodeRemoved) {
         // Check isMaster for node still not in set anymore
         BSONObj cmdResponse;
         MockRemoteDBServer* node = replSet.getNode(hostToRemove);
-        const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-        bool ok = node->runCommand(id, "foo.bar", BSON("ismaster" << 1), cmdResponse);
+        bool ok =
+            MockDBClientConnection(node).runCommand("foo.bar", BSON("ismaster" << 1), cmdResponse);
         ASSERT(ok);
 
         ASSERT(!cmdResponse["ismaster"].trueValue());
@@ -341,17 +344,17 @@ TEST(MockReplicaSetTest, IsMasterReconfigNodeRemoved) {
 TEST(MockReplicaSetTest, replSetGetStatusReconfigNodeRemoved) {
     MockReplicaSet replSet("n", 3);
 
-    ReplicaSetConfig oldConfig = replSet.getReplConfig();
+    ReplSetConfig oldConfig = replSet.getReplConfig();
     const string hostToRemove("$n1:27017");
-    ReplicaSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
+    ReplSetConfig newConfig = _getConfigWithMemberRemoved(oldConfig, HostAndPort(hostToRemove));
     replSet.setConfig(newConfig);
 
     {
         // Check replSetGetStatus for node still in set
         BSONObj cmdResponse;
         MockRemoteDBServer* node = replSet.getNode("$n2:27017");
-        const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-        bool ok = node->runCommand(id, "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
+        bool ok = MockDBClientConnection(node).runCommand(
+            "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
         ASSERT(ok);
 
         ASSERT_EQUALS("n", cmdResponse["set"].str());
@@ -383,8 +386,8 @@ TEST(MockReplicaSetTest, replSetGetStatusReconfigNodeRemoved) {
         // Check replSetGetStatus for node still not in set anymore
         BSONObj cmdResponse;
         MockRemoteDBServer* node = replSet.getNode(hostToRemove);
-        const MockRemoteDBServer::InstanceID id = node->getInstanceID();
-        bool ok = node->runCommand(id, "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
+        bool ok = MockDBClientConnection(node).runCommand(
+            "foo.bar", BSON("replSetGetStatus" << 1), cmdResponse);
         ASSERT(ok);
 
         ASSERT_EQUALS("n", cmdResponse["set"].str());

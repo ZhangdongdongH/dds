@@ -30,8 +30,11 @@
 #include <iosfwd>
 #include <string>
 
+#include <boost/optional.hpp>
+
 #include "mongo/bson/util/builder.h"
 #include "mongo/platform/hash_namespace.h"
+#include "mongo/util/net/sockaddr.h"
 
 namespace mongo {
 
@@ -51,10 +54,17 @@ class StatusWith;
  */
 struct HostAndPort {
     /**
-     * Parses "text" to produce a HostAndPort.  Returns either that or an error
-     * status describing the parse failure.
+     * Parses "text" to produce a HostAndPort.  Returns either that or an error status describing
+     * the parse failure.
      */
     static StatusWith<HostAndPort> parse(StringData text);
+
+    /**
+     * A version of 'parse' that throws a UserException if a parsing error is encountered.
+     */
+    static HostAndPort parseThrowing(StringData text) {
+        return uassertStatusOK(parse(text));
+    }
 
     /**
      * Construct an empty/invalid HostAndPort.
@@ -73,6 +83,14 @@ struct HostAndPort {
      * If "p" is -1, port() returns ServerGlobalParams::DefaultDBPort.
      */
     HostAndPort(const std::string& h, int p);
+
+    /**
+     * Constructs a HostAndPort from a SockAddr
+     *
+     * Used by the TransportLayer to convert raw socket addresses into HostAndPorts to be
+     * accessed via tranport::Session
+     */
+    explicit HostAndPort(SockAddr addr);
 
     /**
      * (Re-)initializes this HostAndPort by parsing "s".  Returns
@@ -97,6 +115,11 @@ struct HostAndPort {
     bool isLocalHost() const;
 
     /**
+     * Returns true if the hostname is an IP matching the default route.
+     */
+    bool isDefaultRoute() const;
+
+    /**
      * Returns a string representation of "host:port".
      */
     std::string toString() const;
@@ -111,6 +134,14 @@ struct HostAndPort {
      */
     bool empty() const;
 
+    /**
+     * Returns the SockAddr representation of this address, if available
+     */
+    const boost::optional<SockAddr>& sockAddr() const& {
+        return _addr;
+    }
+    void sockAddr() && = delete;
+
     const std::string& host() const {
         return _host;
     }
@@ -121,6 +152,7 @@ struct HostAndPort {
     }
 
 private:
+    boost::optional<SockAddr> _addr;
     std::string _host;
     int _port;  // -1 indicates unspecified
 };

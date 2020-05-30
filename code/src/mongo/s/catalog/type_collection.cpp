@@ -33,6 +33,7 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/util/assert_util.h"
 
@@ -41,10 +42,11 @@ namespace {
 
 const BSONField<bool> kNoBalance("noBalance");
 const BSONField<bool> kDropped("dropped");
+const auto kIsAssignedShardKey = "isAssignedShardKey"_sd;
 
 }  // namespace
 
-const std::string CollectionType::ConfigNS = "config.collections";
+const NamespaceString CollectionType::ConfigNS("config.collections");
 
 const BSONField<std::string> CollectionType::fullNs("_id");
 const BSONField<OID> CollectionType::epoch("lastmodEpoch");
@@ -52,6 +54,7 @@ const BSONField<Date_t> CollectionType::updatedAt("lastmod");
 const BSONField<BSONObj> CollectionType::keyPattern("key");
 const BSONField<BSONObj> CollectionType::defaultCollation("defaultCollation");
 const BSONField<bool> CollectionType::unique("unique");
+const BSONField<UUID> CollectionType::uuid("uuid");
 
 StatusWith<CollectionType> CollectionType::fromBSON(const BSONObj& source) {
     CollectionType coll;
@@ -108,7 +111,7 @@ StatusWith<CollectionType> CollectionType::fromBSON(const BSONObj& source) {
         } else if (status == ErrorCodes::NoSuchKey) {
             // Sharding key can only be missing if the collection is dropped
             if (!coll.getDropped()) {
-                return {status.code(),
+                return {ErrorCodes::NoSuchKey,
                         str::stream() << "Shard key for collection " << coll._fullNs->ns()
                                       << " is missing, but the collection is not marked as "
                                          "dropped. This is an indication of corrupted sharding "
@@ -148,12 +151,41 @@ StatusWith<CollectionType> CollectionType::fromBSON(const BSONObj& source) {
     }
 
     {
+        BSONElement uuidElem;
+        Status status = bsonExtractField(source, uuid.name(), &uuidElem);
+        if (status.isOK()) {
+            auto swUUID = UUID::parse(uuidElem);
+            if (!swUUID.isOK()) {
+                return swUUID.getStatus();
+            }
+            coll._uuid = swUUID.getValue();
+        } else if (status == ErrorCodes::NoSuchKey) {
+            // UUID can be missing in 3.6, because featureCompatibilityVersion can be 3.4, in which
+            // case it remains boost::none.
+        } else {
+            return status;
+        }
+    }
+
+    {
         bool collNoBalance;
         Status status = bsonExtractBooleanField(source, kNoBalance.name(), &collNoBalance);
         if (status.isOK()) {
             coll._allowBalance = !collNoBalance;
         } else if (status == ErrorCodes::NoSuchKey) {
             // No balance can be missing in which case it is presumed as false
+        } else {
+            return status;
+        }
+    }
+
+    {
+        bool isAssignedShardKey;
+        Status status = bsonExtractBooleanField(source, kIsAssignedShardKey, &isAssignedShardKey);
+        if (status.isOK()) {
+            coll._isAssignedShardKey = isAssignedShardKey;
+        } else if (status == ErrorCodes::NoSuchKey) {
+            // isAssignedShardKey can be missing in which case it is presumed as true.
         } else {
             return status;
         }
@@ -224,8 +256,16 @@ BSONObj CollectionType::toBSON() const {
         builder.append(unique.name(), _unique.get());
     }
 
+    if (_uuid.is_initialized()) {
+        _uuid->appendToBuilder(&builder, uuid.name());
+    }
+
     if (_allowBalance.is_initialized()) {
         builder.append(kNoBalance.name(), !_allowBalance.get());
+    }
+
+    if (_isAssignedShardKey) {
+        builder.append(kIsAssignedShardKey, !_isAssignedShardKey.get());
     }
 
     return builder.obj();
@@ -251,6 +291,18 @@ void CollectionType::setUpdatedAt(Date_t updatedAt) {
 void CollectionType::setKeyPattern(const KeyPattern& keyPattern) {
     invariant(!keyPattern.toBSON().isEmpty());
     _keyPattern = keyPattern;
+}
+
+bool CollectionType::hasSameOptions(CollectionType& other) {
+    // The relevant options must have been set on this CollectionType.
+    invariant(_fullNs && _keyPattern && _unique);
+
+    return *_fullNs == other.getNs() &&
+        SimpleBSONObjComparator::kInstance.evaluate(_keyPattern->toBSON() ==
+                                                    other.getKeyPattern().toBSON()) &&
+        SimpleBSONObjComparator::kInstance.evaluate(_defaultCollation ==
+                                                    other.getDefaultCollation()) &&
+        *_unique == other.getUnique();
 }
 
 }  // namespace mongo

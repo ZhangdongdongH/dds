@@ -38,7 +38,7 @@
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_array.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 
 namespace mongo {
@@ -47,9 +47,8 @@ using std::string;
 
 TEST(MatchExpressionParserArrayTest, Size1) {
     BSONObj query = BSON("x" << BSON("$size" << 2));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -60,9 +59,8 @@ TEST(MatchExpressionParserArrayTest, Size1) {
 
 TEST(MatchExpressionParserArrayTest, SizeAsLong) {
     BSONObj query = BSON("x" << BSON("$size" << 2LL));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -73,34 +71,30 @@ TEST(MatchExpressionParserArrayTest, SizeAsLong) {
 
 TEST(MatchExpressionParserArrayTest, SizeAsNegativeLong) {
     BSONObj query = BSON("x" << BSON("$size" << -2LL));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeTooLarge) {
     BSONObj query = BSON("x" << BSON("$size" << std::numeric_limits<long long>::max()));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeAsString) {
     BSONObj query = BSON("x" << BSON("$size"
                                      << "a"));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeWithIntegralDouble) {
     BSONObj query = BSON("x" << BSON("$size" << 2.0));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -111,33 +105,29 @@ TEST(MatchExpressionParserArrayTest, SizeWithIntegralDouble) {
 
 TEST(MatchExpressionParserArrayTest, SizeWithNegativeIntegralDouble) {
     BSONObj query = BSON("x" << BSON("$size" << -2.0));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeWithDouble) {
     BSONObj query = BSON("x" << BSON("$size" << 2.5));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeWithNegative) {
     BSONObj query = BSON("x" << BSON("$size" << -2));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
 TEST(MatchExpressionParserArrayTest, SizeBad) {
     BSONObj query = BSON("x" << BSON("$size" << BSONNULL));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
@@ -145,9 +135,8 @@ TEST(MatchExpressionParserArrayTest, SizeBad) {
 
 TEST(MatchExpressionParserArrayTest, ElemMatchArr1) {
     BSONObj query = BSON("x" << BSON("$elemMatch" << BSON("x" << 1 << "y" << 2)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -159,9 +148,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchArr1) {
 TEST(MatchExpressionParserArrayTest, ElemMatchAnd) {
     BSONObj query =
         BSON("x" << BSON("$elemMatch" << BSON("$and" << BSON_ARRAY(BSON("x" << 1 << "y" << 2)))));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -172,9 +160,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchAnd) {
 
 TEST(MatchExpressionParserArrayTest, ElemMatchNor) {
     BSONObj query = BSON("x" << BSON("$elemMatch" << BSON("$nor" << BSON_ARRAY(BSON("x" << 1)))));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -186,9 +173,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchNor) {
 TEST(MatchExpressionParserArrayTest, ElemMatchOr) {
     BSONObj query =
         BSON("x" << BSON("$elemMatch" << BSON("$or" << BSON_ARRAY(BSON("x" << 1 << "y" << 2)))));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -199,9 +185,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchOr) {
 
 TEST(MatchExpressionParserArrayTest, ElemMatchVal1) {
     BSONObj query = BSON("x" << BSON("$elemMatch" << BSON("$gt" << 5)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << 1)));
@@ -227,9 +212,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef1) {
                             << "db");
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << BSON("$eq" << match)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -254,9 +238,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef2) {
                             << "db");
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << match));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -282,9 +265,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef3) {
                             << 12345);
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << match));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -326,9 +308,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef4) {
                             << "db");
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << matchOutOfOrder));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -357,9 +338,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef5) {
                             << 12345);
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << matchOutOfOrder));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -398,9 +378,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef6) {
                             << 12345);
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << matchMissingID));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -437,9 +416,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef7) {
                             << 12345);
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << matchMissingRef));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -482,9 +460,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef8) {
                             << 12345);
 
     BSONObj query = BSON("x" << BSON("$elemMatch" << matchDBOnly));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << match)));
@@ -506,9 +483,8 @@ TEST(MatchExpressionParserArrayTest, ElemMatchDBRef8) {
 
 TEST(MatchExpressionParserArrayTest, All1) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(1 << 2)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to AND.
@@ -524,9 +500,8 @@ TEST(MatchExpressionParserArrayTest, All1) {
 
 TEST(MatchExpressionParserArrayTest, AllNull) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(BSONNULL)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to AND.
@@ -540,9 +515,8 @@ TEST(MatchExpressionParserArrayTest, AllNull) {
 
 TEST(MatchExpressionParserArrayTest, AllBadArg) {
     BSONObj query = BSON("x" << BSON("$all" << 1));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
@@ -555,9 +529,8 @@ TEST(MatchExpressionParserArrayTest, AllBadRegexArg) {
 
     BSONObj query = BSON("x" << operand.obj());
 
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
@@ -570,9 +543,8 @@ TEST(MatchExpressionParserArrayTest, AllRegex1) {
     all.appendArray("$all", allArray.obj());
     BSONObj query = BSON("a" << all.obj());
 
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to AND.
@@ -598,9 +570,8 @@ TEST(MatchExpressionParserArrayTest, AllRegex2) {
     all.appendArray("$all", allArray.obj());
     BSONObj query = BSON("a" << all.obj());
 
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to AND.
@@ -617,9 +588,8 @@ TEST(MatchExpressionParserArrayTest, AllRegex2) {
 
 TEST(MatchExpressionParserArrayTest, AllNonArray) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(5)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to AND.
@@ -635,9 +605,8 @@ TEST(MatchExpressionParserArrayTest, AllNonArray) {
 TEST(MatchExpressionParserArrayTest, AllElemMatch1) {
     BSONObj internal = BSON("x" << 1 << "y" << 2);
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(BSON("$elemMatch" << internal))));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to an AND with a single ELEM_MATCH_OBJECT child.
@@ -657,9 +626,8 @@ TEST(MatchExpressionParserArrayTest, AllElemMatch1) {
 TEST(MatchExpressionParserArrayTest, AllElemMatch2) {
     BSONObj internal = BSON("z" << 1);
     BSONObj query = BSON("x.y" << BSON("$all" << BSON_ARRAY(BSON("$elemMatch" << internal))));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     // Verify that the $all got parsed to an AND with a single ELEM_MATCH_OBJECT child.
@@ -694,9 +662,8 @@ TEST(MatchExpressionParserArrayTest, AllElemMatch2) {
 // are correct.
 TEST(MatchExpressionParserArrayTest, AllElemMatch3) {
     BSONObj query = fromjson("{x: {$all: [{$elemMatch: {y: 1, z: 1}}]}}");
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     std::unique_ptr<MatchExpression> expr = std::move(result.getValue());
@@ -731,13 +698,12 @@ TEST(MatchExpressionParserArrayTest, AllElemMatchBad) {
     BSONObj internal = BSON("x" << 1 << "y" << 2);
 
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(BSON("$elemMatch" << internal) << 5)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 
     query = BSON("x" << BSON("$all" << BSON_ARRAY(5 << BSON("$elemMatch" << internal))));
-    result = MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_FALSE(result.isOK());
 }
 
@@ -745,36 +711,31 @@ TEST(MatchExpressionParserArrayTest, AllElemMatchBad) {
 TEST(MatchExpressionParserArrayTest, AllElemMatchBadMixed) {
     // $elemMatch first, equality second.
     BSONObj bad1 = fromjson("{x: {$all: [{$elemMatch: {y: 1}}, 3]}}");
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result1 =
-        MatchExpressionParser::parse(bad1, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result1 = MatchExpressionParser::parse(bad1, expCtx);
     ASSERT_FALSE(result1.isOK());
 
     // equality first, $elemMatch second
     BSONObj bad2 = fromjson("{x: {$all: [3, {$elemMatch: {y: 1}}]}}");
-    StatusWithMatchExpression result2 =
-        MatchExpressionParser::parse(bad2, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression result2 = MatchExpressionParser::parse(bad2, expCtx);
     ASSERT_FALSE(result1.isOK());
 
     // $elemMatch first, object second
     BSONObj bad3 = fromjson("{x: {$all: [{$elemMatch: {y: 1}}, {z: 1}]}}");
-    StatusWithMatchExpression result3 =
-        MatchExpressionParser::parse(bad3, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression result3 = MatchExpressionParser::parse(bad3, expCtx);
     ASSERT_FALSE(result3.isOK());
 
     // object first, $elemMatch second
     BSONObj bad4 = fromjson("{x: {$all: [{z: 1}, {$elemMatch: {y: 1}}]}}");
-    StatusWithMatchExpression result4 =
-        MatchExpressionParser::parse(bad4, ExtensionsCallbackDisallowExtensions(), collator);
+    StatusWithMatchExpression result4 = MatchExpressionParser::parse(bad4, expCtx);
     ASSERT_FALSE(result4.isOK());
 }
 
 // $all with empty string.
 TEST(MatchExpressionParserArrayTest, AllEmptyString) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY("")));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x"
@@ -798,9 +759,8 @@ TEST(MatchExpressionParserArrayTest, AllISODate) {
     const Date_t& notMatch = notMatchResult.getValue();
 
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY(match)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << notMatch)));
@@ -815,9 +775,8 @@ TEST(MatchExpressionParserArrayTest, AllISODate) {
 // $all on array element with empty string.
 TEST(MatchExpressionParserArrayTest, AllDottedEmptyString) {
     BSONObj query = BSON("x.1" << BSON("$all" << BSON_ARRAY("")));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x"
@@ -843,9 +802,8 @@ TEST(MatchExpressionParserArrayTest, AllDottedISODate) {
     const Date_t& notMatch = notMatchResult.getValue();
 
     BSONObj query = BSON("x.1" << BSON("$all" << BSON_ARRAY(match)));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
 
     ASSERT(!result.getValue()->matchesBSON(BSON("x" << notMatch)));
@@ -861,23 +819,23 @@ TEST(MatchExpressionParserArrayTest, AllDottedISODate) {
 
 TEST(MatchExpressionParserArrayTest, AllStringNullCollation) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY("string")));
-    const CollatorInterface* collator = nullptr;
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
     ASSERT_EQUALS(MatchExpression::AND, result.getValue()->matchType());
     ASSERT_EQUALS(1U, result.getValue()->numChildren());
     MatchExpression* child = result.getValue()->getChild(0);
     ASSERT_EQUALS(MatchExpression::EQ, child->matchType());
     EqualityMatchExpression* eqMatch = static_cast<EqualityMatchExpression*>(child);
-    ASSERT_TRUE(eqMatch->getCollator() == collator);
+    ASSERT_TRUE(eqMatch->getCollator() == nullptr);
 }
 
 TEST(MatchExpressionParserArrayTest, AllStringCollation) {
     BSONObj query = BSON("x" << BSON("$all" << BSON_ARRAY("string")));
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     CollatorInterfaceMock collator(CollatorInterfaceMock::MockType::kAlwaysEqual);
-    StatusWithMatchExpression result =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), &collator);
+    expCtx->setCollator(&collator);
+    StatusWithMatchExpression result = MatchExpressionParser::parse(query, expCtx);
     ASSERT_TRUE(result.isOK());
     ASSERT_EQUALS(MatchExpression::AND, result.getValue()->matchType());
     ASSERT_EQUALS(1U, result.getValue()->numChildren());

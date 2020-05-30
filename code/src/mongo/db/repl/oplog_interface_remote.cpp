@@ -64,9 +64,14 @@ StatusWith<OplogInterface::Iterator::Value> OplogIteratorRemote::next() {
 
 }  // namespace
 
-OplogInterfaceRemote::OplogInterfaceRemote(GetConnectionFn getConnection,
-                                           const std::string& collectionName)
-    : _getConnection(getConnection), _collectionName(collectionName) {}
+OplogInterfaceRemote::OplogInterfaceRemote(HostAndPort hostAndPort,
+                                           GetConnectionFn getConnection,
+                                           const std::string& collectionName,
+                                           int batchSize)
+    : _hostAndPort(hostAndPort),
+      _getConnection(getConnection),
+      _collectionName(collectionName),
+      _batchSize(batchSize) {}
 
 std::string OplogInterfaceRemote::toString() const {
     return _getConnection()->toString();
@@ -76,7 +81,11 @@ std::unique_ptr<OplogInterface::Iterator> OplogInterfaceRemote::makeIterator() c
     const Query query = Query().sort(BSON("$natural" << -1));
     const BSONObj fields = BSON("ts" << 1 << "h" << 1);
     return std::unique_ptr<OplogInterface::Iterator>(new OplogIteratorRemote(
-        _getConnection()->query(_collectionName, query, 0, 0, &fields, 0, 0)));
+        _getConnection()->query(_collectionName, query, 0, 0, &fields, 0, _batchSize)));
+}
+
+HostAndPort OplogInterfaceRemote::hostAndPort() const {
+    return _hostAndPort;
 }
 
 }  // namespace repl

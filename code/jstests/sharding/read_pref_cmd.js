@@ -1,6 +1,16 @@
+/**
+ * This test is labeled resource intensive because its total io_write is 47MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger. Its total io_write is 1540MB compared to a median
+ * of 135MB in mmapv1.
+ * @tags: [resource_intensive]
+ */
 load("jstests/replsets/rslib.js");
 
 var NODE_COUNT = 2;
+
+// Checking UUID consistency involves reading from the config server through mongos, but this test
+// sets an invalid readPreference on the connection to the mongos.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
 /**
  * Prepare to call testReadPreference() or assertFailure().
@@ -10,9 +20,11 @@ var setUp = function() {
     configDB.adminCommand({enableSharding: 'test'});
     configDB.adminCommand({shardCollection: 'test.user', key: {x: 1}});
 
-    // Each time we drop the 'test' DB we have to re-enable profiling
+    // Each time we drop the 'test' DB we have to re-enable profiling. Enable profiling on 'admin'
+    // to test the $currentOp aggregation stage.
     st.rs0.nodes.forEach(function(node) {
         node.getDB('test').setProfilingLevel(2);
+        node.getDB('admin').setProfilingLevel(2);
     });
 };
 
@@ -38,6 +50,7 @@ var tearDown = function() {
  */
 var testReadPreference = function(conn, hostList, isMongos, mode, tagSets, secExpected) {
     var testDB = conn.getDB('test');
+    var adminDB = conn.getDB('admin');
     conn.setSlaveOk(false);  // purely rely on readPref
     jsTest.log('Testing mode: ' + mode + ', tag sets: ' + tojson(tagSets));
     conn.setReadPref(mode, tagSets);
@@ -50,12 +63,17 @@ var testReadPreference = function(conn, hostList, isMongos, mode, tagSets, secEx
      * @param secOk true if command should be routed to a secondary.
      * @param profileQuery the query to perform agains the profile collection to
      *     look for the cmd just sent.
+     * @param dbName the name of the database against which to run the command,
+     *     and to which the 'system.profile' entry for this command is written.
      */
-    var cmdTest = function(cmdObj, secOk, profileQuery) {
+    var cmdTest = function(cmdObj, secOk, profileQuery, dbName = "test") {
         jsTest.log('about to do: ' + tojson(cmdObj));
+
+        let runCmdDB = conn.getDB(dbName);
+
         // use runReadCommand so that the cmdObj is modified with the readPreference
         // set on the connection.
-        var cmdResult = testDB.runReadCommand(cmdObj);
+        var cmdResult = runCmdDB.runReadCommand(cmdObj);
         jsTest.log('cmd result: ' + tojson(cmdResult));
         assert(cmdResult.ok);
 
@@ -64,18 +82,18 @@ var testReadPreference = function(conn, hostList, isMongos, mode, tagSets, secEx
         Object.extend(query, profileQuery);
 
         hostList.forEach(function(node) {
-            var testDB = node.getDB('test');
-            var result = testDB.system.profile.findOne(query);
+            var profileDB = node.getDB(dbName);
+            var result = profileDB.system.profile.findOne(query);
 
             if (result != null) {
                 if (secOk && secExpected) {
                     // The command obeys read prefs and we expect to run
                     // commands on secondaries with this mode and tag sets
-                    assert(testDB.adminCommand({isMaster: 1}).secondary);
+                    assert(profileDB.adminCommand({isMaster: 1}).secondary);
                 } else {
                     // The command does not obey read prefs, or we expect to run
                     // commands on primary with this mode or tag sets
-                    assert(testDB.adminCommand({isMaster: 1}).ismaster);
+                    assert(profileDB.adminCommand({isMaster: 1}).ismaster);
                 }
 
                 testedAtLeastOnce = true;
@@ -160,14 +178,37 @@ var testReadPreference = function(conn, hostList, isMongos, mode, tagSets, secEx
     }
 
     // Test on sharded
-    cmdTest({aggregate: 'user', pipeline: [{$project: {x: 1}}]},
+    cmdTest({aggregate: 'user', pipeline: [{$project: {x: 1}}], cursor: {}},
             true,
             formatProfileQuery({aggregate: 'user'}));
 
     // Test on non-sharded
-    cmdTest({aggregate: 'mrIn', pipeline: [{$project: {x: 1}}]},
+    cmdTest({aggregate: 'mrIn', pipeline: [{$project: {x: 1}}], cursor: {}},
             true,
             formatProfileQuery({aggregate: 'mrIn'}));
+
+    // Test $currentOp aggregation stage.
+    if (!isMongos) {
+        let curOpComment = 'agg_currentOp_' + ObjectId();
+
+        // A $currentOp without any foreign namespaces takes no collection locks and will not be
+        // profiled, so we add a dummy $lookup stage to force an entry in system.profile.
+        cmdTest({
+            aggregate: 1,
+            pipeline: [
+                {$currentOp: {}},
+                {
+                  $lookup:
+                      {from: "dummy", localField: "dummy", foreignField: "dummy", as: "dummy"}
+                }
+            ],
+            comment: curOpComment,
+            cursor: {}
+        },
+                true,
+                formatProfileQuery({comment: curOpComment}),
+                "admin");
+    }
 };
 
 /**
@@ -200,7 +241,7 @@ var testBadMode = function(conn, hostList, isMongos, mode, tagSets) {
             testDB.runReadCommand({distinct: 'user', key: 'x'});
             failureMsg = "Unexpected success running distinct!";
         } catch (e) {
-            jsTest.log(e);
+            jsTest.log(e.toString());
         }
 
         if (failureMsg)

@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns, requires_profiling]
+
 // Confirms that profiled findAndModify execution contains all expected metrics with proper values.
 
 (function() {
@@ -40,7 +42,7 @@
     assert.eq(profileObj.op, "command", tojson(profileObj));
     assert.eq(profileObj.keysExamined, 3, tojson(profileObj));
     assert.eq(profileObj.docsExamined, 3, tojson(profileObj));
-    assert.eq(profileObj.planSummary, "IXSCAN { a: 1.0 }", tojson(profileObj));
+    assert.eq(profileObj.planSummary, "IXSCAN { a: 1 }", tojson(profileObj));
     assert(profileObj.execStats.hasOwnProperty("stage"), tojson(profileObj));
     assert.eq(profileObj.protocol, getProfilerProtocolStringForCommand(conn), tojson(profileObj));
     assert.eq(coll.getName(), profileObj.command.mapreduce, tojson(profileObj));

@@ -37,11 +37,8 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/stats/timer_stats.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
-#include "mongo/stdx/memory.h"
-#include "mongo/stdx/mutex.h"
+#include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/destructor_guard.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/time_support.h"
@@ -51,59 +48,53 @@ namespace repl {
 
 Seconds OplogFetcher::kDefaultProtocolZeroAwaitDataTimeout(2);
 
+MONGO_FAIL_POINT_DEFINE(stopReplProducer);
+
 namespace {
 
-MONGO_FP_DECLARE(stopOplogFetcher);
+// The number and time spent reading batches off the network
+TimerStats getmoreReplStats;
+ServerStatusMetricField<TimerStats> displayBatchesRecieved("repl.network.getmores",
+                                                           &getmoreReplStats);
+// The oplog entries read via the oplog reader
+Counter64 opsReadStats;
+ServerStatusMetricField<Counter64> displayOpsRead("repl.network.ops", &opsReadStats);
+// The bytes read via the oplog reader
+Counter64 networkByteStats;
+ServerStatusMetricField<Counter64> displayBytesRead("repl.network.bytes", &networkByteStats);
+
+const Milliseconds maximumAwaitDataTimeoutMS(30 * 1000);
 
 /**
  * Calculates await data timeout based on the current replica set configuration.
  */
-Milliseconds calculateAwaitDataTimeout(const ReplicaSetConfig& config) {
+Milliseconds calculateAwaitDataTimeout(const ReplSetConfig& config) {
     // Under protocol version 1, make the awaitData timeout (maxTimeMS) dependent on the election
     // timeout. This enables the sync source to communicate liveness of the primary to secondaries.
+    // We never wait longer than 30 seconds.
     // Under protocol version 0, use a default timeout of 2 seconds for awaitData.
     if (config.getProtocolVersion() == 1LL) {
-        return config.getElectionTimeoutPeriod() / 2;
+        return std::min((config.getElectionTimeoutPeriod() / 2), maximumAwaitDataTimeoutMS);
     }
     return OplogFetcher::kDefaultProtocolZeroAwaitDataTimeout;
 }
 
 /**
- * Returns find command object suitable for tailing remote oplog.
- */
-BSONObj makeFindCommandObject(DataReplicatorExternalState* dataReplicatorExternalState,
-                              const NamespaceString& nss,
-                              OpTime lastOpTimeFetched) {
-    invariant(dataReplicatorExternalState);
-    BSONObjBuilder cmdBob;
-    cmdBob.append("find", nss.coll());
-    cmdBob.append("filter", BSON("ts" << BSON("$gte" << lastOpTimeFetched.getTimestamp())));
-    cmdBob.append("tailable", true);
-    cmdBob.append("oplogReplay", true);
-    cmdBob.append("awaitData", true);
-    cmdBob.append("maxTimeMS", durationCount<Milliseconds>(Minutes(1)));  // 1 min initial find.
-    auto opTimeWithTerm = dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime();
-    if (opTimeWithTerm.value != OpTime::kUninitializedTerm) {
-        cmdBob.append("term", opTimeWithTerm.value);
-    }
-    return cmdBob.obj();
-}
-
-/**
  * Returns getMore command object suitable for tailing remote oplog.
  */
-BSONObj makeGetMoreCommandObject(DataReplicatorExternalState* dataReplicatorExternalState,
-                                 const NamespaceString& nss,
+BSONObj makeGetMoreCommandObject(const NamespaceString& nss,
                                  CursorId cursorId,
-                                 Milliseconds fetcherMaxTimeMS) {
+                                 OpTimeWithTerm lastCommittedWithCurrentTerm,
+                                 Milliseconds fetcherMaxTimeMS,
+                                 int batchSize) {
     BSONObjBuilder cmdBob;
     cmdBob.append("getMore", cursorId);
     cmdBob.append("collection", nss.coll());
+    cmdBob.append("batchSize", batchSize);
     cmdBob.append("maxTimeMS", durationCount<Milliseconds>(fetcherMaxTimeMS));
-    auto opTimeWithTerm = dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime();
-    if (opTimeWithTerm.value != OpTime::kUninitializedTerm) {
-        cmdBob.append("term", opTimeWithTerm.value);
-        opTimeWithTerm.opTime.append(&cmdBob, "lastKnownCommittedOpTime");
+    if (lastCommittedWithCurrentTerm.value != OpTime::kUninitializedTerm) {
+        cmdBob.append("term", lastCommittedWithCurrentTerm.value);
+        lastCommittedWithCurrentTerm.opTime.append(&cmdBob, "lastKnownCommittedOpTime");
     }
     return cmdBob.obj();
 }
@@ -111,34 +102,121 @@ BSONObj makeGetMoreCommandObject(DataReplicatorExternalState* dataReplicatorExte
 /**
  * Returns command metadata object suitable for tailing remote oplog.
  */
-StatusWith<BSONObj> makeMetadataObject(bool isV1ElectionProtocol) {
-    return isV1ElectionProtocol
-        ? BSON(rpc::kReplSetMetadataFieldName
-               << 1
-               << rpc::ServerSelectionMetadata::fieldName()
-               << BSON(rpc::ServerSelectionMetadata::kSecondaryOkFieldName << true))
-        : rpc::ServerSelectionMetadata(true, boost::none).toBSON();
+BSONObj makeMetadataObject(bool isV1ElectionProtocol) {
+    if (!isV1ElectionProtocol)
+        return ReadPreferenceSetting::secondaryPreferredMetadata();
+
+    BSONObjBuilder metaBuilder;
+    metaBuilder << rpc::kReplSetMetadataFieldName << 1;
+    metaBuilder << rpc::kOplogQueryMetadataFieldName << 1;
+    metaBuilder.appendElements(ReadPreferenceSetting::secondaryPreferredMetadata());
+    return metaBuilder.obj();
 }
 
 /**
  * Checks the first batch of results from query.
  * 'documents' are the first batch of results returned from tailing the remote oplog.
  * 'lastFetched' optime and hash should be consistent with the predicate in the query.
- * Returns RemoteOplogStale if the oplog query has no results.
+ * 'lastOpCommitted' is the OpTime of the most recently committed op of which this node is aware.
+ * 'remoteLastOpApplied' is the last OpTime applied on the sync source. This is optional for
+ * compatibility with 3.4 servers that do not send OplogQueryMetadata.
+ * 'remoteLastOpCommitted' is the OpTime of the most recently committed op of which the sync source
+ * is aware.
+ * 'requiredRBID' is a RollbackID received when we chose the sync source that we use here to
+ * guarantee we have not rolled back since we confirmed the sync source had our minValid.
+ * 'remoteRBID' is a RollbackId for the sync source returned in this oplog query. This is optional
+ * for compatibility with 3.4 servers that do not send OplogQueryMetadata.
+ * 'requireFresherSyncSource' is a boolean indicating whether we should require the sync source's
+ * oplog to be ahead of ours. If false, the sync source's oplog is allowed to be at the same point
+ * as ours, but still cannot be behind ours.
+ *
+ * TODO (SERVER-27668): Make remoteLastOpApplied, remoteLastOpCommitted, and remoteRBID
+ * non-optional.
+ *
  * Returns OplogStartMissing if we cannot find the optime of the last fetched operation in
  * the remote oplog.
  */
-Status checkRemoteOplogStart(const Fetcher::Documents& documents, OpTimeWithHash lastFetched) {
-    if (documents.empty()) {
-        // The GTE query from upstream returns nothing, so we're ahead of the upstream.
-        return Status(ErrorCodes::RemoteOplogStale,
-                      str::stream() << "We are ahead of the sync source. Our last op time fetched: "
-                                    << lastFetched.opTime.toString());
+Status checkRemoteOplogStart(const Fetcher::Documents& documents,
+                             OpTimeWithHash lastFetched,
+                             OpTime lastOpCommitted,
+                             boost::optional<OpTime> remoteLastOpApplied,
+                             boost::optional<OpTime> remoteLastOpCommitted,
+                             int requiredRBID,
+                             boost::optional<int> remoteRBID,
+                             bool requireFresherSyncSource) {
+    // Once we establish our cursor, we need to ensure that our upstream node hasn't rolled back
+    // since that could cause it to not have our required minValid point. The cursor will be
+    // killed if the upstream node rolls back so we don't need to keep checking once the cursor
+    // is established.
+    if (remoteRBID && (*remoteRBID != requiredRBID)) {
+        return Status(ErrorCodes::InvalidSyncSource,
+                      "Upstream node rolled back after choosing it as a sync source. Choosing "
+                      "new sync source.");
     }
+
+    // Sometimes our remoteLastOpApplied may be stale; if we received a document with an
+    // opTime later than remoteLastApplied, we can assume the remote is at least up to that
+    // opTime.
+    if (remoteLastOpApplied && !documents.empty()) {
+        const auto docOpTime = OpTime::parseFromOplogEntry(documents.back());
+        if (docOpTime.isOK()) {
+            remoteLastOpApplied = std::max(*remoteLastOpApplied, docOpTime.getValue());
+        }
+    }
+
+    // The sync source could be behind us if it rolled back after we selected it. We could have
+    // failed to detect the rollback if it occurred between sync source selection (when we check the
+    // candidate is ahead of us) and sync source resolution (when we got 'requiredRBID'). If the
+    // sync source is now behind us, choose a new sync source to prevent going into rollback.
+    if (remoteLastOpApplied && (*remoteLastOpApplied < lastFetched.opTime)) {
+        return Status(ErrorCodes::InvalidSyncSource,
+                      str::stream() << "Sync source's last applied OpTime "
+                                    << remoteLastOpApplied->toString()
+                                    << " is older than our last fetched OpTime "
+                                    << lastFetched.opTime.toString()
+                                    << ". Choosing new sync source.");
+    }
+
+    // If 'requireFresherSyncSource' is true, we must check that the sync source's
+    // lastApplied/lastOpCommitted is ahead of us to prevent forming a cycle. Although we check for
+    // this condition in sync source selection, if an undetected rollback occurred between sync
+    // source selection and sync source resolution, this condition may no longer hold.
+    // 'requireFresherSyncSource' is false for initial sync, since no other node can sync off an
+    // initial syncing node, so we do not need to check for cycles. In addition, it would be
+    // problematic to check this condition for initial sync, since the 'lastFetched' OpTime will
+    // almost always equal the 'remoteLastApplied', since we fetch the sync source's last applied
+    // OpTime to determine where to start our OplogFetcher.
+    if (requireFresherSyncSource && remoteLastOpApplied && remoteLastOpCommitted &&
+        std::tie(*remoteLastOpApplied, *remoteLastOpCommitted) <=
+            std::tie(lastFetched.opTime, lastOpCommitted)) {
+        return Status(ErrorCodes::InvalidSyncSource,
+                      str::stream()
+                          << "Sync source cannot be behind me, and if I am up-to-date with the "
+                             "sync source, it must have a higher lastOpCommitted. "
+                          << "My last fetched oplog optime: "
+                          << lastFetched.opTime.toString()
+                          << ", latest oplog optime of sync source: "
+                          << remoteLastOpApplied->toString()
+                          << ", my lastOpCommitted: "
+                          << lastOpCommitted.toString()
+                          << ", lastOpCommitted of sync source: "
+                          << remoteLastOpCommitted->toString());
+    }
+
+    // At this point we know that our sync source has our minValid and is not behind us, so if our
+    // history diverges from our sync source's we should prefer its history and roll back ours.
+
+    // Since we checked for rollback and our sync source is not behind us, an empty batch means that
+    // we have a higher timestamp on our last fetched OpTime than our sync source's last applied
+    // OpTime, but a lower term. When this occurs, we must roll back our inconsistent oplog entry.
+    if (documents.empty()) {
+        return Status(ErrorCodes::OplogStartMissing, "Received an empty batch from sync source.");
+    }
+
     const auto& o = documents.front();
     auto opTimeResult = OpTime::parseFromOplogEntry(o);
     if (!opTimeResult.isOK()) {
-        return Status(ErrorCodes::OplogStartMissing,
+        return Status(ErrorCodes::InvalidBSON,
                       str::stream() << "our last op time fetched: " << lastFetched.opTime.toString()
                                     << " (hash: "
                                     << lastFetched.value
@@ -151,33 +229,50 @@ Status checkRemoteOplogStart(const Fetcher::Documents& documents, OpTimeWithHash
     auto opTime = opTimeResult.getValue();
     long long hash = o["h"].numberLong();
     if (opTime != lastFetched.opTime || hash != lastFetched.value) {
-        return Status(ErrorCodes::OplogStartMissing,
-                      str::stream() << "our last op time fetched: " << lastFetched.opTime.toString()
-                                    << ". source's GTE: "
-                                    << opTime.toString()
-                                    << " hashes: ("
-                                    << lastFetched.value
-                                    << "/"
-                                    << hash
-                                    << ")");
+        std::string message = str::stream()
+            << "Our last op time fetched: " << lastFetched.opTime.toString()
+            << ". source's GTE: " << opTime.toString() << " hashes: (" << lastFetched.value << "/"
+            << hash << ")";
+
+        // In PV1, if the hashes do not match, the optimes should not either since optimes uniquely
+        // identify oplog entries. In that case we fail before we potentially corrupt data. This
+        // should never happen.
+        if (opTime.getTerm() != OpTime::kUninitializedTerm && hash != lastFetched.value &&
+            opTime == lastFetched.opTime) {
+            severe() << "Hashes do not match but OpTimes do. " << message
+                     << ". Source's GTE doc: " << redact(o);
+            fassertFailedNoTrace(40634);
+        }
+
+        return Status(ErrorCodes::OplogStartMissing, message);
     }
     return Status::OK();
 }
 
-Counter64 readersCreatedStats;
-ServerStatusMetricField<Counter64> displayReadersCreated("repl.network.readersCreated",
-                                                         &readersCreatedStats);
-// The number and time spent reading batches off the network
-TimerStats getmoreReplStats;
-ServerStatusMetricField<TimerStats> displayBatchesRecieved("repl.network.getmores",
-                                                           &getmoreReplStats);
-// The oplog entries read via the oplog reader
-Counter64 opsReadStats;
-ServerStatusMetricField<Counter64> displayOpsRead("repl.network.ops", &opsReadStats);
-// The bytes read via the oplog reader
-Counter64 networkByteStats;
-ServerStatusMetricField<Counter64> displayBytesRead("repl.network.bytes", &networkByteStats);
-
+/**
+ * Parses a QueryResponse for the OplogQueryMetadata. If there is an error it returns it. If
+ * no OplogQueryMetadata is provided then it returns boost::none.
+ *
+ * OplogQueryMetadata is made optional for backwards compatibility.
+ * TODO (SERVER-27668): Make this non-optional in mongodb 3.8. When this stops being optional
+ * we can remove the duplicated fields in both metadata types and begin to always use
+ * OplogQueryMetadata's data.
+ */
+StatusWith<boost::optional<rpc::OplogQueryMetadata>> parseOplogQueryMetadata(
+    Fetcher::QueryResponse queryResponse) {
+    boost::optional<rpc::OplogQueryMetadata> oqMetadata = boost::none;
+    bool receivedOplogQueryMetadata =
+        queryResponse.otherFields.metadata.hasElement(rpc::kOplogQueryMetadataFieldName);
+    if (receivedOplogQueryMetadata) {
+        const auto& metadataObj = queryResponse.otherFields.metadata;
+        auto metadataResult = rpc::OplogQueryMetadata::readFromMetadata(metadataObj);
+        if (!metadataResult.isOK()) {
+            return metadataResult.getStatus();
+        }
+        oqMetadata = boost::make_optional(metadataResult.getValue());
+    }
+    return oqMetadata;
+}
 }  // namespace
 
 StatusWith<OplogFetcher::DocumentsInfo> OplogFetcher::validateDocuments(
@@ -202,15 +297,13 @@ StatusWith<OplogFetcher::DocumentsInfo> OplogFetcher::validateDocuments(
             continue;
         }
 
-        // Check to see if the oplog entry goes back in time for this document.
-        const auto docOpTime = OpTime::parseFromOplogEntry(doc);
-        // entries must have a "ts" field.
-        if (!docOpTime.isOK()) {
-            return docOpTime.getStatus();
+        auto docOpTimeWithHash = AbstractOplogFetcher::parseOpTimeWithHash(doc);
+        if (!docOpTimeWithHash.isOK()) {
+            return docOpTimeWithHash.getStatus();
         }
+        info.lastDocument = docOpTimeWithHash.getValue();
 
-        info.lastDocument = {doc["h"].numberLong(), docOpTime.getValue()};
-
+        // Check to see if the oplog entry goes back in time for this document.
         const auto docTS = info.lastDocument.opTime.getTimestamp();
         if (lastTS >= docTS) {
             return Status(ErrorCodes::OplogOutOfOrder,
@@ -245,188 +338,87 @@ OplogFetcher::OplogFetcher(executor::TaskExecutor* executor,
                            OpTimeWithHash lastFetched,
                            HostAndPort source,
                            NamespaceString nss,
-                           ReplicaSetConfig config,
+                           ReplSetConfig config,
                            std::size_t maxFetcherRestarts,
+                           int requiredRBID,
+                           bool requireFresherSyncSource,
                            DataReplicatorExternalState* dataReplicatorExternalState,
                            EnqueueDocumentsFn enqueueDocumentsFn,
-                           OnShutdownCallbackFn onShutdownCallbackFn)
-    : _executor(executor),
-      _source(source),
-      _nss(nss),
-      _metadataObject(uassertStatusOK(makeMetadataObject(config.getProtocolVersion() == 1LL))),
-      _remoteCommandTimeout(config.getElectionTimeoutPeriod()),
-      _maxFetcherRestarts(maxFetcherRestarts),
+                           OnShutdownCallbackFn onShutdownCallbackFn,
+                           const int batchSize)
+    : AbstractOplogFetcher(executor,
+                           lastFetched,
+                           source,
+                           nss,
+                           maxFetcherRestarts,
+                           onShutdownCallbackFn,
+                           "oplog fetcher"),
+      _metadataObject(makeMetadataObject(config.getProtocolVersion() == 1LL)),
+      _requiredRBID(requiredRBID),
+      _requireFresherSyncSource(requireFresherSyncSource),
       _dataReplicatorExternalState(dataReplicatorExternalState),
       _enqueueDocumentsFn(enqueueDocumentsFn),
       _awaitDataTimeout(calculateAwaitDataTimeout(config)),
-      _onShutdownCallbackFn(onShutdownCallbackFn),
-      _lastFetched(lastFetched),
-      _fetcher(_makeFetcher(_lastFetched.opTime)) {
-    uassert(ErrorCodes::BadValue, "null last optime fetched", !_lastFetched.opTime.isNull());
-    uassert(ErrorCodes::InvalidReplicaSetConfig,
-            "uninitialized replica set configuration",
-            config.isInitialized());
-    uassert(ErrorCodes::BadValue, "null enqueueDocuments function", enqueueDocumentsFn);
-    uassert(ErrorCodes::BadValue, "null onShutdownCallback function", onShutdownCallbackFn);
+      _batchSize(batchSize) {
+
+    invariant(config.isInitialized());
+    invariant(enqueueDocumentsFn);
 }
 
 OplogFetcher::~OplogFetcher() {
-    DESTRUCTOR_GUARD(shutdown(); join(););
+    shutdown();
+    join();
 }
 
-std::string OplogFetcher::toString() const {
-    return str::stream() << "OplogReader -"
-                         << " last optime fetched: " << _lastFetched.opTime.toString()
-                         << " last hash fetched: " << _lastFetched.value
-                         << " fetcher: " << _fetcher->getDiagnosticString();
-}
+BSONObj OplogFetcher::_makeFindCommandObject(const NamespaceString& nss,
+                                             OpTime lastOpTimeFetched,
+                                             Milliseconds findMaxTime) const {
+    auto lastCommittedWithCurrentTerm =
+        _dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime();
+    auto term = lastCommittedWithCurrentTerm.value;
+    BSONObjBuilder cmdBob;
+    cmdBob.append("find", nss.coll());
+    cmdBob.append("filter", BSON("ts" << BSON("$gte" << lastOpTimeFetched.getTimestamp())));
+    cmdBob.append("tailable", true);
+    cmdBob.append("oplogReplay", true);
+    cmdBob.append("awaitData", true);
+    cmdBob.append("maxTimeMS", durationCount<Milliseconds>(findMaxTime));
+    cmdBob.append("batchSize", _batchSize);
 
-bool OplogFetcher::isActive() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _active;
-}
-
-Status OplogFetcher::startup() {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    if (_active) {
-        return Status(ErrorCodes::IllegalOperation, "oplog fetcher already active");
+    if (term != OpTime::kUninitializedTerm) {
+        cmdBob.append("term", term);
     }
-    if (_inShutdown) {
-        return Status(ErrorCodes::ShutdownInProgress, "oplog fetcher shutting down");
-    }
 
-    auto status = _scheduleFetcher_inlock();
-    if (status.isOK()) {
-        _active = true;
-    }
-    return status;
+    // This ensures that the sync source never returns an empty batch of documents for the first set
+    // of results.
+    cmdBob.append("readConcern", BSON("afterClusterTime" << lastOpTimeFetched.getTimestamp()));
+
+    return cmdBob.obj();
 }
 
-Status OplogFetcher::_scheduleFetcher_inlock() {
-    readersCreatedStats.increment();
-    return _fetcher->schedule();
-}
-
-void OplogFetcher::shutdown() {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    _inShutdown = true;
-    _fetcher->shutdown();
-}
-
-void OplogFetcher::join() {
-    stdx::unique_lock<stdx::mutex> lock(_mutex);
-    _condition.wait(lock, [this]() { return !_active; });
-}
-
-OpTimeWithHash OplogFetcher::getLastOpTimeWithHashFetched() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _lastFetched;
-}
-
-BSONObj OplogFetcher::getCommandObject_forTest() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _fetcher->getCommandObject();
+BSONObj OplogFetcher::_makeMetadataObject() const {
+    return _metadataObject;
 }
 
 BSONObj OplogFetcher::getMetadataObject_forTest() const {
     return _metadataObject;
 }
 
-Milliseconds OplogFetcher::getRemoteCommandTimeout_forTest() const {
-    return _remoteCommandTimeout;
+Milliseconds OplogFetcher::getAwaitDataTimeout_forTest() const {
+    return _getGetMoreMaxTime();
 }
 
-Milliseconds OplogFetcher::getAwaitDataTimeout_forTest() const {
+Milliseconds OplogFetcher::_getGetMoreMaxTime() const {
     return _awaitDataTimeout;
 }
 
-bool OplogFetcher::inShutdown_forTest() const {
-    return _isInShutdown();
-}
-
-void OplogFetcher::_callback(const Fetcher::QueryResponseStatus& result,
-                             BSONObjBuilder* getMoreBob) {
-    const auto& responseStatus = result.getStatus();
-    if (ErrorCodes::CallbackCanceled == responseStatus) {
-        LOG(1) << "oplog query cancelled";
-        _finishCallback(responseStatus);
-        return;
-    }
-
-    // If target cut connections between connecting and querying (for
-    // example, because it stepped down) we might not have a cursor.
-    if (!responseStatus.isOK()) {
-        {
-            stdx::lock_guard<stdx::mutex> lock(_mutex);
-            if (_inShutdown) {
-                log() << "Error returned from oplog query while canceling query: "
-                      << redact(responseStatus);
-            } else if (_fetcherRestarts == _maxFetcherRestarts) {
-                log() << "Error returned from oplog query (no more query restarts left): "
-                      << redact(responseStatus);
-            } else {
-                log() << "Restarting oplog query due to error: " << redact(responseStatus)
-                      << ". Last fetched optime (with hash): " << _lastFetched
-                      << ". Restarts remaining: " << (_maxFetcherRestarts - _fetcherRestarts);
-                _fetcherRestarts++;
-                // Destroying current instance in _shuttingDownFetcher will possibly block.
-                _shuttingDownFetcher.reset();
-                // Move the old fetcher into the shutting down instance.
-                _shuttingDownFetcher.swap(_fetcher);
-                // Create and start fetcher with new starting optime.
-                _fetcher = _makeFetcher(_lastFetched.opTime);
-                auto scheduleStatus = _scheduleFetcher_inlock();
-                if (scheduleStatus.isOK()) {
-                    log() << "Scheduled new oplog query " << _fetcher->toString();
-                    return;
-                }
-                error() << "Error scheduling new oplog query: " << redact(scheduleStatus)
-                        << ". Returning current oplog query error: " << redact(responseStatus);
-            }
-        }
-        _finishCallback(responseStatus);
-        return;
-    }
-
-    // Reset fetcher restart counter on successful response.
-    {
-        stdx::lock_guard<stdx::mutex> lock(_mutex);
-        invariant(_active);
-        _fetcherRestarts = 0;
-    }
-
-    if (_isInShutdown()) {
-        _finishCallback(Status(ErrorCodes::CallbackCanceled, "oplog fetcher shutting down"));
-        return;
-    }
+StatusWith<BSONObj> OplogFetcher::_onSuccessfulBatch(const Fetcher::QueryResponse& queryResponse) {
 
     // Stop fetching and return on fail point.
-    // This fail point is intended to make the oplog fetcher ignore the downloaded batch of
-    // operations and not error out.
-    if (MONGO_FAIL_POINT(stopOplogFetcher)) {
-        _finishCallback(Status::OK());
-        // Wait for a while, otherwise, it will keep busy waiting.
-        sleepmillis(100);
-        return;
-    }
-
-    const auto& queryResponse = result.getValue();
-    rpc::ReplSetMetadata metadata;
-
-    // Forward metadata (containing liveness information) to data replicator external state.
-    bool receivedMetadata =
-        queryResponse.otherFields.metadata.hasElement(rpc::kReplSetMetadataFieldName);
-    if (receivedMetadata) {
-        const auto& metadataObj = queryResponse.otherFields.metadata;
-        auto metadataResult = rpc::ReplSetMetadata::readFromMetadata(metadataObj);
-        if (!metadataResult.isOK()) {
-            error() << "invalid replication metadata from sync source " << _fetcher->getSource()
-                    << ": " << metadataResult.getStatus() << ": " << metadataObj;
-            _finishCallback(metadataResult.getStatus());
-            return;
-        }
-        metadata = metadataResult.getValue();
-        _dataReplicatorExternalState->processMetadata(metadata);
+    // This fail point makes the oplog fetcher ignore the downloaded batch of operations and not
+    // error out. The FailPointEnabled error will be caught by the AbstractOplogFetcher.
+    if (MONGO_FAIL_POINT(stopReplProducer)) {
+        return Status(ErrorCodes::FailPointEnabled, "stopReplProducer fail point is enabled");
     }
 
     const auto& documents = queryResponse.documents;
@@ -440,30 +432,71 @@ void OplogFetcher::_callback(const Fetcher::QueryResponseStatus& result,
         LOG(2) << "oplog fetcher read 0 operations from remote oplog";
     }
 
-    auto opTimeWithHash = getLastOpTimeWithHashFetched();
+    auto oqMetadataResult = parseOplogQueryMetadata(queryResponse);
+    if (!oqMetadataResult.isOK()) {
+        error() << "invalid oplog query metadata from sync source " << _getSource() << ": "
+                << oqMetadataResult.getStatus() << ": " << queryResponse.otherFields.metadata;
+        return oqMetadataResult.getStatus();
+    }
+    auto oqMetadata = oqMetadataResult.getValue();
+
+    // This lastFetched value is the last OpTime from the previous batch.
+    auto lastFetched = _getLastOpTimeWithHashFetched();
 
     // Check start of remote oplog and, if necessary, stop fetcher to execute rollback.
     if (queryResponse.first) {
-        auto status = checkRemoteOplogStart(documents, opTimeWithHash);
+        auto remoteRBID = oqMetadata ? boost::make_optional(oqMetadata->getRBID()) : boost::none;
+        auto remoteLastApplied =
+            oqMetadata ? boost::make_optional(oqMetadata->getLastOpApplied()) : boost::none;
+        auto remoteLastOpCommitted =
+            oqMetadata ? boost::make_optional(oqMetadata->getLastOpCommitted()) : boost::none;
+        auto status = checkRemoteOplogStart(
+            documents,
+            lastFetched,
+            _dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime().opTime,
+            remoteLastApplied,
+            remoteLastOpCommitted,
+            _requiredRBID,
+            remoteRBID,
+            _requireFresherSyncSource);
         if (!status.isOK()) {
-            // Stop oplog fetcher and execute rollback.
-            _finishCallback(status, opTimeWithHash);
-            return;
+            // Stop oplog fetcher and execute rollback if necessary.
+            return status;
         }
 
-        LOG(1) << "oplog fetcher successfully fetched from " << _source;
+        LOG(1) << "oplog fetcher successfully fetched from " << _getSource();
 
         // If this is the first batch and no rollback is needed, skip the first document.
         firstDocToApply++;
     }
 
     auto validateResult = OplogFetcher::validateDocuments(
-        documents, queryResponse.first, opTimeWithHash.opTime.getTimestamp());
+        documents, queryResponse.first, lastFetched.opTime.getTimestamp());
     if (!validateResult.isOK()) {
-        _finishCallback(validateResult.getStatus(), opTimeWithHash);
-        return;
+        return validateResult.getStatus();
     }
     auto info = validateResult.getValue();
+
+    // Process replset metadata.  It is important that this happen after we've validated the
+    // first batch, so we don't progress our knowledge of the commit point from a
+    // response that triggers a rollback.
+    rpc::ReplSetMetadata replSetMetadata;
+    bool receivedReplMetadata =
+        queryResponse.otherFields.metadata.hasElement(rpc::kReplSetMetadataFieldName);
+    if (receivedReplMetadata) {
+        const auto& metadataObj = queryResponse.otherFields.metadata;
+        auto metadataResult = rpc::ReplSetMetadata::readFromMetadata(metadataObj);
+        if (!metadataResult.isOK()) {
+            error() << "invalid replication metadata from sync source " << _getSource() << ": "
+                    << metadataResult.getStatus() << ": " << metadataObj;
+            return metadataResult.getStatus();
+        }
+        replSetMetadata = metadataResult.getValue();
+
+        // We will only ever have OplogQueryMetadata if we have ReplSetMetadata, so it is safe
+        // to call processMetadata() in this if block.
+        _dataReplicatorExternalState->processMetadata(replSetMetadata, oqMetadata);
+    }
 
     // Increment stats. We read all of the docs in the query.
     opsReadStats.increment(info.networkDocumentCount);
@@ -473,74 +506,38 @@ void OplogFetcher::_callback(const Fetcher::QueryResponseStatus& result,
     getmoreReplStats.recordMillis(durationCount<Milliseconds>(queryResponse.elapsedMillis));
 
     // TODO: back pressure handling will be added in SERVER-23499.
-    _enqueueDocumentsFn(firstDocToApply, documents.cend(), info);
-
-    // Update last fetched info.
-    if (firstDocToApply != documents.cend()) {
-        opTimeWithHash = info.lastDocument;
-        LOG(3) << "batch resetting last fetched optime: " << opTimeWithHash.opTime
-               << "; hash: " << opTimeWithHash.value;
-
-        stdx::unique_lock<stdx::mutex> lock(_mutex);
-        _lastFetched = opTimeWithHash;
+    auto status = _enqueueDocumentsFn(firstDocToApply, documents.cend(), info);
+    if (!status.isOK()) {
+        return status;
     }
 
-    if (_dataReplicatorExternalState->shouldStopFetching(_fetcher->getSource(), metadata)) {
-        _finishCallback(Status(ErrorCodes::InvalidSyncSource,
-                               str::stream() << "sync source " << _fetcher->getSource().toString()
-                                             << " (last optime: "
-                                             << metadata.getLastOpVisible().toString()
-                                             << "; sync source index: "
-                                             << metadata.getSyncSourceIndex()
-                                             << "; primary index: "
-                                             << metadata.getPrimaryIndex()
-                                             << ") is no longer valid"),
-                        opTimeWithHash);
-        return;
+    if (_dataReplicatorExternalState->shouldStopFetching(
+            _getSource(), replSetMetadata, oqMetadata)) {
+        str::stream errMsg;
+        errMsg << "sync source " << _getSource().toString();
+        errMsg << " (config version: " << replSetMetadata.getConfigVersion();
+        // If OplogQueryMetadata was provided, its values were used to determine if we should
+        // stop fetching from this sync source.
+        if (oqMetadata) {
+            errMsg << "; last applied optime: " << oqMetadata->getLastOpApplied().toString();
+            errMsg << "; sync source index: " << oqMetadata->getSyncSourceIndex();
+            errMsg << "; primary index: " << oqMetadata->getPrimaryIndex();
+        } else {
+            errMsg << "; last visible optime: " << replSetMetadata.getLastOpVisible().toString();
+            errMsg << "; sync source index: " << replSetMetadata.getSyncSourceIndex();
+            errMsg << "; primary index: " << replSetMetadata.getPrimaryIndex();
+        }
+        errMsg << ") is no longer valid";
+        return Status(ErrorCodes::InvalidSyncSource, errMsg);
     }
 
-    // No more data. Stop processing and return Status::OK along with last
-    // fetch info.
-    if (!getMoreBob) {
-        _finishCallback(Status::OK(), opTimeWithHash);
-        return;
-    }
-
-    getMoreBob->appendElements(makeGetMoreCommandObject(_dataReplicatorExternalState,
-                                                        queryResponse.nss,
-                                                        queryResponse.cursorId,
-                                                        _awaitDataTimeout));
+    auto lastCommittedWithCurrentTerm =
+        _dataReplicatorExternalState->getCurrentTermAndLastCommittedOpTime();
+    return makeGetMoreCommandObject(queryResponse.nss,
+                                    queryResponse.cursorId,
+                                    lastCommittedWithCurrentTerm,
+                                    _getGetMoreMaxTime(),
+                                    _batchSize);
 }
-
-void OplogFetcher::_finishCallback(Status status) {
-    _finishCallback(status, getLastOpTimeWithHashFetched());
-}
-
-void OplogFetcher::_finishCallback(Status status, OpTimeWithHash opTimeWithHash) {
-    invariant(isActive());
-
-    _onShutdownCallbackFn(status, opTimeWithHash);
-
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    _active = false;
-    _condition.notify_all();
-}
-
-std::unique_ptr<Fetcher> OplogFetcher::_makeFetcher(OpTime lastFetchedOpTime) {
-    return stdx::make_unique<Fetcher>(
-        _executor,
-        _source,
-        _nss.db().toString(),
-        makeFindCommandObject(_dataReplicatorExternalState, _nss, lastFetchedOpTime),
-        stdx::bind(&OplogFetcher::_callback, this, stdx::placeholders::_1, stdx::placeholders::_3),
-        _metadataObject,
-        _remoteCommandTimeout);
-}
-
-bool OplogFetcher::_isInShutdown() const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _inShutdown;
-}
-
 }  // namespace repl
 }  // namespace mongo

@@ -1,5 +1,5 @@
 /*
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018 MongoDB Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -28,30 +28,30 @@
 
 #pragma once
 
-#include <string>
-
-#include "mongo/base/disallow_copying.h"
-#include "mongo/base/status.h"
-#include "mongo/base/string_data.h"
-#include "mongo/db/auth/sasl_server_conversation.h"
+#include "mongo/db/auth/sasl_mechanism_policies.h"
+#include "mongo/db/auth/sasl_mechanism_registry.h"
 
 namespace mongo {
-/**
- *  Server side authentication session for SASL PLAIN.
- */
-class SaslPLAINServerConversation : public SaslServerConversation {
-    MONGO_DISALLOW_COPYING(SaslPLAINServerConversation);
 
+class SASLPlainServerMechanism : public MakeServerMechanism<PLAINPolicy> {
 public:
-    /**
-     * Implements the server side of a SASL PLAIN mechanism session.
-     *
-     **/
-    explicit SaslPLAINServerConversation(SaslAuthenticationSession* saslAuthSession);
+    explicit SASLPlainServerMechanism(std::string authenticationDatabase)
+        : MakeServerMechanism<PLAINPolicy>(std::move(authenticationDatabase)) {}
 
-    virtual ~SaslPLAINServerConversation();
-
-    virtual StatusWith<bool> step(StringData inputData, std::string* outputData);
+private:
+    StatusWith<std::tuple<bool, std::string>> stepImpl(OperationContext* opCtx,
+                                                       StringData input) final;
 };
+
+class PLAINServerFactory : public MakeServerFactory<SASLPlainServerMechanism> {
+public:
+    static constexpr bool isInternal = true;
+    bool canMakeMechanismForUser(const User* user) const final {
+        auto credentials = user->getCredentials();
+        return !credentials.isExternal && (credentials.scram<SHA1Block>().isValid() ||
+                                           credentials.scram<SHA256Block>().isValid());
+    }
+};
+
 
 }  // namespace mongo

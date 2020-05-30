@@ -32,7 +32,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/record_id.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -49,11 +49,13 @@ public:
 
     void addChild(PlanStage* child);
 
+    void addChildren(Children childrenToAdd);
+
     bool isEOF() final;
 
     StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_OR;
@@ -79,7 +81,7 @@ private:
     bool _dedup;
 
     // Which RecordIds have we returned?
-    unordered_set<RecordId, RecordId::Hasher> _seen;
+    stdx::unordered_set<RecordId, RecordId::Hasher> _seen;
 
     // Stats
     OrStats _specificStats;

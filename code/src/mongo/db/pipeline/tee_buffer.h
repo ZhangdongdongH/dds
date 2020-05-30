@@ -52,9 +52,9 @@ public:
      * 'bufferSizeBytes' is a soft cap, and may be exceeded by one document's worth (~16MB).
      */
     static boost::intrusive_ptr<TeeBuffer> create(
-        size_t nConsumers, int bufferSizeBytes = internalQueryFacetBufferSizeBytes);
+        size_t nConsumers, int bufferSizeBytes = internalQueryFacetBufferSizeBytes.load());
 
-    void setSource(const boost::intrusive_ptr<DocumentSource>& source) {
+    void setSource(DocumentSource* source) {
         _source = source;
     }
 
@@ -69,7 +69,9 @@ public:
                 return info.stillInUse;
             })) {
             _buffer.clear();
-            _source->dispose();
+            if (_source) {
+                _source->dispose();
+            }
         }
     }
 
@@ -90,7 +92,7 @@ private:
      */
     void loadNextBatch();
 
-    boost::intrusive_ptr<DocumentSource> _source;
+    DocumentSource* _source = nullptr;
 
     const size_t _bufferSizeBytes;
     std::vector<DocumentSource::GetNextResult> _buffer;

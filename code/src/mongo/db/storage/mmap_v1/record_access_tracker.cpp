@@ -36,10 +36,9 @@
 #include "mongo/config.h"
 #include "mongo/db/storage/mmap_v1/record.h"
 #include "mongo/platform/bits.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/clock_source.h"
-#include "mongo/util/concurrency/threadlocal.h"
 #include "mongo/util/debug_util.h"
-#include "mongo/util/net/listen.h"
 #include "mongo/util/processinfo.h"
 
 namespace mongo {
@@ -48,7 +47,7 @@ namespace {
 
 static bool blockSupported = false;
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(RecordBlockSupported, ("SystemInfo"))(InitializerContext* cx) {
+MONGO_INITIALIZER(RecordBlockSupported)(InitializerContext* cx) {
     blockSupported = ProcessInfo::blockCheckSupported();
     return Status::OK();
 }
@@ -268,23 +267,12 @@ void RecordAccessTracker::Rolling::_rotate(ClockSource* cs) {
     updateLastRotate(cs);
 }
 
-// These need to be outside the ps namespace due to the way they are defined
-#if defined(MONGO_CONFIG_HAVE___THREAD)
-__thread PointerTable::Data _pointerTableData;
 PointerTable::Data* PointerTable::getData() {
-    return &_pointerTableData;
+    thread_local std::unique_ptr<PointerTable::Data> data;
+    if (!data)
+        data = stdx::make_unique<PointerTable::Data>();
+    return data.get();
 }
-#elif defined(MONGO_CONFIG_HAVE___DECLSPEC_THREAD)
-__declspec(thread) PointerTable::Data _pointerTableData;
-PointerTable::Data* PointerTable::getData() {
-    return &_pointerTableData;
-}
-#else
-TSP_DEFINE(PointerTable::Data, _pointerTableData);
-PointerTable::Data* PointerTable::getData() {
-    return _pointerTableData.getMake();
-}
-#endif
 
 //
 // RecordAccessTracker

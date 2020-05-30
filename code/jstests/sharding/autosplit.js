@@ -4,10 +4,15 @@
 (function() {
     'use strict';
 
-    var s = new ShardingTest({name: "auto1", shards: 2, mongos: 1, other: {enableAutoSplit: true}});
+    var s = new ShardingTest({
+        name: "auto1",
+        shards: 2,
+        mongos: 1,
+        other: {enableAutoSplit: true, chunkSize: 10},
+    });
 
     assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {num: 1}}));
 
     var bigString = "";
@@ -30,7 +35,7 @@
     var counts = [];
 
     s.printChunks();
-    counts.push(s.config.chunks.count());
+    counts.push(s.config.chunks.count({"ns": "test.foo"}));
     assert.eq(100, db.foo.find().itcount());
 
     print("datasize: " +
@@ -44,7 +49,7 @@
 
     s.printChunks();
     s.printChangeLog();
-    counts.push(s.config.chunks.count());
+    counts.push(s.config.chunks.count({"ns": "test.foo"}));
 
     bulk = coll.initializeUnorderedBulkOp();
     for (; i < 400; i++) {
@@ -54,7 +59,7 @@
 
     s.printChunks();
     s.printChangeLog();
-    counts.push(s.config.chunks.count());
+    counts.push(s.config.chunks.count({"ns": "test.foo"}));
 
     bulk = coll.initializeUnorderedBulkOp();
     for (; i < 700; i++) {
@@ -64,7 +69,7 @@
 
     s.printChunks();
     s.printChangeLog();
-    counts.push(s.config.chunks.count());
+    counts.push(s.config.chunks.count({"ns": "test.foo"}));
 
     assert(counts[counts.length - 1] > counts[0], "counts 1 : " + tojson(counts));
     var sorted = counts.slice(0);

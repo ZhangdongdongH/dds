@@ -13,7 +13,7 @@ config.members[2].priority = 0;
 replTest.initiate(config);
 var master = replTest.getPrimary().getDB(name);
 
-var slaveConns = replTest.liveNodes.slaves;
+var slaveConns = replTest._slaves;
 var slave = [];
 for (var i in slaveConns) {
     var d = slaveConns[i].getDB(name);
@@ -27,12 +27,7 @@ nodes[0].disconnect(nodes[2]);
 
 master.foo.insert({x: 1});
 
-assert.commandWorked(nodes[1].getDB("admin").runCommand({"replSetSyncFrom": nodes[0].host}));
-var res;
-assert.soon(function() {
-    res = nodes[1].getDB("admin").runCommand({"replSetGetStatus": 1});
-    return res.syncingTo === nodes[0].host;
-}, "node 4 failed to start chaining: " + tojson(res));
+syncFrom(nodes[1], nodes[0], replTest);
 
 // make sure the record still appears in the remote slave
 assert.soon(function() {

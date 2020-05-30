@@ -1,5 +1,4 @@
 /*    Copyright 2013 10gen Inc.
-
  *
  *    This program is free software: you can redistribute it and/or  modify
  *    it under the terms of the GNU Affero General Public License, version 3,
@@ -30,6 +29,8 @@
 
 #include <vector>
 
+#include "mongo/crypto/sha1_block.h"
+#include "mongo/crypto/sha256_block.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/resource_pattern.h"
@@ -41,14 +42,38 @@
 
 namespace mongo {
 
-User::User(const UserName& name) : _name(name), _refCount(0), _isValid(1) {}
+namespace {
+
+SHA256Block computeDigest(const UserName& name) {
+    const auto& fn = name.getFullName();
+    return SHA256Block::computeHash({ConstDataRange(fn.c_str(), fn.size())});
+};
+
+}  // namespace
+
+User::User(const UserName& name)
+    : _name(name), _digest(computeDigest(_name)), _refCount(0), _isValid(1) {}
 
 User::~User() {
     dassert(_refCount == 0);
 }
 
-const UserName& User::getName() const {
-    return _name;
+template <>
+User::SCRAMCredentials<SHA1Block>& User::CredentialData::scram<SHA1Block>() {
+    return scram_sha1;
+}
+template <>
+const User::SCRAMCredentials<SHA1Block>& User::CredentialData::scram<SHA1Block>() const {
+    return scram_sha1;
+}
+
+template <>
+User::SCRAMCredentials<SHA256Block>& User::CredentialData::scram<SHA256Block>() {
+    return scram_sha256;
+}
+template <>
+const User::SCRAMCredentials<SHA256Block>& User::CredentialData::scram<SHA256Block>() const {
+    return scram_sha256;
 }
 
 RoleNameIterator User::getRoles() const {
@@ -76,19 +101,16 @@ uint32_t User::getRefCount() const {
 }
 
 const ActionSet User::getActionsForResource(const ResourcePattern& resource) const {
-    unordered_map<ResourcePattern, Privilege>::const_iterator it = _privileges.find(resource);
+    stdx::unordered_map<ResourcePattern, Privilege>::const_iterator it = _privileges.find(resource);
     if (it == _privileges.end()) {
         return ActionSet();
     }
     return it->second.getActions();
 }
 
-User* User::clone() const {
-    std::unique_ptr<User> result(new User(_name));
-    result->_privileges = _privileges;
-    result->_roles = _roles;
-    result->_credentials = _credentials;
-    return result.release();
+
+bool User::hasActionsForResource(const ResourcePattern& resource) const {
+    return !getActionsForResource(resource).empty();
 }
 
 void User::setCredentials(const CredentialData& credentials) {
@@ -142,6 +164,10 @@ void User::addPrivileges(const PrivilegeVector& privileges) {
     for (PrivilegeVector::const_iterator it = privileges.begin(); it != privileges.end(); ++it) {
         addPrivilege(*it);
     }
+}
+
+void User::setRestrictions(RestrictionDocuments restrictions)& {
+    _restrictions = std::move(restrictions);
 }
 
 void User::invalidate() {

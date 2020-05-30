@@ -95,10 +95,12 @@ public:
     // Push either a callback that returns the status for a setup, or just the Status
     static void pushSetup(PushSetupCallback status);
     static void pushSetup(Status status);
+    static size_t setupQueueDepth();
 
     // Push either a callback that returns the status for a refresh, or just the Status
     static void pushRefresh(PushRefreshCallback status);
     static void pushRefresh(Status status);
+    static size_t refreshQueueDepth();
 
 private:
     void indicateUsed() override;
@@ -145,12 +147,16 @@ class PoolImpl final : public ConnectionPool::DependentTypeFactoryInterface {
     friend class ConnectionImpl;
 
 public:
-    std::unique_ptr<ConnectionPool::ConnectionInterface> makeConnection(
+    std::shared_ptr<ConnectionPool::ConnectionInterface> makeConnection(
         const HostAndPort& hostAndPort, size_t generation) override;
 
-    std::unique_ptr<ConnectionPool::TimerInterface> makeTimer() override;
+    std::shared_ptr<ConnectionPool::TimerInterface> makeTimer() override;
 
     Date_t now() override;
+
+    void shutdown() override {
+        TimerImpl::clear();
+    };
 
     /**
      * setNow() can be used to fire all timers that have passed a point in time

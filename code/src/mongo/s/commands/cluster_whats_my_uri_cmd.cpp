@@ -34,34 +34,35 @@
 namespace mongo {
 namespace {
 
-class WhatsMyUriCmd : public Command {
+class WhatsMyUriCmd : public BasicCommand {
 public:
-    WhatsMyUriCmd() : Command("whatsmyuri") {}
+    WhatsMyUriCmd() : BasicCommand("whatsmyuri") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
-
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "{whatsmyuri:1}";
+    std::string help() const override {
+        return "{whatsmyuri:1}";
+    }
+
+    bool requiresAuth() const override {
+        return false;
     }
 
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         // No auth required
     }
 
-    virtual bool run(OperationContext* txn,
+    virtual bool run(OperationContext* opCtx,
                      const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
+                     const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
         result << "you" << cc().getRemote().toString();
         return true;

@@ -37,9 +37,9 @@
 #include "mongo/base/data_view.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/rpc/command_reply.h"
+#include "mongo/rpc/message.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/net/message.h"
 
 namespace {
 
@@ -87,37 +87,14 @@ TEST_F(ReplyTest, ParseAllFields) {
     auto metadata = metadataBob.done();
     writeObj(metadata);
 
-    BSONObjBuilder outputDoc1Bob{};
-    outputDoc1Bob.append("meep", "boop").append("meow", "chirp");
-    auto outputDoc1 = outputDoc1Bob.done();
-    writeObj(outputDoc1);
-
-    BSONObjBuilder outputDoc2Bob{};
-    outputDoc1Bob.append("bleep", "bop").append("woof", "squeak");
-    auto outputDoc2 = outputDoc2Bob.done();
-    writeObj(outputDoc2);
-
     rpc::CommandReply opCmdReply{buildMessage()};
 
     ASSERT_BSONOBJ_EQ(opCmdReply.getMetadata(), metadata);
     ASSERT_BSONOBJ_EQ(opCmdReply.getCommandReply(), commandReply);
-
-    auto outputDocRange = opCmdReply.getOutputDocs();
-    auto outputDocRangeIter = outputDocRange.begin();
-
-    ASSERT_BSONOBJ_EQ(*outputDocRangeIter, outputDoc1);
-    // can't use assert equals since we don't have an op to print the iter.
-    ASSERT_FALSE(outputDocRangeIter == outputDocRange.end());
-    ++outputDocRangeIter;
-    ASSERT_BSONOBJ_EQ(*outputDocRangeIter, outputDoc2);
-    ASSERT_FALSE(outputDocRangeIter == outputDocRange.end());
-    ++outputDocRangeIter;
-
-    ASSERT_TRUE(outputDocRangeIter == outputDocRange.end());
 }
 
 TEST_F(ReplyTest, EmptyMessageThrows) {
-    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, UserException);
+    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, AssertionException);
 }
 
 TEST_F(ReplyTest, MetadataOnlyThrows) {
@@ -126,7 +103,7 @@ TEST_F(ReplyTest, MetadataOnlyThrows) {
     auto metadata = metadataBob.done();
     writeObj(metadata);
 
-    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, UserException);
+    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, AssertionException);
 }
 
 TEST_F(ReplyTest, MetadataInvalidLengthThrows) {
@@ -143,7 +120,7 @@ TEST_F(ReplyTest, MetadataInvalidLengthThrows) {
     auto commandReply = commandReplyBob.done();
     writeObj(commandReply);
 
-    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, UserException);
+    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, AssertionException);
 }
 
 TEST_F(ReplyTest, InvalidLengthThrows) {
@@ -161,6 +138,6 @@ TEST_F(ReplyTest, InvalidLengthThrows) {
     DataView(const_cast<char*>(commandReply.objdata())).write<LittleEndian<int32_t>>(100000);
     writeObj(commandReply, trueSize);
 
-    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, UserException);
+    ASSERT_THROWS(rpc::CommandReply{buildMessage()}, AssertionException);
 }
 }

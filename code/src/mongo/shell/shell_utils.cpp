@@ -1,4 +1,3 @@
-// mongo/shell/shell_utils.cpp
 /*
  *    Copyright 2010 10gen Inc.
  *
@@ -35,15 +34,14 @@
 
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/client/replica_set_monitor.h"
-#include "mongo/db/catalog/index_key_validate.h"
-#include "mongo/db/index/external_key_generator.h"
+#include "mongo/db/hasher.h"
 #include "mongo/platform/random.h"
 #include "mongo/scripting/engine.h"
 #include "mongo/shell/bench.h"
 #include "mongo/shell/shell_options.h"
 #include "mongo/shell/shell_utils_extended.h"
 #include "mongo/shell/shell_utils_launcher.h"
-#include "mongo/util/concurrency/threadlocal.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
@@ -62,6 +60,17 @@ extern const JSFile shardingtest;
 extern const JSFile servers_misc;
 extern const JSFile replsettest;
 extern const JSFile bridge;
+}
+
+MONGO_REGISTER_SHIM(BenchRunConfig::createConnectionImpl)
+(const BenchRunConfig& config)->std::unique_ptr<DBClientBase> {
+    const ConnectionString connectionString = uassertStatusOK(ConnectionString::parse(config.host));
+
+    std::string errorMessage;
+    std::unique_ptr<DBClientBase> connection(connectionString.connect("BenchRun", errorMessage));
+    uassert(16158, errorMessage, connection);
+
+    return connection;
 }
 
 namespace shell_utils {
@@ -113,7 +122,7 @@ BSONObj JSGetMemInfo(const BSONObj& args, void* data) {
 }
 
 #if !defined(_WIN32)
-ThreadLocalValue<unsigned int> _randomSeed;
+thread_local unsigned int _randomSeed = 0;
 #endif
 
 BSONObj JSSrand(const BSONObj& a, void* data) {
@@ -127,7 +136,7 @@ BSONObj JSSrand(const BSONObj& a, void* data) {
         seed = static_cast<unsigned int>(rand->nextInt64());
     }
 #if !defined(_WIN32)
-    _randomSeed.set(seed);
+    _randomSeed = seed;
 #else
     srand(seed);
 #endif
@@ -138,7 +147,7 @@ BSONObj JSRand(const BSONObj& a, void* data) {
     uassert(12519, "rand accepts no arguments", a.nFields() == 0);
     unsigned r;
 #if !defined(_WIN32)
-    r = rand_r(&_randomSeed.getRef());
+    r = rand_r(&_randomSeed);
 #else
     r = rand();
 #endif
@@ -161,26 +170,85 @@ BSONObj getBuildInfo(const BSONObj& a, void* data) {
     return BSON("" << b.done());
 }
 
-BSONObj isKeyTooLarge(const BSONObj& a, void* data) {
-    uassert(17428, "keyTooLarge takes exactly 2 arguments", a.nFields() == 2);
-    BSONObjIterator i(a);
-    BSONObj index = i.next().Obj();
-    BSONObj doc = i.next().Obj();
+BSONObj _setShellFailPoint(const BSONObj& a, void* data) {
+    if (a.nFields() != 1) {
+        uasserted(ErrorCodes::BadValue,
+                  str::stream() << "_setShellFailPoint takes exactly 1 argument, but was given "
+                                << a.nFields());
+    }
 
-    return BSON("" << isAnyIndexKeyTooLarge(index, doc));
+    if (!a.firstElement().isABSONObj()) {
+        uasserted(ErrorCodes::BadValue,
+                  str::stream() << "_setShellFailPoint given a non-object as an argument.");
+    }
+
+    auto cmdObj = a.firstElement().Obj();
+    setGlobalFailPoint(cmdObj.firstElement().str(), cmdObj);
+
+    return BSON("" << true);
 }
 
-BSONObj validateIndexKey(const BSONObj& a, void* data) {
-    BSONObj key = a[0].Obj();
-    // This is related to old upgrade-checking code when v:1 indexes were the latest version, hence
-    // always validate using v:1 rules here.
-    Status indexValid =
-        index_key_validate::validateKeyPattern(key, IndexDescriptor::IndexVersion::kV1);
-    if (!indexValid.isOK()) {
-        return BSON("" << BSON("ok" << false << "type" << indexValid.codeString() << "errmsg"
-                                    << indexValid.reason()));
+BSONObj computeSHA256Block(const BSONObj& a, void* data) {
+    std::vector<ConstDataRange> blocks;
+
+    auto ele = a[0];
+
+    BSONObjBuilder bob;
+    switch (ele.type()) {
+        case BinData: {
+            int len;
+            const char* ptr = ele.binData(len);
+            SHA256Block::computeHash({ConstDataRange(ptr, len)}).appendAsBinData(bob, ""_sd);
+
+            break;
+        }
+        case String: {
+            auto str = ele.valueStringData();
+            SHA256Block::computeHash({ConstDataRange(str.rawData(), str.size())})
+                .appendAsBinData(bob, ""_sd);
+            break;
+        }
+        default:
+            uasserted(ErrorCodes::BadValue, "Can only computeSHA256Block of strings and bindata");
     }
-    return BSON("" << BSON("ok" << true));
+
+    return bob.obj();
+}
+
+/**
+ * This function computes a hash value for a document.
+ * Specifically, this is the same hash function that is used to form a hashed index,
+ * and thus used to generate shard keys for a collection.
+ *
+ * e.g.
+ * > // For a given collection prepared like so:
+ * > use mydb
+ * > db.mycollection.createIndex({ x: "hashed" })
+ * > sh.shardCollection("mydb.mycollection", { x: "hashed" })
+ * > // And a sample object like so:
+ * > var obj = { x: "Whatever key", y: 2, z: 10.0 }
+ * > // The hashed value of the shard key can be acquired from the shard key-value pair like so:
+ * > convertShardKeyToHashed({x: "Whatever key"})
+ */
+BSONObj convertShardKeyToHashed(const BSONObj& a, void* data) {
+    const auto& objEl = a[0];
+
+    uassert(10151,
+            "convertShardKeyToHashed accepts either 1 or 2 arguments",
+            a.nFields() >= 1 && a.nFields() <= 2);
+
+    // It looks like the seed is always default right now.
+    // But no reason not to allow for the future
+    auto seed = BSONElementHasher::DEFAULT_HASH_SEED;
+    if (a.nFields() > 1) {
+        auto seedEl = a[1];
+
+        uassert(10159, "convertShardKeyToHashed seed value should be a number", seedEl.isNumber());
+        seed = seedEl.numberInt();
+    }
+
+    auto key = BSONElementHasher::hash64(objEl, seed);
+    return BSON("" << key);
 }
 
 BSONObj replMonitorStats(const BSONObj& a, void* data) {
@@ -211,9 +279,24 @@ BSONObj readMode(const BSONObj&, void*) {
     return BSON("" << shellGlobalParams.readMode);
 }
 
+BSONObj shouldRetryWrites(const BSONObj&, void* data) {
+    return BSON("" << shellGlobalParams.shouldRetryWrites);
+}
+
+BSONObj shouldUseImplicitSessions(const BSONObj&, void* data) {
+    return BSON("" << shellGlobalParams.shouldUseImplicitSessions);
+}
+
 BSONObj interpreterVersion(const BSONObj& a, void* data) {
     uassert(16453, "interpreterVersion accepts no arguments", a.nFields() == 0);
     return BSON("" << getGlobalScriptEngine()->getInterpreterVersionString());
+}
+
+BSONObj fileExistsJS(const BSONObj& a, void*) {
+    uassert(40678,
+            "fileExists expects one string argument",
+            a.nFields() == 1 && a.firstElement().type() == String);
+    return BSON("" << fileExists(a.firstElement().valuestrsafe()));
 }
 
 void installShellUtils(Scope& scope) {
@@ -222,10 +305,12 @@ void installShellUtils(Scope& scope) {
     scope.injectNative("_srand", JSSrand);
     scope.injectNative("_rand", JSRand);
     scope.injectNative("_isWindows", isWindows);
+    scope.injectNative("_setShellFailPoint", _setShellFailPoint);
     scope.injectNative("interpreterVersion", interpreterVersion);
     scope.injectNative("getBuildInfo", getBuildInfo);
-    scope.injectNative("isKeyTooLarge", isKeyTooLarge);
-    scope.injectNative("validateIndexKey", validateIndexKey);
+    scope.injectNative("computeSHA256Block", computeSHA256Block);
+    scope.injectNative("convertShardKeyToHashed", convertShardKeyToHashed);
+    scope.injectNative("fileExists", fileExistsJS);
 
 #ifndef MONGO_SAFE_SHELL
     // can't launch programs
@@ -239,6 +324,8 @@ void initScope(Scope& scope) {
     scope.injectNative("_useWriteCommandsDefault", useWriteCommandsDefault);
     scope.injectNative("_writeMode", writeMode);
     scope.injectNative("_readMode", readMode);
+    scope.injectNative("_shouldRetryWrites", shouldRetryWrites);
+    scope.injectNative("_shouldUseImplicitSessions", shouldUseImplicitSessions);
     scope.externalSetup();
     mongo::shell_utils::installShellUtils(scope);
     scope.execSetup(JSFiles::servers);
@@ -280,10 +367,10 @@ bool Prompter::confirm() {
 
 ConnectionRegistry::ConnectionRegistry() = default;
 
-void ConnectionRegistry::registerConnection(DBClientWithCommands& client) {
+void ConnectionRegistry::registerConnection(DBClientBase& client) {
     BSONObj info;
     if (client.runCommand("admin", BSON("whatsmyuri" << 1), info)) {
-        string connstr = dynamic_cast<DBClientBase&>(client).getServerAddress();
+        string connstr = client.getServerAddress();
         stdx::lock_guard<stdx::mutex> lk(_mutex);
         _connectionUris[connstr].insert(info["you"].str());
     }
@@ -303,7 +390,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
         const ConnectionString cs(status.getValue());
 
         string errmsg;
-        std::unique_ptr<DBClientWithCommands> conn(cs.connect("MongoDB Shell", errmsg));
+        std::unique_ptr<DBClientBase> conn(cs.connect("MongoDB Shell", errmsg));
         if (!conn) {
             continue;
         }
@@ -362,7 +449,7 @@ void ConnectionRegistry::killOperationsOnAllConnections(bool withPrompt) const {
 ConnectionRegistry connectionRegistry;
 
 bool _nokillop = false;
-void onConnect(DBClientWithCommands& c) {
+void onConnect(DBClientBase& c) {
     if (_nokillop) {
         return;
     }
@@ -391,4 +478,4 @@ bool fileExists(const std::string& file) {
 
 stdx::mutex& mongoProgramOutputMutex(*(new stdx::mutex()));
 }
-}
+}  // namespace mongo

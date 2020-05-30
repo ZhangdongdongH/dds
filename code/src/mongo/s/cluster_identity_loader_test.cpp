@@ -35,17 +35,16 @@
 #include "mongo/client/remote_command_targeter_mock.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/query/query_request.h"
+#include "mongo/db/service_context.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/rpc/metadata/tracking_metadata.h"
 #include "mongo/s/catalog/config_server_version.h"
-#include "mongo/s/catalog/sharding_catalog_client_impl.h"
 #include "mongo/s/catalog/type_config_version.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/cluster_identity_loader.h"
-#include "mongo/s/sharding_test_fixture.h"
+#include "mongo/s/sharding_router_test_fixture.h"
 #include "mongo/stdx/future.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -56,28 +55,25 @@ namespace {
 using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::TaskExecutor;
-using stdx::async;
 using unittest::assertGet;
 
-const BSONObj kReplSecondaryOkMetadata{[] {
+BSONObj getReplSecondaryOkMetadata() {
     BSONObjBuilder o;
-    o.appendElements(rpc::ServerSelectionMetadata(true, boost::none).toBSON());
+    ReadPreferenceSetting(ReadPreference::Nearest).toContainingBSON(&o);
     o.append(rpc::kReplSetMetadataFieldName, 1);
     return o.obj();
-}()};
+}
 
 class ClusterIdentityTest : public ShardingTestFixture {
 public:
-    void setUp() override {
-        ShardingTestFixture::setUp();
-
+    ClusterIdentityTest() {
         configTargeter()->setFindHostReturnValue(configHost);
     }
 
     void expectConfigVersionLoad(StatusWith<OID> result) {
         onFindCommand([&](const RemoteCommandRequest& request) {
             ASSERT_EQUALS(configHost, request.target);
-            ASSERT_BSONOBJ_EQ(kReplSecondaryOkMetadata,
+            ASSERT_BSONOBJ_EQ(getReplSecondaryOkMetadata(),
                               rpc::TrackingMetadata::removeTrackingData(request.metadata));
 
             const NamespaceString nss(request.dbname, request.cmdObj.firstElement().String());
@@ -85,7 +81,7 @@ public:
 
             auto query = assertGet(QueryRequest::makeFromFindCommand(nss, request.cmdObj, false));
 
-            ASSERT_EQ(query->ns(), "config.version");
+            ASSERT_EQ(query->nss().ns(), "config.version");
             ASSERT_BSONOBJ_EQ(query->getFilter(), BSONObj());
             ASSERT_FALSE(query->getLimit().is_initialized());
 

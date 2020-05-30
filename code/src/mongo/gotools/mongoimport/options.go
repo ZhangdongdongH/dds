@@ -1,3 +1,9 @@
+// Copyright (C) MongoDB, Inc. 2014-present.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may
+// not use this file except in compliance with the License. You may obtain
+// a copy of the License at http://www.apache.org/licenses/LICENSE-2.0
+
 package mongoimport
 
 var Usage = `<options> <file>
@@ -69,7 +75,9 @@ type IngestOptions struct {
 	UpsertFields string `long:"upsertFields" value-name:"<field>[,<field>]*" description:"comma-separated fields for the query part when --mode is set to upsert or merge"`
 
 	// Sets write concern level for write operations.
-	WriteConcern string `long:"writeConcern" default:"majority" value-name:"<write-concern-specifier>" default-mask:"-" description:"write concern options e.g. --writeConcern majority, --writeConcern '{w: 3, wtimeout: 500, fsync: true, j: true}' (defaults to 'majority')"`
+	// By default mongoimport uses a write concern of 'majority'.
+	// Cannot be used simultaneously with write concern options in a URI.
+	WriteConcern string `long:"writeConcern" value-name:"<write-concern-specifier>" default-mask:"-" description:"write concern options e.g. --writeConcern majority, --writeConcern '{w: 3, wtimeout: 500, fsync: true, j: true}'"`
 
 	// Indicates that the server should bypass document validation on import.
 	BypassDocumentValidation bool `long:"bypassDocumentValidation" description:"bypass document validation"`

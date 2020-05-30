@@ -63,11 +63,11 @@ public:
                                                         StringData ident,
                                                         const IndexDescriptor* desc);
 
-    virtual Status beginBackup(OperationContext* txn) {
+    virtual Status beginBackup(OperationContext* opCtx) {
         return Status::OK();
     }
 
-    virtual void endBackup(OperationContext* txn) {}
+    virtual void endBackup(OperationContext* opCtx) {}
 
     virtual Status dropIdent(OperationContext* opCtx, StringData ident);
 
@@ -108,6 +108,10 @@ public:
     void setJournalListener(JournalListener* jl) final {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
         _journalListener = jl;
+    }
+
+    virtual Timestamp getAllCommittedTimestamp() const override {
+        MONGO_UNREACHABLE;
     }
 
 private:

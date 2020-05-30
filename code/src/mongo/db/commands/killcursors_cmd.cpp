@@ -29,12 +29,15 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/catalog/collection.h"
-#include "mongo/db/catalog/cursor_manager.h"
 #include "mongo/db/commands/killcursors_common.h"
 #include "mongo/db/curop.h"
+#include "mongo/db/cursor_manager.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/query/killcursors_request.h"
+#include "mongo/db/stats/top.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -44,45 +47,42 @@ class KillCursorsCmd final : public KillCursorsCmdBase {
 public:
     KillCursorsCmd() = default;
 
+    bool supportsReadConcern(const std::string& dbName,
+                             const BSONObj& cmdObj,
+                             repl::ReadConcernLevel level) const final {
+        // killCursors must support snapshot read concern in order to be run in transactions.
+        return level == repl::ReadConcernLevel::kLocalReadConcern ||
+            level == repl::ReadConcernLevel::kSnapshotReadConcern;
+    }
+
 private:
-    Status _killCursor(OperationContext* txn, const NamespaceString& nss, CursorId cursorId) final {
-        std::unique_ptr<AutoGetCollectionOrViewForRead> ctx;
+    Status _checkAuth(Client* client, const NamespaceString& nss, CursorId id) const final {
+        auto opCtx = client->getOperationContext();
+        const auto check = [opCtx, id](CursorManager* manager) {
+            return manager->checkAuthForKillCursors(opCtx, id);
+        };
 
-        CursorManager* cursorManager;
-        if (nss.isListIndexesCursorNS() || nss.isListCollectionsCursorNS()) {
-            // listCollections and listIndexes are special cursor-generating commands whose cursors
-            // are managed globally, as they operate over catalog data rather than targeting the
-            // data within a collection.
-            cursorManager = CursorManager::getGlobalCursorManager();
-        } else {
-            ctx = stdx::make_unique<AutoGetCollectionOrViewForRead>(txn, nss);
-            Collection* collection = ctx->getCollection();
-            ViewDefinition* view = ctx->getView();
-            if (view) {
-                Database* db = ctx->getDb();
-                auto resolved = db->getViewCatalog()->resolveView(txn, nss);
-                if (!resolved.isOK()) {
-                    return resolved.getStatus();
-                }
-                ctx->releaseLocksForView();
-                Status status = _killCursor(txn, resolved.getValue().getNamespace(), cursorId);
-                {
-                    // Set the namespace of the curop back to the view namespace so ctx records
-                    // stats on this view namespace on destruction.
-                    stdx::lock_guard<Client>(*txn->getClient());
-                    CurOp::get(txn)->setNS_inlock(nss.ns());
-                }
-                return status;
+        return CursorManager::withCursorManager(opCtx, id, nss, check);
+    }
+
+    Status _killCursor(OperationContext* opCtx,
+                       const NamespaceString& nss,
+                       CursorId id) const final {
+        boost::optional<AutoStatsTracker> statsTracker;
+        if (CursorManager::isGloballyManagedCursor(id)) {
+            if (auto nssForCurOp = nss.isGloballyManagedNamespace()
+                    ? nss.getTargetNSForGloballyManagedNamespace()
+                    : nss) {
+                const boost::optional<int> dbProfilingLevel = boost::none;
+                statsTracker.emplace(
+                    opCtx, *nssForCurOp, Top::LockType::NotLocked, dbProfilingLevel);
             }
-            if (!collection) {
-                return {ErrorCodes::CursorNotFound,
-                        str::stream() << "collection does not exist: " << nss.ns()};
-            }
-            cursorManager = collection->getCursorManager();
         }
-        invariant(cursorManager);
 
-        return cursorManager->eraseCursor(txn, cursorId, true /*shouldAudit*/);
+        return CursorManager::withCursorManager(
+            opCtx, id, nss, [opCtx, id](CursorManager* manager) {
+                return manager->killCursor(opCtx, id, true /* shouldAudit */);
+            });
     }
 } killCursorsCmd;
 

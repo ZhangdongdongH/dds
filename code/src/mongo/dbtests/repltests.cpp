@@ -36,18 +36,22 @@
 #include "mongo/bson/mutable/document.h"
 #include "mongo/bson/mutable/mutable_bson_test_utils.h"
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
+#include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/json.h"
 #include "mongo/db/ops/update.h"
-#include "mongo/db/repl/master_slave.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/repl_client_info.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/sync_tail.h"
+#include "mongo/db/s/op_observer_sharding_impl.h"
 #include "mongo/dbtests/dbtests.h"
+#include "mongo/transport/transport_layer_asio.h"
 #include "mongo/util/log.h"
 
 using namespace mongo::repl;
@@ -60,46 +64,109 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
+/**
+ * Creates an OplogEntry with given parameters and preset defaults for this test suite.
+ */
+repl::OplogEntry makeOplogEntry(repl::OpTime opTime,
+                                repl::OpTypeEnum opType,
+                                NamespaceString nss,
+                                BSONObj object,
+                                boost::optional<BSONObj> object2) {
+    return repl::OplogEntry(opTime,                     // optime
+                            0,                          // hash
+                            opType,                     // opType
+                            nss,                        // namespace
+                            boost::none,                // uuid
+                            boost::none,                // fromMigrate
+                            OplogEntry::kOplogVersion,  // version
+                            object,                     // o
+                            object2,                    // o2
+                            {},                         // sessionInfo
+                            boost::none,                // upsert
+                            boost::none,                // wall clock time
+                            boost::none,                // statement id
+                            boost::none,   // optime of previous write within same transaction
+                            boost::none,   // pre-image optime
+                            boost::none);  // post-image optime
+}
+
 BSONObj f(const char* s) {
     return fromjson(s);
 }
 
 class Base {
 protected:
-    const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    const ServiceContext::UniqueOperationContext _opCtxPtr = cc().makeOperationContext();
+    OperationContext& _opCtx = *_opCtxPtr;
     mutable DBDirectClient _client;
+    ReplSettings _defaultReplSettings;
 
 public:
-    Base() : _client(&_txn) {
-        ReplSettings replSettings;
-        replSettings.setOplogSizeBytes(10 * 1024 * 1024);
-        replSettings.setMaster(true);
-        setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
-
-        getGlobalServiceContext()->setOpObserver(stdx::make_unique<OpObserver>());
-
-        setOplogCollectionName();
-        createOplog(&_txn);
-
-        OldClientWriteContext ctx(&_txn, ns());
-        WriteUnitOfWork wuow(&_txn);
-
-        Collection* c = ctx.db()->getCollection(ns());
-        if (!c) {
-            c = ctx.db()->createCollection(&_txn, ns());
+    Base()
+        : _client(&_opCtx),
+          _defaultReplSettings(
+              ReplicationCoordinator::get(getGlobalServiceContext())->getSettings()) {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
         }
 
-        ASSERT(c->getIndexCatalog()->haveIdIndex(&_txn));
+        transport::TransportLayerASIO::Options opts;
+        opts.mode = transport::TransportLayerASIO::Options::kEgress;
+        auto sc = getGlobalServiceContext();
+
+        sc->setTransportLayer(std::make_unique<transport::TransportLayerASIO>(opts, nullptr));
+        ASSERT_OK(sc->getTransportLayer()->setup());
+        ASSERT_OK(sc->getTransportLayer()->start());
+
+        ReplSettings replSettings;
+        replSettings.setReplSetString("rs0/host1");
+        ReplicationCoordinator::set(
+            getGlobalServiceContext(),
+            std::unique_ptr<repl::ReplicationCoordinator>(
+                new repl::ReplicationCoordinatorMock(_opCtx.getServiceContext(), replSettings)));
+        ASSERT_OK(ReplicationCoordinator::get(getGlobalServiceContext())
+                      ->setFollowerMode(MemberState::RS_PRIMARY));
+
+        // Since the Client object persists across tests, even though the global
+        // ReplicationCoordinator does not, we need to clear the last op associated with the client
+        // to avoid the invariant in ReplClientInfo::setLastOp that the optime only goes forward.
+        repl::ReplClientInfo::forClient(_opCtx.getClient()).clearLastOp_forTest();
+
+        getGlobalServiceContext()->setOpObserver(stdx::make_unique<OpObserverShardingImpl>());
+
+        setOplogCollectionName(getGlobalServiceContext());
+        createOplog(&_opCtx);
+
+        OldClientWriteContext ctx(&_opCtx, ns());
+        WriteUnitOfWork wuow(&_opCtx);
+
+        Collection* c = ctx.db()->getCollection(&_opCtx, ns());
+        if (!c) {
+            c = ctx.db()->createCollection(&_opCtx, ns());
+        }
+
+        ASSERT(c->getIndexCatalog()->haveIdIndex(&_opCtx));
         wuow.commit();
     }
     ~Base() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         try {
             deleteAll(ns());
             deleteAll(cllNS());
-            ReplSettings replSettings;
-            replSettings.setOplogSizeBytes(10 * 1024 * 1024);
-            setGlobalReplicationCoordinator(new repl::ReplicationCoordinatorMock(replSettings));
+            repl::ReplicationCoordinator::set(
+                getGlobalServiceContext(),
+                std::unique_ptr<repl::ReplicationCoordinator>(new repl::ReplicationCoordinatorMock(
+                    _opCtx.getServiceContext(), _defaultReplSettings)));
+            repl::ReplicationCoordinator::get(getGlobalServiceContext())
+                ->setFollowerMode(repl::MemberState::RS_PRIMARY)
+                .ignore();
+
+            getGlobalServiceContext()->getTransportLayer()->shutdown();
+
         } catch (...) {
             FAIL("Exception while cleaning up test");
         }
@@ -110,7 +177,7 @@ protected:
         return "unittests.repltests";
     }
     static const char* cllNS() {
-        return "local.oplog.$main";
+        return "local.oplog.rs";
     }
     BSONObj one(const BSONObj& query = BSONObj()) const {
         return _client.findOne(ns(), query);
@@ -136,68 +203,70 @@ protected:
         return _client.findOne(cllNS(), BSONObj());
     }
     int count() const {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
-        OldClientContext ctx(&_txn, ns());
+        Lock::GlobalWrite lk(&_opCtx);
+        OldClientContext ctx(&_opCtx, ns());
         Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns());
+        Collection* coll = db->getCollection(&_opCtx, ns());
         if (!coll) {
-            WriteUnitOfWork wunit(&_txn);
-            coll = db->createCollection(&_txn, ns());
+            WriteUnitOfWork wunit(&_opCtx);
+            coll = db->createCollection(&_opCtx, ns());
             wunit.commit();
         }
 
         int count = 0;
-        auto cursor = coll->getCursor(&_txn);
+        auto cursor = coll->getCursor(&_opCtx);
         while (auto record = cursor->next()) {
             ++count;
         }
         return count;
     }
     int opCount() {
-        return DBDirectClient(&_txn).query(cllNS(), BSONObj())->itcount();
+        return DBDirectClient(&_opCtx).query(cllNS(), BSONObj())->itcount();
     }
     void applyAllOperations() {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
+        Lock::GlobalWrite lk(&_opCtx);
         vector<BSONObj> ops;
         {
-            DBDirectClient db(&_txn);
+            DBDirectClient db(&_opCtx);
             auto cursor = db.query(cllNS(), BSONObj());
             while (cursor->more()) {
-                ops.push_back(cursor->nextSafeOwned());
+                ops.push_back(cursor->nextSafe());
             }
         }
         {
-            OldClientContext ctx(&_txn, ns());
-            BSONObjBuilder b;
-            b.append("host", "localhost");
-            b.appendTimestamp("syncedTo", 0);
-            ReplSource a(&_txn, b.obj());
+            if (!serverGlobalParams.enableMajorityReadConcern) {
+                if (ops.size() > 0) {
+                    if (auto tsElem = ops.front()["ts"]) {
+                        _opCtx.getServiceContext()->getStorageEngine()->setOldestTimestamp(
+                            tsElem.timestamp());
+                    }
+                }
+            }
+
+            OldClientContext ctx(&_opCtx, ns());
             for (vector<BSONObj>::iterator i = ops.begin(); i != ops.end(); ++i) {
                 if (0) {
                     mongo::unittest::log() << "op: " << *i << endl;
                 }
-                _txn.setReplicatedWrites(false);
-                a.applyOperation(&_txn, ctx.db(), *i);
-                _txn.setReplicatedWrites(true);
+                repl::UnreplicatedWritesBlock uwb(&_opCtx);
+                uassertStatusOK(applyOperation_inlock(
+                    &_opCtx, ctx.db(), *i, false, OplogApplication::Mode::kSecondary));
             }
         }
     }
     void printAll(const char* ns) {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
-        OldClientContext ctx(&_txn, ns);
+        Lock::GlobalWrite lk(&_opCtx);
+        OldClientContext ctx(&_opCtx, ns);
 
         Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns);
+        Collection* coll = db->getCollection(&_opCtx, ns);
         if (!coll) {
-            WriteUnitOfWork wunit(&_txn);
-            coll = db->createCollection(&_txn, ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            coll = db->createCollection(&_opCtx, ns);
             wunit.commit();
         }
 
-        auto cursor = coll->getCursor(&_txn);
+        auto cursor = coll->getCursor(&_opCtx);
         ::mongo::log() << "all for " << ns << endl;
         while (auto record = cursor->next()) {
             ::mongo::log() << record->data.releaseToBson() << endl;
@@ -205,35 +274,35 @@ protected:
     }
     // These deletes don't get logged.
     void deleteAll(const char* ns) const {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
-        OldClientContext ctx(&_txn, ns);
-        WriteUnitOfWork wunit(&_txn);
-        Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns);
-        if (!coll) {
-            coll = db->createCollection(&_txn, ns);
-        }
+        ::mongo::writeConflictRetry(&_opCtx, "deleteAll", ns, [&] {
+            Lock::GlobalWrite lk(&_opCtx);
+            OldClientContext ctx(&_opCtx, ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            Database* db = ctx.db();
+            Collection* coll = db->getCollection(&_opCtx, ns);
+            if (!coll) {
+                coll = db->createCollection(&_opCtx, ns);
+            }
 
-        ASSERT_OK(coll->truncate(&_txn));
-        wunit.commit();
+            ASSERT_OK(coll->truncate(&_opCtx));
+            wunit.commit();
+        });
     }
     void insert(const BSONObj& o) const {
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
-        OldClientContext ctx(&_txn, ns());
-        WriteUnitOfWork wunit(&_txn);
+        Lock::GlobalWrite lk(&_opCtx);
+        OldClientContext ctx(&_opCtx, ns());
+        WriteUnitOfWork wunit(&_opCtx);
         Database* db = ctx.db();
-        Collection* coll = db->getCollection(ns());
+        Collection* coll = db->getCollection(&_opCtx, ns());
         if (!coll) {
-            coll = db->createCollection(&_txn, ns());
+            coll = db->createCollection(&_opCtx, ns());
         }
 
         OpDebug* const nullOpDebug = nullptr;
         if (o.hasField("_id")) {
-            _txn.setReplicatedWrites(false);
-            coll->insertDocument(&_txn, o, nullOpDebug, true);
-            _txn.setReplicatedWrites(true);
+            repl::UnreplicatedWritesBlock uwb(&_opCtx);
+            coll->insertDocument(&_opCtx, InsertStatement(o), nullOpDebug, true)
+                .transitional_ignore();
             wunit.commit();
             return;
         }
@@ -243,9 +312,9 @@ protected:
         id.init();
         b.appendOID("_id", &id);
         b.appendElements(o);
-        _txn.setReplicatedWrites(false);
-        coll->insertDocument(&_txn, b.obj(), nullOpDebug, true);
-        _txn.setReplicatedWrites(true);
+        repl::UnreplicatedWritesBlock uwb(&_opCtx);
+        coll->insertDocument(&_opCtx, InsertStatement(b.obj()), nullOpDebug, true)
+            .transitional_ignore();
         wunit.commit();
     }
     static BSONObj wid(const char* json) {
@@ -262,9 +331,13 @@ protected:
 class LogBasic : public Base {
 public:
     void run() {
-        ASSERT_EQUALS(2, opCount());
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
+        ASSERT_EQUALS(1, opCount());
         _client.insert(ns(), fromjson("{\"a\":\"b\"}"));
-        ASSERT_EQUALS(3, opCount());
+        ASSERT_EQUALS(2, opCount());
     }
 };
 
@@ -274,6 +347,10 @@ class Base : public ReplTests::Base {
 public:
     virtual ~Base() {}
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         reset();
         doIt();
         int nOps = opCount();
@@ -890,36 +967,6 @@ public:
     }
 };
 
-class EmptyPushSparseIndex : public EmptyPush {
-public:
-    EmptyPushSparseIndex() {
-        _client.insert("unittests.system.indexes",
-                       BSON("ns" << ns() << "key" << BSON("a" << 1) << "name"
-                                 << "foo"
-                                 << "sparse"
-                                 << true));
-    }
-    ~EmptyPushSparseIndex() {
-        _client.dropIndexes(ns());
-    }
-};
-
-class PushAll : public Base {
-public:
-    void doIt() const {
-        _client.update(ns(), BSON("_id" << 0), fromjson("{$pushAll:{a:[5.0,6.0]}}"));
-    }
-    using ReplTests::Base::check;
-    void check() const {
-        ASSERT_EQUALS(1, count());
-        check(fromjson("{'_id':0,a:[4,5,6]}"), one(fromjson("{'_id':0}")));
-    }
-    void reset() const {
-        deleteAll(ns());
-        insert(fromjson("{'_id':0,a:[4]}"));
-    }
-};
-
 class PushWithDollarSigns : public Base {
     void doIt() const {
         _client.update(ns(), BSON("_id" << 0), BSON("$push" << BSON("a" << BSON("$foo" << 1))));
@@ -986,38 +1033,6 @@ class PushSliceToZero : public Base {
     void reset() const {
         deleteAll(ns());
         insert(BSON("_id" << 0));
-    }
-};
-
-class PushAllUpsert : public Base {
-public:
-    void doIt() const {
-        _client.update(ns(), BSON("_id" << 0), fromjson("{$pushAll:{a:[5.0,6.0]}}"), true);
-    }
-    using ReplTests::Base::check;
-    void check() const {
-        ASSERT_EQUALS(1, count());
-        check(fromjson("{'_id':0,a:[4,5,6]}"), one(fromjson("{'_id':0}")));
-    }
-    void reset() const {
-        deleteAll(ns());
-        insert(fromjson("{'_id':0,a:[4]}"));
-    }
-};
-
-class EmptyPushAll : public Base {
-public:
-    void doIt() const {
-        _client.update(ns(), BSON("_id" << 0), fromjson("{$pushAll:{a:[5.0,6.0]}}"));
-    }
-    using ReplTests::Base::check;
-    void check() const {
-        ASSERT_EQUALS(1, count());
-        check(fromjson("{'_id':0,a:[5,6]}"), one(fromjson("{'_id':0}")));
-    }
-    void reset() const {
-        deleteAll(ns());
-        insert(fromjson("{'_id':0}"));
     }
 };
 
@@ -1231,7 +1246,7 @@ public:
     void reset() const {
         deleteAll(ns());
         // Add an index on 'a'.  This prevents the update from running 'in place'.
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), BSON("a" << 1)));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, ns(), BSON("a" << 1)));
         insert(fromjson("{'_id':0,z:1}"));
     }
 };
@@ -1317,6 +1332,10 @@ public:
 class DeleteOpIsIdBased : public Base {
 public:
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         insert(BSON("_id" << 0 << "a" << 10));
         insert(BSON("_id" << 1 << "a" << 11));
         insert(BSON("_id" << 3 << "a" << 10));
@@ -1333,48 +1352,14 @@ public:
     }
 };
 
-class DatabaseIgnorerBasic {
-public:
-    void run() {
-        DatabaseIgnorer d;
-        ASSERT(!d.ignoreAt("a", Timestamp(4, 0)));
-        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
-        ASSERT(d.ignoreAt("a", Timestamp(4, 0)));
-        ASSERT(!d.ignoreAt("b", Timestamp(4, 0)));
-        ASSERT(d.ignoreAt("a", Timestamp(4, 10)));
-        ASSERT(d.ignoreAt("a", Timestamp(5, 0)));
-        ASSERT(!d.ignoreAt("a", Timestamp(5, 1)));
-        // Ignore state is expired.
-        ASSERT(!d.ignoreAt("a", Timestamp(4, 0)));
-    }
-};
-
-class DatabaseIgnorerUpdate {
-public:
-    void run() {
-        DatabaseIgnorer d;
-        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
-        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
-        ASSERT(d.ignoreAt("a", Timestamp(5, 5)));
-        ASSERT(d.ignoreAt("a", Timestamp(6, 0)));
-        ASSERT(!d.ignoreAt("a", Timestamp(6, 1)));
-
-        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
-        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
-        d.doIgnoreUntilAfter("a", Timestamp(6, 0));
-        d.doIgnoreUntilAfter("a", Timestamp(5, 0));
-        ASSERT(d.ignoreAt("a", Timestamp(5, 5)));
-        ASSERT(d.ignoreAt("a", Timestamp(6, 0)));
-        ASSERT(!d.ignoreAt("a", Timestamp(6, 1)));
-    }
-};
-
 class SyncTest : public SyncTail {
 public:
     bool returnEmpty;
-    SyncTest() : SyncTail(nullptr, SyncTail::MultiSyncApplyFunc()), returnEmpty(false) {}
+    SyncTest()
+        : SyncTail(nullptr, nullptr, nullptr, SyncTail::MultiSyncApplyFunc(), nullptr),
+          returnEmpty(false) {}
     virtual ~SyncTest() {}
-    virtual BSONObj getMissingDoc(OperationContext* txn, Database* db, const BSONObj& o) {
+    BSONObj getMissingDoc(OperationContext* opCtx, const OplogEntry& oplogEntry) override {
         if (returnEmpty) {
             BSONObj o;
             return o;
@@ -1386,28 +1371,33 @@ public:
     }
 };
 
-class ShouldRetry : public Base {
+class FetchAndInsertMissingDocument : public Base {
 public:
     void run() {
+        // Replication is not supported by mobile SE.
+        if (mongo::storageGlobalParams.engine == "mobile") {
+            return;
+        }
         bool threw = false;
-        BSONObj o = BSON("ns" << ns() << "o" << BSON("foo"
-                                                     << "bar")
-                              << "o2"
-                              << BSON("_id"
-                                      << "in oplog"
-                                      << "foo"
-                                      << "bar"));
+        auto oplogEntry = makeOplogEntry(OpTime(Timestamp(100, 1), 1LL),  // optime
+                                         OpTypeEnum::kUpdate,             // op type
+                                         NamespaceString(ns()),           // namespace
+                                         BSON("foo"
+                                              << "bar"),  // o
+                                         BSON("_id"
+                                              << "in oplog"
+                                              << "foo"
+                                              << "bar"));  // o2
 
-        ScopedTransaction transaction(&_txn, MODE_X);
-        Lock::GlobalWrite lk(_txn.lockState());
+        Lock::GlobalWrite lk(&_opCtx);
 
         // this should fail because we can't connect
         try {
-            SyncTail badSource(nullptr, SyncTail::MultiSyncApplyFunc());
+            SyncTail badSource(nullptr, nullptr, nullptr, SyncTail::MultiSyncApplyFunc(), nullptr);
             badSource.setHostname("localhost:123");
 
-            OldClientContext ctx(&_txn, ns());
-            badSource.getMissingDoc(&_txn, ctx.db(), o);
+            OldClientContext ctx(&_opCtx, ns());
+            badSource.getMissingDoc(&_opCtx, oplogEntry);
         } catch (DBException&) {
             threw = true;
         }
@@ -1415,7 +1405,7 @@ public:
 
         // now this should succeed
         SyncTest t;
-        verify(t.shouldRetry(&_txn, o));
+        verify(t.fetchAndInsertMissingDocument(&_opCtx, oplogEntry));
         verify(!_client
                     .findOne(ns(),
                              BSON("_id"
@@ -1424,7 +1414,7 @@ public:
 
         // force it not to find an obj
         t.returnEmpty = true;
-        verify(!t.shouldRetry(&_txn, o));
+        verify(!t.fetchAndInsertMissingDocument(&_opCtx, oplogEntry));
     }
 };
 
@@ -1465,13 +1455,9 @@ public:
         add<Idempotence::PushUpsert>();
         add<Idempotence::MultiPush>();
         add<Idempotence::EmptyPush>();
-        add<Idempotence::EmptyPushSparseIndex>();
-        add<Idempotence::PushAll>();
         add<Idempotence::PushSlice>();
         add<Idempotence::PushSliceInitiallyInexistent>();
         add<Idempotence::PushSliceToZero>();
-        add<Idempotence::PushAllUpsert>();
-        add<Idempotence::EmptyPushAll>();
         add<Idempotence::Pull>();
         add<Idempotence::PullNothing>();
         add<Idempotence::PullAll>();
@@ -1489,9 +1475,7 @@ public:
         add<Idempotence::ReplaySetPreexistingNoOpPull>();
         add<Idempotence::ReplayArrayFieldNotAppended>();
         add<DeleteOpIsIdBased>();
-        add<DatabaseIgnorerBasic>();
-        add<DatabaseIgnorerUpdate>();
-        add<ShouldRetry>();
+        add<FetchAndInsertMissingDocument>();
     }
 };
 

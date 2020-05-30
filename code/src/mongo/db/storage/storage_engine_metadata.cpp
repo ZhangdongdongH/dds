@@ -40,9 +40,13 @@
 #include <ostream>
 #include <vector>
 
+#include "mongo/base/data_type_validated.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
+#include "mongo/rpc/object_check.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/file.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -63,6 +67,17 @@ bool containsMMapV1LocalNsFile(const std::string& directory) {
         boost::filesystem::exists((directoryPath / "local") / "local.ns");
 }
 
+bool fsyncFile(boost::filesystem::path path) {
+    invariant(path.has_filename());
+    File file;
+    file.open(path.string().c_str(), /*read-only*/ false, /*direct-io*/ false);
+    if (!file.is_open()) {
+        return false;
+    }
+    file.fsync();
+    return true;
+}
+
 }  // namespace
 
 // static
@@ -73,7 +88,7 @@ std::unique_ptr<StorageEngineMetadata> StorageEngineMetadata::forPath(const std:
         Status status = metadata->read();
         if (!status.isOK()) {
             error() << "Unable to read the storage engine metadata file: " << status;
-            fassertFailed(28661);
+            fassertFailedNoTrace(28661);
         }
     }
     return metadata;
@@ -167,15 +182,13 @@ Status StorageEngineMetadata::read() {
                                     << ex.what());
     }
 
-    BSONObj obj;
-    try {
-        obj = BSONObj(&buffer[0]);
-    } catch (DBException& ex) {
-        return Status(ErrorCodes::FailedToParse,
-                      str::stream() << "Failed to convert data in " << metadataPath.string()
-                                    << " to BSON: "
-                                    << ex.what());
+    ConstDataRange cdr(&buffer[0], buffer.size());
+    auto swObj = cdr.read<Validated<BSONObj>>();
+    if (!swObj.isOK()) {
+        return swObj.getStatus();
     }
+
+    BSONObj obj = swObj.getValue();
 
     // Validate 'storage.engine' field.
     BSONElement storageEngineElement = dps::extractElementAtPath(obj, "storage.engine");
@@ -240,7 +253,16 @@ Status StorageEngineMetadata::write() const {
     // Rename temporary file to actual metadata file.
     boost::filesystem::path metadataPath = boost::filesystem::path(_dbpath) / kMetadataBasename;
     try {
+        // Renaming a file (at least on POSIX) should:
+        // 1) fsync the temporary file.
+        // 2) perform the rename.
+        // 3) fsync the to and from directory (in this case, both to and from are the same).
+        if (!fsyncFile(metadataTempPath)) {
+            return Status(ErrorCodes::FileRenameFailed,
+                          str::stream() << "Failed to fsync new `storage.bson` file.");
+        }
         boost::filesystem::rename(metadataTempPath, metadataPath);
+        flushMyDirectory(metadataPath);
     } catch (const std::exception& ex) {
         return Status(ErrorCodes::FileRenameFailed,
                       str::stream() << "Unexpected error while renaming temporary metadata file "
@@ -255,10 +277,22 @@ Status StorageEngineMetadata::write() const {
 }
 
 template <>
-Status StorageEngineMetadata::validateStorageEngineOption<bool>(StringData fieldName,
-                                                                bool expectedValue) const {
+Status StorageEngineMetadata::validateStorageEngineOption<bool>(
+    StringData fieldName, bool expectedValue, boost::optional<bool> defaultValue) const {
     BSONElement element = _storageEngineOptions.getField(fieldName);
     if (element.eoo()) {
+        if (defaultValue && *defaultValue != expectedValue) {
+            return Status(
+                ErrorCodes::InvalidOptions,
+                str::stream()
+                    << "Requested option conflicts with the current storage engine option for "
+                    << fieldName
+                    << "; you requested "
+                    << (expectedValue ? "true" : "false")
+                    << " but the current server storage is implicitly set to "
+                    << (*defaultValue ? "true" : "false")
+                    << " and cannot be changed");
+        }
         return Status::OK();
     }
     if (!element.isBoolean()) {

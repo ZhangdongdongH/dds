@@ -53,7 +53,7 @@ class PlanYieldPolicy;
  */
 class CachedPlanStage final : public PlanStage {
 public:
-    CachedPlanStage(OperationContext* txn,
+    CachedPlanStage(OperationContext* opCtx,
                     Collection* collection,
                     WorkingSet* ws,
                     CanonicalQuery* cq,
@@ -65,7 +65,7 @@ public:
 
     StageState doWork(WorkingSetID* out) final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
 
     StageType stageType() const final {
         return STAGE_CACHED_PLAN;
@@ -111,7 +111,8 @@ private:
      * May yield during the cached plan stage's trial period or replanning phases.
      *
      * Returns a non-OK status if query planning fails. In particular, this function returns
-     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield.
+     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield, or
+     * ErrorCodes::MaxTimeMSExpired if the operation exceeded its time limit.
      */
     Status tryYield(PlanYieldPolicy* yieldPolicy);
 

@@ -35,9 +35,12 @@
 #include "mongo/db/index/multikey_paths.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/kv/kv_prefix.h"
 
 namespace mongo {
 
+class Collection;
 class IndexDescriptor;
 class OperationContext;
 
@@ -52,17 +55,23 @@ public:
 
     // ------- indexes ----------
 
-    virtual CollectionOptions getCollectionOptions(OperationContext* txn) const = 0;
+    virtual CollectionOptions getCollectionOptions(OperationContext* opCtx) const = 0;
 
-    virtual int getTotalIndexCount(OperationContext* txn) const = 0;
+    virtual int getTotalIndexCount(OperationContext* opCtx) const = 0;
 
-    virtual int getCompletedIndexCount(OperationContext* txn) const = 0;
+    virtual int getCompletedIndexCount(OperationContext* opCtx) const = 0;
 
     virtual int getMaxAllowedIndexes() const = 0;
 
-    virtual void getAllIndexes(OperationContext* txn, std::vector<std::string>* names) const = 0;
+    virtual void getAllIndexes(OperationContext* opCtx, std::vector<std::string>* names) const = 0;
 
-    virtual BSONObj getIndexSpec(OperationContext* txn, StringData idxName) const = 0;
+    virtual void getReadyIndexes(OperationContext* opCtx,
+                                 std::vector<std::string>* names) const = 0;
+
+    virtual void getAllUniqueIndexes(OperationContext* opCtx,
+                                     std::vector<std::string>* names) const {}
+
+    virtual BSONObj getIndexSpec(OperationContext* opCtx, StringData idxName) const = 0;
 
     /**
      * Returns true if the index identified by 'indexName' is multikey, and returns false otherwise.
@@ -75,7 +84,7 @@ public:
      * multikey information, then 'multikeyPaths' is initialized as a vector with size equal to the
      * number of elements in the index key pattern of empty sets.
      */
-    virtual bool isIndexMultikey(OperationContext* txn,
+    virtual bool isIndexMultikey(OperationContext* opCtx,
                                  StringData indexName,
                                  MultikeyPaths* multikeyPaths) const = 0;
 
@@ -88,52 +97,77 @@ public:
      *
      * This function returns true if the index metadata has changed, and returns false otherwise.
      */
-    virtual bool setIndexIsMultikey(OperationContext* txn,
+    virtual bool setIndexIsMultikey(OperationContext* opCtx,
                                     StringData indexName,
                                     const MultikeyPaths& multikeyPaths) = 0;
 
-    virtual RecordId getIndexHead(OperationContext* txn, StringData indexName) const = 0;
+    virtual RecordId getIndexHead(OperationContext* opCtx, StringData indexName) const = 0;
 
-    virtual void setIndexHead(OperationContext* txn,
+    virtual void setIndexHead(OperationContext* opCtx,
                               StringData indexName,
                               const RecordId& newHead) = 0;
 
-    virtual bool isIndexReady(OperationContext* txn, StringData indexName) const = 0;
+    virtual bool isIndexReady(OperationContext* opCtx, StringData indexName) const = 0;
 
-    virtual Status removeIndex(OperationContext* txn, StringData indexName) = 0;
+    virtual bool isIndexPresent(OperationContext* opCtx, StringData indexName) const = 0;
 
-    virtual Status prepareForIndexBuild(OperationContext* txn, const IndexDescriptor* spec) = 0;
+    virtual KVPrefix getIndexPrefix(OperationContext* opCtx, StringData indexName) const = 0;
 
-    virtual void indexBuildSuccess(OperationContext* txn, StringData indexName) = 0;
+    virtual Status removeIndex(OperationContext* opCtx, StringData indexName) = 0;
+
+    virtual Status prepareForIndexBuild(OperationContext* opCtx,
+                                        const IndexDescriptor* spec,
+                                        bool isBackgroundSecondaryBuild) = 0;
+
+    virtual void indexBuildSuccess(OperationContext* opCtx, StringData indexName) = 0;
 
     /* Updates the expireAfterSeconds field of the given index to the value in newExpireSecs.
      * The specified index must already contain an expireAfterSeconds field, and the value in
      * that field and newExpireSecs must both be numeric.
      */
-    virtual void updateTTLSetting(OperationContext* txn,
+    virtual void updateTTLSetting(OperationContext* opCtx,
                                   StringData idxName,
                                   long long newExpireSeconds) = 0;
+
+    virtual void updateIndexMetadata(OperationContext* opCtx, const IndexDescriptor* desc) {}
 
     /**
      * Sets the flags field of CollectionOptions to newValue.
      * Subsequent calls to getCollectionOptions should have flags==newValue and flagsSet==true.
      */
-    virtual void updateFlags(OperationContext* txn, int newValue) = 0;
-
-    /**
-     * Clears the "temp" flag from the CollectionOptions of this collection.
-     */
-    virtual void clearTempFlag(OperationContext* txn) = 0;
+    virtual void updateFlags(OperationContext* opCtx, int newValue) = 0;
 
     /**
      * Updates the validator for this collection.
      *
      * An empty validator removes all validation.
      */
-    virtual void updateValidator(OperationContext* txn,
+    virtual void updateValidator(OperationContext* opCtx,
                                  const BSONObj& validator,
                                  StringData validationLevel,
                                  StringData validationAction) = 0;
+
+    /**
+     * Updates the 'temp' setting for this collection.
+     */
+    virtual void setIsTemp(OperationContext* opCtx, bool isTemp) = 0;
+
+    /**
+     * Assigns a new UUID to this collection. All collections must have UUIDs, so this is called if
+     * a collection erroneously does not have a UUID.
+     */
+    virtual void addUUID(OperationContext* opCtx, CollectionUUID uuid, Collection* coll) = 0;
+
+    /**
+     * Compare the UUID argument to the UUID obtained from the metadata. Return true if they
+     * are equal, false otherwise. uuid can become a CollectionUUID once MMAPv1 is removed.
+     */
+    virtual bool isEqualToMetadataUUID(OperationContext* opCtx, OptionalCollectionUUID uuid) = 0;
+
+    /**
+     * Updates size of a capped Collection.
+     */
+    virtual void updateCappedSize(OperationContext* opCtx, long long size) = 0;
 
 private:
     NamespaceString _ns;

@@ -28,15 +28,24 @@
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/server_parameters.h"
 
-#include <string>
-
-#include "mongo/db/repl/bgsync.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace repl {
+namespace {
+
+// Tells the server to perform replication recovery as a standalone.
+constexpr bool recoverFromOplogAsStandaloneDefault = false;
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(recoverFromOplogAsStandalone,
+                                      bool,
+                                      recoverFromOplogAsStandaloneDefault);
+
+}  // namespace
 
 std::string ReplSettings::ourSetName() const {
     size_t sl = _replSetString.find('/');
@@ -52,48 +61,17 @@ bool ReplSettings::usingReplSets() const {
 /**
  * Getters
  */
-bool ReplSettings::isSlave() const {
-    return _slave;
-}
-
-bool ReplSettings::isMaster() const {
-    return _master;
-}
-
-bool ReplSettings::isFastSyncEnabled() const {
-    return _fastSyncEnabled;
-}
-
-bool ReplSettings::isAutoResyncEnabled() const {
-    return _autoResyncEnabled;
-}
-
-bool ReplSettings::isMajorityReadConcernEnabled() const {
-    return _majorityReadConcernEnabled;
-}
-
-Seconds ReplSettings::getSlaveDelaySecs() const {
-    return _slaveDelaySecs;
-}
-
-int ReplSettings::getPretouch() const {
-    return _pretouch;
-}
 
 long long ReplSettings::getOplogSizeBytes() const {
     return _oplogSizeBytes;
 }
 
-std::string ReplSettings::getSource() const {
-    return _source;
-}
-
-std::string ReplSettings::getOnly() const {
-    return _only;
-}
-
 std::string ReplSettings::getReplSetString() const {
     return _replSetString;
+}
+
+bool ReplSettings::shouldRecoverFromOplogAsStandalone() {
+    return recoverFromOplogAsStandalone;
 }
 
 ReplSettings::IndexPrefetchConfig ReplSettings::getPrefetchIndexMode() const {
@@ -107,44 +85,9 @@ bool ReplSettings::isPrefetchIndexModeSet() const {
 /**
  * Setters
  */
-void ReplSettings::setSlave(bool slave) {
-    _slave = slave;
-}
-
-void ReplSettings::setMaster(bool master) {
-    _master = master;
-}
-
-void ReplSettings::setFastSyncEnabled(bool fastSyncEnabled) {
-    _fastSyncEnabled = fastSyncEnabled;
-}
-
-void ReplSettings::setAutoResyncEnabled(bool autoResyncEnabled) {
-    _autoResyncEnabled = autoResyncEnabled;
-}
-
-void ReplSettings::setMajorityReadConcernEnabled(bool majorityReadConcernEnabled) {
-    _majorityReadConcernEnabled = majorityReadConcernEnabled;
-}
-
-void ReplSettings::setSlaveDelaySecs(int slaveDelay) {
-    _slaveDelaySecs = Seconds(slaveDelay);
-}
-
-void ReplSettings::setPretouch(int pretouch) {
-    _pretouch = pretouch;
-}
 
 void ReplSettings::setOplogSizeBytes(long long oplogSizeBytes) {
     _oplogSizeBytes = oplogSizeBytes;
-}
-
-void ReplSettings::setSource(std::string source) {
-    _source = source;
-}
-
-void ReplSettings::setOnly(std::string only) {
-    _only = only;
 }
 
 void ReplSettings::setReplSetString(std::string replSetString) {

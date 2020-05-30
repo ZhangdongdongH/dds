@@ -34,12 +34,17 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/transport/message_compressor_noop.h"
 #include "mongo/transport/message_compressor_snappy.h"
+#include "mongo/transport/message_compressor_zlib.h"
 #include "mongo/util/options_parser/option_section.h"
 
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 
 namespace mongo {
+namespace {
+const auto kDisabledConfigValue = "disabled"_sd;
+const auto kDefaultConfigValue = "snappy"_sd;
+}  // namespace
 
 StringData getMessageCompressorName(MessageCompressor id) {
     switch (id) {
@@ -47,6 +52,8 @@ StringData getMessageCompressorName(MessageCompressor id) {
             return "noop"_sd;
         case MessageCompressor::kSnappy:
             return "snappy"_sd;
+        case MessageCompressor::kZlib:
+            return "zlib"_sd;
         default:
             fassert(40269, "Invalid message compressor ID");
     }
@@ -105,16 +112,18 @@ void MessageCompressorRegistry::setSupportedCompressors(std::vector<std::string>
 }
 
 Status addMessageCompressionOptions(moe::OptionSection* options, bool forShell) {
-    auto ret =
+    auto& ret =
         options
             ->addOptionChaining("net.compression.compressors",
                                 "networkMessageCompressors",
                                 moe::String,
                                 "Comma-separated list of compressors to use for network messages")
-            .setImplicit(moe::Value(std::string("")));
-    if (forShell)
-        ret.hidden();
-
+            .setImplicit(moe::Value(kDisabledConfigValue.toString()));
+    if (forShell) {
+        ret.setDefault(moe::Value(kDisabledConfigValue.toString())).hidden();
+    } else {
+        ret.setDefault(moe::Value(kDefaultConfigValue.toString()));
+    }
     return Status::OK();
 }
 
@@ -122,7 +131,9 @@ Status storeMessageCompressionOptions(const moe::Environment& params) {
     std::vector<std::string> restrict;
     if (params.count("net.compression.compressors")) {
         auto compressorListStr = params["net.compression.compressors"].as<std::string>();
-        boost::algorithm::split(restrict, compressorListStr, boost::is_any_of(", "));
+        if (compressorListStr != kDisabledConfigValue) {
+            boost::algorithm::split(restrict, compressorListStr, boost::is_any_of(", "));
+        }
     }
 
     auto& compressorFactory = MessageCompressorRegistry::get();

@@ -31,78 +31,75 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/base/checked_cast.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_record_store.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_recovery_unit.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_snapshot_manager.h"
+
+#include "mongo/db/server_options.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_oplog_manager.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
 #include "mongo/util/log.h"
-#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
-Status WiredTigerSnapshotManager::prepareForCreateSnapshot(OperationContext* txn) {
-    WiredTigerRecoveryUnit::get(txn)->prepareForCreateSnapshot(txn);
-    return Status::OK();
+void WiredTigerSnapshotManager::setCommittedSnapshot(const Timestamp& timestamp) {
+    stdx::lock_guard<stdx::mutex> lock(_committedSnapshotMutex);
+
+    invariant(!_committedSnapshot || *_committedSnapshot <= timestamp);
+    _committedSnapshot = timestamp;
 }
 
-Status WiredTigerSnapshotManager::createSnapshot(OperationContext* txn, const SnapshotName& name) {
-    auto session = WiredTigerRecoveryUnit::get(txn)->getSession(txn)->getSession();
-    const std::string config = str::stream() << "name=" << name.asU64();
-    return wtRCToStatus(session->snapshot(session, config.c_str()));
+void WiredTigerSnapshotManager::setLocalSnapshot(const Timestamp& timestamp) {
+    stdx::lock_guard<stdx::mutex> lock(_localSnapshotMutex);
+    _localSnapshot = timestamp;
 }
 
-void WiredTigerSnapshotManager::setCommittedSnapshot(const SnapshotName& name) {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-
-    invariant(!_committedSnapshot || *_committedSnapshot <= name);
-    _committedSnapshot = name;
-}
-
-void WiredTigerSnapshotManager::cleanupUnneededSnapshots() {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-
-    if (!_committedSnapshot)
-        return;
-
-    const std::string config = str::stream() << "drop=(before=" << _committedSnapshot->asU64()
-                                             << ')';
-    invariantWTOK(_session->snapshot(_session, config.c_str()));
+boost::optional<Timestamp> WiredTigerSnapshotManager::getLocalSnapshot() {
+    stdx::lock_guard<stdx::mutex> lock(_localSnapshotMutex);
+    return _localSnapshot;
 }
 
 void WiredTigerSnapshotManager::dropAllSnapshots() {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_committedSnapshotMutex);
     _committedSnapshot = boost::none;
-    invariantWTOK(_session->snapshot(_session, "drop=(all)"));
 }
 
-void WiredTigerSnapshotManager::shutdown() {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
-    if (!_session)
-        return;
-    invariantWTOK(_session->close(_session, NULL));
-    _session = nullptr;
-}
+boost::optional<Timestamp> WiredTigerSnapshotManager::getMinSnapshotForNextCommittedRead() const {
+    if (!serverGlobalParams.enableMajorityReadConcern) {
+        return boost::none;
+    }
 
-boost::optional<SnapshotName> WiredTigerSnapshotManager::getMinSnapshotForNextCommittedRead()
-    const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    stdx::lock_guard<stdx::mutex> lock(_committedSnapshotMutex);
     return _committedSnapshot;
 }
 
-SnapshotName WiredTigerSnapshotManager::beginTransactionOnCommittedSnapshot(
+Timestamp WiredTigerSnapshotManager::beginTransactionOnCommittedSnapshot(
     WT_SESSION* session) const {
-    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    WiredTigerBeginTxnBlock txnOpen(session);
 
+    stdx::lock_guard<stdx::mutex> lock(_committedSnapshotMutex);
     uassert(ErrorCodes::ReadConcernMajorityNotAvailableYet,
             "Committed view disappeared while running operation",
             _committedSnapshot);
 
-    StringBuilder config;
-    config << "snapshot=" << _committedSnapshot->asU64();
-    invariantWTOK(session->begin_transaction(session, config.str().c_str()));
+    auto status = txnOpen.setTimestamp(_committedSnapshot.get());
+    fassert(30635, status);
 
+    txnOpen.done();
     return *_committedSnapshot;
+}
+
+Timestamp WiredTigerSnapshotManager::beginTransactionOnLocalSnapshot(
+    WT_SESSION* session, WiredTigerBeginTxnBlock::IgnorePrepared ignorePrepared) const {
+    WiredTigerBeginTxnBlock txnOpen(session, ignorePrepared);
+
+    stdx::lock_guard<stdx::mutex> lock(_localSnapshotMutex);
+    invariant(_localSnapshot);
+    LOG(3) << "begin_transaction on local snapshot " << _localSnapshot.get().toString();
+    auto status = txnOpen.setTimestamp(_localSnapshot.get());
+    fassert(50775, status);
+
+    txnOpen.done();
+    return *_localSnapshot;
 }
 
 }  // namespace mongo

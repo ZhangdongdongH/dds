@@ -38,8 +38,6 @@
 
 namespace mongo {
 
-using std::unique_ptr;
-
 using fts::FTSMatcher;
 using fts::FTSQueryImpl;
 using fts::FTSSpec;
@@ -52,13 +50,13 @@ class RecordID;
  * A stage that returns every document in the child that satisfies the FTS text matcher built with
  * the query parameter.
  *
- * Prerequisites: A single child stage that passes up WorkingSetMembers in the LOC_AND_OBJ state,
- * with associated text scores.
+ * Prerequisites: A single child stage that passes up WorkingSetMembers in the RID_AND_OBJ state.
+ * Members must also have text score metadata if it is necessary for the final projection.
  */
 class TextMatchStage final : public PlanStage {
 public:
     TextMatchStage(OperationContext* opCtx,
-                   unique_ptr<PlanStage> child,
+                   std::unique_ptr<PlanStage> child,
                    const FTSQueryImpl& query,
                    const FTSSpec& spec,
                    WorkingSet* ws);

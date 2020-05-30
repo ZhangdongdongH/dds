@@ -36,7 +36,8 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
+#include "mongo/db/repl/read_concern_args.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/merge_chunk_request_type.h"
 #include "mongo/util/log.h"
@@ -63,17 +64,17 @@ using std::string;
  *   writeConcern: <BSONObj>
  * }
  */
-class ConfigSvrMergeChunkCommand : public Command {
+class ConfigSvrMergeChunkCommand : public BasicCommand {
 public:
-    ConfigSvrMergeChunkCommand() : Command("_configsvrCommitChunkMerge") {}
+    ConfigSvrMergeChunkCommand() : BasicCommand("_configsvrCommitChunkMerge") {}
 
-    void help(std::stringstream& help) const override {
-        help << "Internal command, which is sent by a shard to the sharding config server. Do "
-                "not call directly. Receives, validates, and processes a MergeChunkRequest";
+    std::string help() const override {
+        return "Internal command, which is sent by a shard to the sharding config server. Do "
+               "not call directly. Receives, validates, and processes a MergeChunkRequest";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -86,7 +87,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -95,33 +96,33 @@ public:
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return parseNsFullyQualified(dbname, cmdObj);
+        return CommandHelpers::parseNsFullyQualified(cmdObj);
     }
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
         if (serverGlobalParams.clusterRole != ClusterRole::ConfigServer) {
             uasserted(ErrorCodes::IllegalOperation,
                       "_configsvrCommitChunkMerge can only be run on config servers");
         }
 
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
+
         auto parsedRequest = uassertStatusOK(MergeChunkRequest::parseFromConfigCommand(cmdObj));
 
         Status mergeChunkResult =
-            Grid::get(txn)->catalogManager()->commitChunkMerge(txn,
-                                                               parsedRequest.getNamespace(),
-                                                               parsedRequest.getEpoch(),
-                                                               parsedRequest.getChunkBoundaries(),
-                                                               parsedRequest.getShardName());
+            ShardingCatalogManager::get(opCtx)->commitChunkMerge(opCtx,
+                                                                 parsedRequest.getNamespace(),
+                                                                 parsedRequest.getEpoch(),
+                                                                 parsedRequest.getChunkBoundaries(),
+                                                                 parsedRequest.getShardName(),
+                                                                 parsedRequest.getValidAfter());
 
-        if (!mergeChunkResult.isOK()) {
-            return appendCommandStatus(result, mergeChunkResult);
-        }
-
+        uassertStatusOK(mergeChunkResult);
         return true;
     }
 } configsvrMergeChunkCmd;

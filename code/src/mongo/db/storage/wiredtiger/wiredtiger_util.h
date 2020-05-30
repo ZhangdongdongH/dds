@@ -37,6 +37,7 @@
 #include "mongo/base/status.h"
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/util/assert_util.h"
 
 namespace mongo {
@@ -89,6 +90,37 @@ struct WiredTigerItem : public WT_ITEM {
     }
 };
 
+/**
+ * Returns a WT_EVENT_HANDLER with MongoDB's default handlers.
+ * The default handlers just log so it is recommended that you consider calling them even if
+ * you are capturing the output.
+ *
+ * There is no default "close" handler. You only need to provide one if you need to call a
+ * destructor.
+ */
+class WiredTigerEventHandler : private WT_EVENT_HANDLER {
+public:
+    WiredTigerEventHandler();
+
+    WT_EVENT_HANDLER* getWtEventHandler();
+
+    bool wasStartupSuccessful() {
+        return _startupSuccessful;
+    }
+
+    void setStartupSuccessful() {
+        _startupSuccessful = true;
+    }
+
+private:
+    int suppressibleStartupErrorLog(WT_EVENT_HANDLER* handler,
+                                    WT_SESSION* sesion,
+                                    int errorCode,
+                                    const char* message);
+
+    bool _startupSuccessful = false;
+};
+
 class WiredTigerUtil {
     MONGO_DISALLOW_COPYING(WiredTigerUtil);
 
@@ -113,6 +145,11 @@ public:
                                     const std::string& uri,
                                     const std::string& config,
                                     BSONObjBuilder* bob);
+
+    /**
+     * Gets entire metadata string for collection/index at URI with the provided session.
+     */
+    static StatusWith<std::string> getMetadataRaw(WT_SESSION* session, StringData uri);
 
     /**
      * Gets entire metadata string for collection/index at URI.
@@ -182,16 +219,6 @@ public:
      */
     static size_t getCacheSizeMB(double requestedCacheSizeGB);
 
-    /**
-     * Returns a WT_EVENT_HANDER with MongoDB's default handlers.
-     * The default handlers just log so it is recommended that you consider calling them even if
-     * you are capturing the output.
-     *
-     * There is no default "close" handler. You only need to provide one if you need to call a
-     * destructor.
-     */
-    static WT_EVENT_HANDLER defaultEventHandlers();
-
     class ErrorAccumulator : public WT_EVENT_HANDLER {
     public:
         ErrorAccumulator(std::vector<std::string>* errors);
@@ -214,9 +241,15 @@ public:
      *
      * If errors is non-NULL, all error messages will be appended to the array.
      */
-    static int verifyTable(OperationContext* txn,
+    static int verifyTable(OperationContext* opCtx,
                            const std::string& uri,
                            std::vector<std::string>* errors = NULL);
+
+    static bool useTableLogging(NamespaceString ns, bool replEnabled);
+
+    static Status setTableLogging(OperationContext* opCtx, const std::string& uri, bool on);
+
+    static Status setTableLogging(WT_SESSION* session, const std::string& uri, bool on);
 
 private:
     /**

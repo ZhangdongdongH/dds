@@ -124,6 +124,14 @@ bool BackgroundOperation::inProgForDb(StringData db) {
     return dbsInProg.find(db) != dbsInProg.end();
 }
 
+int BackgroundOperation::numInProgForDb(StringData db) {
+    stdx::lock_guard<stdx::mutex> lk(m);
+    std::shared_ptr<BgInfo> bgInfo = mapFindWithDefault(dbsInProg, db, std::shared_ptr<BgInfo>());
+    if (!bgInfo)
+        return 0;
+    return bgInfo->getOpsInProgCount();
+}
+
 bool BackgroundOperation::inProgForNs(StringData ns) {
     stdx::lock_guard<stdx::mutex> lk(m);
     return nsInProg.find(ns) != nsInProg.end();

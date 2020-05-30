@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2018 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -73,6 +73,7 @@ wiredtiger_config_parser_open(WT_SESSION *wt_session,
 	WT_SESSION_IMPL *session;
 
 	*config_parserp = NULL;
+
 	session = (WT_SESSION_IMPL *)wt_session;
 
 	WT_RET(__wt_calloc_one(session, &config_parser));
@@ -96,20 +97,20 @@ wiredtiger_config_parser_open(WT_SESSION *wt_session,
  */
 int
 wiredtiger_config_validate(WT_SESSION *wt_session,
-    WT_EVENT_HANDLER *handler, const char *name, const char *config)
+    WT_EVENT_HANDLER *event_handler, const char *name, const char *config)
 {
+	const WT_CONFIG_ENTRY *ep, **epp;
 	WT_CONNECTION_IMPL *conn, dummy_conn;
 	WT_SESSION_IMPL *session;
-	const WT_CONFIG_ENTRY *ep, **epp;
 
 	session = (WT_SESSION_IMPL *)wt_session;
 
 	/*
 	 * It's a logic error to specify both a session and an event handler.
 	 */
-	if (session != NULL && handler != NULL)
+	if (session != NULL && event_handler != NULL)
 		WT_RET_MSG(session, EINVAL,
-		    "wiredtiger_config_validate error handler ignored when "
+		    "wiredtiger_config_validate event handler ignored when "
 		    "a session also specified");
 
 	/*
@@ -117,13 +118,13 @@ wiredtiger_config_validate(WT_SESSION *wt_session,
 	 * a fake session/connection pair and configure the event handler.
 	 */
 	conn = NULL;
-	if (session == NULL && handler != NULL) {
+	if (session == NULL && event_handler != NULL) {
 		WT_CLEAR(dummy_conn);
 		conn = &dummy_conn;
 		session = conn->default_session = &conn->dummy_session;
 		session->iface.connection = &conn->iface;
 		session->name = "wiredtiger_config_validate";
-		__wt_event_handler_set(session, handler);
+		__wt_event_handler_set(session, event_handler);
 	}
 	if (session != NULL)
 		conn = S2C(session);
@@ -161,7 +162,7 @@ wiredtiger_config_validate(WT_SESSION *wt_session,
  * __conn_foc_add --
  *	Add a new entry into the connection's free-on-close list.
  */
-static int
+static void
 __conn_foc_add(WT_SESSION_IMPL *session, const void *p)
 {
 	WT_CONNECTION_IMPL *conn;
@@ -169,13 +170,14 @@ __conn_foc_add(WT_SESSION_IMPL *session, const void *p)
 	conn = S2C(session);
 
 	/*
-	 * Our caller is expected to be holding any locks we need.
+	 * Callers of this function are expected to be holding the connection's
+	 * api_lock.
+	 *
+	 * All callers of this function currently ignore errors.
 	 */
-	WT_RET(__wt_realloc_def(
-	    session, &conn->foc_size, conn->foc_cnt + 1, &conn->foc));
-
-	conn->foc[conn->foc_cnt++] = (void *)p;
-	return (0);
+	if (__wt_realloc_def(
+	    session, &conn->foc_size, conn->foc_cnt + 1, &conn->foc) == 0)
+		conn->foc[conn->foc_cnt++] = (void *)p;
 }
 
 /*
@@ -208,13 +210,13 @@ __wt_configure_method(WT_SESSION_IMPL *session,
     const char *method, const char *uri,
     const char *config, const char *type, const char *check)
 {
-	const WT_CONFIG_CHECK *cp;
 	WT_CONFIG_CHECK *checks, *newcheck;
-	const WT_CONFIG_ENTRY **epp;
+	const WT_CONFIG_CHECK *cp;
 	WT_CONFIG_ENTRY *entry;
+	const WT_CONFIG_ENTRY **epp;
 	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
-	size_t cnt;
+	size_t cnt, len;
 	char *newcheck_name, *p;
 
 	/*
@@ -275,12 +277,10 @@ __wt_configure_method(WT_SESSION_IMPL *session,
 	 */
 	WT_ERR(__wt_calloc_one(session, &entry));
 	entry->method = (*epp)->method;
-	WT_ERR(__wt_calloc_def(session,
-	    strlen((*epp)->base) + strlen(",") + strlen(config) + 1, &p));
-	(void)strcpy(p, (*epp)->base);
-	(void)strcat(p, ",");
-	(void)strcat(p, config);
+	len = strlen((*epp)->base) + strlen(",") + strlen(config) + 1;
+	WT_ERR(__wt_calloc_def(session, len, &p));
 	entry->base = p;
+	WT_ERR(__wt_snprintf(p, len, "%s,%s", (*epp)->base, config));
 
 	/*
 	 * There may be a default value in the config argument passed in (for
@@ -328,12 +328,12 @@ __wt_configure_method(WT_SESSION_IMPL *session,
 	 * order to avoid freeing chunks of memory twice.  Again, this isn't a
 	 * commonly used API and it shouldn't ever happen, just leak it.
 	 */
-	(void)__conn_foc_add(session, entry->base);
-	(void)__conn_foc_add(session, entry);
-	(void)__conn_foc_add(session, checks);
-	(void)__conn_foc_add(session, newcheck->type);
-	(void)__conn_foc_add(session, newcheck->checks);
-	(void)__conn_foc_add(session, newcheck_name);
+	__conn_foc_add(session, entry->base);
+	__conn_foc_add(session, entry);
+	__conn_foc_add(session, checks);
+	__conn_foc_add(session, newcheck->type);
+	__conn_foc_add(session, newcheck->checks);
+	__conn_foc_add(session, newcheck_name);
 
 	/*
 	 * Instead of using locks to protect configuration information, assume

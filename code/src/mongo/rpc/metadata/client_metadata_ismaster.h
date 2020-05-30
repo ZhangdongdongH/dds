@@ -59,7 +59,9 @@ public:
     /**
      * Set the optional client metadata object.
      */
-    static void setClientMetadata(Client* client, boost::optional<ClientMetadata> clientMetadata);
+    static void setClientMetadata(Client* client,
+                                  boost::optional<ClientMetadata> clientMetadata,
+                                  bool setViaMetadata = false);
 
     /**
      * Check a flag to indicate that isMaster has been seen for this Client.
@@ -79,7 +81,7 @@ public:
      * Thread-Safety:
      *   None - must be only be read and written from the thread owning "Client".
      */
-    static Status readFromMetadata(OperationContext* txn, BSONElement& elem);
+    static Status readFromMetadata(OperationContext* opCtx, BSONElement& elem);
 
     /**
      * Write the $client section to OP_Command's metadata if there is a non-empty client metadata
@@ -88,7 +90,7 @@ public:
      * Thread-Safety:
      *   None - must be only be read and written from the thread owning "Client".
      */
-    static void writeToMetadata(OperationContext* txn, BSONObjBuilder* builder);
+    static void writeToMetadata(OperationContext* opCtx, BSONObjBuilder* builder);
 
 private:
     // Optional client metadata document.
@@ -102,6 +104,11 @@ private:
     // Thread-Safety:
     //   None - must be only be read and written from the thread owning "Client".
     bool _hasSeenIsMaster{false};
+
+    // Indicates whether we have set isMaster based on metadata or via isMaster
+    // Thread-Safety:
+    //   None - must be only be read and written from the thread owning "Client".
+    bool _setViaMetadata{false};
 };
 
 }  // namespace mongo

@@ -30,18 +30,36 @@
 
 #include "mongo/db/query/query_test_service_context.h"
 
+#include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_mock.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
 
-QueryTestServiceContext::QueryTestServiceContext() {
-    CollatorFactoryInterface::set(&_serviceContext, stdx::make_unique<CollatorFactoryMock>());
-    _uniqueClient = _serviceContext.makeClient("QueryTest");
+QueryTestServiceContext::QueryTestServiceContext()
+    : _service(ServiceContext::make()), _client(_service->makeClient("query_test")) {
+    CollatorFactoryInterface::set(getServiceContext(), stdx::make_unique<CollatorFactoryMock>());
 }
 
+QueryTestServiceContext::~QueryTestServiceContext() = default;
+
 ServiceContext::UniqueOperationContext QueryTestServiceContext::makeOperationContext() {
-    return _uniqueClient->makeOperationContext();
+    return getClient()->makeOperationContext();
+}
+
+ServiceContext::UniqueOperationContext QueryTestServiceContext::makeOperationContext(
+    LogicalSessionId lsid) {
+    auto opCtx = makeOperationContext();
+    opCtx->setLogicalSessionId(lsid);
+    return opCtx;
+}
+
+Client* QueryTestServiceContext::getClient() const {
+    return _client.get();
+}
+
+ServiceContext* QueryTestServiceContext::getServiceContext() {
+    return _service.get();
 }
 
 }  // namespace mongo

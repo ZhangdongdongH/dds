@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -85,7 +85,8 @@ class test_truncate_fast_delete(wttest.WiredTigerTestCase):
         ('txn2', dict(commit=False)),
         ]
 
-    scenarios = make_scenarios(types, keyfmt, overflow, reads, writes, txn)
+    scenarios = make_scenarios(types, keyfmt, overflow, reads, writes, txn,
+                               prune=20, prunelong=1000)
 
     # Return the number of records visible to the cursor; test both forward
     # and backward iteration, they are different code paths in this case.

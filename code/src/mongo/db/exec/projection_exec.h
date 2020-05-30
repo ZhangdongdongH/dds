@@ -66,10 +66,10 @@ public:
     typedef StringMap<MatchExpression*> Matchers;
     typedef StringMap<MetaProjection> MetaMap;
 
-    ProjectionExec(const BSONObj& spec,
+    ProjectionExec(OperationContext* opCtx,
+                   const BSONObj& spec,
                    const MatchExpression* queryExpression,
-                   const CollatorInterface* collator,
-                   const ExtensionsCallback& extensionsCallback);
+                   const CollatorInterface* collator);
 
     ~ProjectionExec();
 

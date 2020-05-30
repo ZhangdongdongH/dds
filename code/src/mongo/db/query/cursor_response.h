@@ -39,7 +39,8 @@
 namespace mongo {
 
 /**
- * Builds the cursor field for a reply to a cursor-generating command in place.
+ * Builds the cursor field and the _latestOplogTimestamp field for a reply to a cursor-generating
+ * command in place.
  */
 class CursorResponseBuilder {
     MONGO_DISALLOW_COPYING(CursorResponseBuilder);
@@ -68,6 +69,15 @@ public:
     void append(const BSONObj& obj) {
         invariant(_active);
         _batch.append(obj);
+        _numDocs++;
+    }
+
+    void setLatestOplogTimestamp(Timestamp ts) {
+        _latestOplogTimestamp = ts;
+    }
+
+    long long numDocs() const {
+        return _numDocs;
     }
 
     /**
@@ -89,6 +99,8 @@ private:
     BSONObjBuilder* const _commandResponse;
     BSONObjBuilder _cursorObject;
     BSONArrayBuilder _batch;
+    long long _numDocs = 0;
+    Timestamp _latestOplogTimestamp;
 };
 
 /**
@@ -120,7 +132,13 @@ void appendGetMoreResponseObject(long long cursorId,
                                  BSONObjBuilder* builder);
 
 class CursorResponse {
+// In order to work around a bug in the compiler on the s390x platform, the IDL needs to invoke the
+// copy constructor on that platform.
+// TODO SERVER-32467 Remove this ifndef once the compiler has been fixed and the workaround has been
+// removed.
+#ifndef __s390x__
     MONGO_DISALLOW_COPYING(CursorResponse);
+#endif
 
 public:
     enum class ResponseType {
@@ -129,15 +147,43 @@ public:
     };
 
     /**
+     * Constructs a CursorResponse from the command BSON response.
+     */
+    static StatusWith<CursorResponse> parseFromBSON(const BSONObj& cmdResponse);
+
+    /**
+     * A throwing version of 'parseFromBSON'.
+     */
+    static CursorResponse parseFromBSONThrowing(const BSONObj& cmdResponse) {
+        return uassertStatusOK(parseFromBSON(cmdResponse));
+    }
+
+    /**
+     * Constructs an empty cursor response.
+     */
+    CursorResponse() = default;
+
+    /**
      * Constructs from values for each of the fields.
      */
     CursorResponse(NamespaceString nss,
                    CursorId cursorId,
                    std::vector<BSONObj> batch,
-                   boost::optional<long long> numReturnedSoFar = boost::none);
+                   boost::optional<long long> numReturnedSoFar = boost::none,
+                   boost::optional<Timestamp> latestOplogTimestamp = boost::none,
+                   boost::optional<BSONObj> writeConcernError = boost::none);
 
     CursorResponse(CursorResponse&& other) = default;
     CursorResponse& operator=(CursorResponse&& other) = default;
+
+// In order to work around a bug in the compiler on the s390x platform, the IDL needs to invoke the
+// copy constructor on that platform.
+// TODO SERVER-32467 Remove this ifndef once the compiler has been fixed and the workaround has been
+// removed.
+#ifdef __s390x__
+    CursorResponse(const CursorResponse& other) = default;
+    CursorResponse& operator=(const CursorResponse& other) = default;
+#endif
 
     //
     // Accessors.
@@ -155,26 +201,38 @@ public:
         return _batch;
     }
 
+    std::vector<BSONObj> releaseBatch() {
+        return std::move(_batch);
+    }
+
     boost::optional<long long> getNumReturnedSoFar() const {
         return _numReturnedSoFar;
     }
 
-    /**
-     * Constructs a CursorResponse from the command BSON response.
-     */
-    static StatusWith<CursorResponse> parseFromBSON(const BSONObj& cmdResponse);
+    boost::optional<Timestamp> getLastOplogTimestamp() const {
+        return _latestOplogTimestamp;
+    }
+
+    boost::optional<BSONObj> getWriteConcernError() const {
+        return _writeConcernError;
+    }
 
     /**
      * Converts this response to its raw BSON representation.
      */
     BSONObj toBSON(ResponseType responseType) const;
     void addToBSON(ResponseType responseType, BSONObjBuilder* builder) const;
+    BSONObj toBSONAsInitialResponse() const {
+        return toBSON(ResponseType::InitialResponse);
+    }
 
 private:
     NamespaceString _nss;
     CursorId _cursorId;
     std::vector<BSONObj> _batch;
     boost::optional<long long> _numReturnedSoFar;
+    boost::optional<Timestamp> _latestOplogTimestamp;
+    boost::optional<BSONObj> _writeConcernError;
 };
 
 }  // namespace mongo

@@ -62,4 +62,5 @@ BSONObj makeMigrationStatusDocument(const NamespaceString& nss,
 }
 
 }  // namespace migrationutil
+
 }  // namespace mongo

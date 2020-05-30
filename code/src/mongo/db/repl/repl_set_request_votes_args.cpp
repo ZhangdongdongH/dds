@@ -49,6 +49,7 @@ const std::string kReasonFieldName = "reason";
 const std::string kSetNameFieldName = "setName";
 const std::string kTermFieldName = "term";
 const std::string kVoteGrantedFieldName = "voteGranted";
+const std::string kOperationTime = "operationTime";
 
 const std::string kLegalArgsFieldNames[] = {
     kCandidateIndexFieldName,
@@ -58,17 +59,15 @@ const std::string kLegalArgsFieldNames[] = {
     kLastDurableOpTimeFieldName,
     kSetNameFieldName,
     kTermFieldName,
-};
-
-const std::string kLegalResponseFieldNames[] = {
-    kOkFieldName, kReasonFieldName, kTermFieldName, kVoteGrantedFieldName,
+    kOperationTime,
 };
 
 }  // namespace
 
 
 Status ReplSetRequestVotesArgs::initialize(const BSONObj& argsObj) {
-    Status status = bsonCheckOnlyHasFields("ReplSetRequestVotes", argsObj, kLegalArgsFieldNames);
+    Status status =
+        bsonCheckOnlyHasFieldsForCommand("ReplSetRequestVotes", argsObj, kLegalArgsFieldNames);
     if (!status.isOK())
         return status;
 
@@ -134,12 +133,7 @@ void ReplSetRequestVotesArgs::addToBSON(BSONObjBuilder* builder) const {
 }
 
 Status ReplSetRequestVotesResponse::initialize(const BSONObj& argsObj) {
-    Status status =
-        bsonCheckOnlyHasFields("ReplSetRequestVotes", argsObj, kLegalResponseFieldNames);
-    if (!status.isOK())
-        return status;
-
-    status = bsonExtractIntegerField(argsObj, kTermFieldName, &_term);
+    auto status = bsonExtractIntegerField(argsObj, kTermFieldName, &_term);
     if (!status.isOK())
         return status;
 

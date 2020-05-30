@@ -32,8 +32,8 @@
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/s/active_migrations_registry.h"
-#include "mongo/db/service_context_noop.h"
-#include "mongo/s/move_chunk_request.h"
+#include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/s/request_types/move_chunk_request.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -41,64 +41,42 @@ namespace {
 
 using unittest::assertGet;
 
-class MoveChunkRegistration : public unittest::Test {
+class MoveChunkRegistration : public ServiceContextMongoDTest {
 protected:
-    void setUp() override {
-        _client = _serviceContext.makeClient("MoveChunkRegistrationTest");
-        _opCtx = _serviceContext.makeOperationContext(_client.get());
-    }
-
-    void tearDown() override {
-        _opCtx.reset();
-        _client.reset();
-    }
-
-    OperationContext* getTxn() const {
-        return _opCtx.get();
-    }
-
-    ServiceContextNoop _serviceContext;
-    ServiceContext::UniqueClient _client;
-    ServiceContext::UniqueOperationContext _opCtx;
-
     ActiveMigrationsRegistry _registry;
 };
 
 MoveChunkRequest createMoveChunkRequest(const NamespaceString& nss) {
-    const ChunkVersion collectionVersion(2, 3, OID::gen());
     const ChunkVersion chunkVersion(1, 2, OID::gen());
 
     BSONObjBuilder builder;
     MoveChunkRequest::appendAsCommand(
         &builder,
         nss,
-        collectionVersion,
+        chunkVersion,
         assertGet(ConnectionString::parse("TestConfigRS/CS1:12345,CS2:12345,CS3:12345")),
         ShardId("shard0001"),
         ShardId("shard0002"),
         ChunkRange(BSON("Key" << -100), BSON("Key" << 100)),
-        chunkVersion,
         1024,
         MigrationSecondaryThrottleOptions::create(MigrationSecondaryThrottleOptions::kOff),
-        true,
         true);
     return assertGet(MoveChunkRequest::createFromCommand(nss, builder.obj()));
 }
 
-TEST_F(MoveChunkRegistration, ScopedRegisterDonateChunkMoveConstructorAndAssignment) {
-    auto originalScopedRegisterDonateChunk = assertGet(_registry.registerDonateChunk(
+TEST_F(MoveChunkRegistration, ScopedDonateChunkMoveConstructorAndAssignment) {
+    auto originalScopedDonateChunk = assertGet(_registry.registerDonateChunk(
         createMoveChunkRequest(NamespaceString("TestDB", "TestColl"))));
-    ASSERT(originalScopedRegisterDonateChunk.mustExecute());
+    ASSERT(originalScopedDonateChunk.mustExecute());
 
-    ScopedRegisterDonateChunk movedScopedRegisterDonateChunk(
-        std::move(originalScopedRegisterDonateChunk));
-    ASSERT(movedScopedRegisterDonateChunk.mustExecute());
+    ScopedDonateChunk movedScopedDonateChunk(std::move(originalScopedDonateChunk));
+    ASSERT(movedScopedDonateChunk.mustExecute());
 
-    originalScopedRegisterDonateChunk = std::move(movedScopedRegisterDonateChunk);
-    ASSERT(originalScopedRegisterDonateChunk.mustExecute());
+    originalScopedDonateChunk = std::move(movedScopedDonateChunk);
+    ASSERT(originalScopedDonateChunk.mustExecute());
 
     // Need to signal the registered migration so the destructor doesn't invariant
-    originalScopedRegisterDonateChunk.complete(Status::OK());
+    originalScopedDonateChunk.signalComplete(Status::OK());
 }
 
 TEST_F(MoveChunkRegistration, GetActiveMigrationNamespace) {
@@ -106,39 +84,40 @@ TEST_F(MoveChunkRegistration, GetActiveMigrationNamespace) {
 
     const NamespaceString nss("TestDB", "TestColl");
 
-    auto originalScopedRegisterDonateChunk =
+    auto originalScopedDonateChunk =
         assertGet(_registry.registerDonateChunk(createMoveChunkRequest(nss)));
 
     ASSERT_EQ(nss.ns(), _registry.getActiveDonateChunkNss()->ns());
 
     // Need to signal the registered migration so the destructor doesn't invariant
-    originalScopedRegisterDonateChunk.complete(Status::OK());
+    originalScopedDonateChunk.signalComplete(Status::OK());
 }
 
 TEST_F(MoveChunkRegistration, SecondMigrationReturnsConflictingOperationInProgress) {
-    auto originalScopedRegisterDonateChunk = assertGet(_registry.registerDonateChunk(
+    auto originalScopedDonateChunk = assertGet(_registry.registerDonateChunk(
         createMoveChunkRequest(NamespaceString("TestDB", "TestColl1"))));
 
-    auto secondScopedRegisterDonateChunkStatus = _registry.registerDonateChunk(
+    auto secondScopedDonateChunkStatus = _registry.registerDonateChunk(
         createMoveChunkRequest(NamespaceString("TestDB", "TestColl2")));
     ASSERT_EQ(ErrorCodes::ConflictingOperationInProgress,
-              secondScopedRegisterDonateChunkStatus.getStatus());
+              secondScopedDonateChunkStatus.getStatus());
 
-    originalScopedRegisterDonateChunk.complete(Status::OK());
+    originalScopedDonateChunk.signalComplete(Status::OK());
 }
 
 TEST_F(MoveChunkRegistration, SecondMigrationWithSameArgumentsJoinsFirst) {
-    auto originalScopedRegisterDonateChunk = assertGet(_registry.registerDonateChunk(
+    auto originalScopedDonateChunk = assertGet(_registry.registerDonateChunk(
         createMoveChunkRequest(NamespaceString("TestDB", "TestColl"))));
-    ASSERT(originalScopedRegisterDonateChunk.mustExecute());
+    ASSERT(originalScopedDonateChunk.mustExecute());
 
-    auto secondScopedRegisterDonateChunk = assertGet(_registry.registerDonateChunk(
+    auto secondScopedDonateChunk = assertGet(_registry.registerDonateChunk(
         createMoveChunkRequest(NamespaceString("TestDB", "TestColl"))));
-    ASSERT(!secondScopedRegisterDonateChunk.mustExecute());
+    ASSERT(!secondScopedDonateChunk.mustExecute());
 
-    originalScopedRegisterDonateChunk.complete({ErrorCodes::InternalError, "Test error"});
+    originalScopedDonateChunk.signalComplete({ErrorCodes::InternalError, "Test error"});
+    auto opCtx = makeOperationContext();
     ASSERT_EQ(Status(ErrorCodes::InternalError, "Test error"),
-              secondScopedRegisterDonateChunk.waitForCompletion(getTxn()));
+              secondScopedDonateChunk.waitForCompletion(opCtx.get()));
 }
 
 }  // namespace

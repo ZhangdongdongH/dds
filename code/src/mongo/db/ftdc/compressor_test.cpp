@@ -48,20 +48,22 @@ namespace mongo {
     ASSERT_TRUE(st.isOK());  \
     ASSERT_FALSE(st.getValue().is_initialized());
 
-#define ASSERT_SCHEMA_CHANGED(st)                                 \
-    ASSERT_TRUE(st.isOK());                                       \
-    ASSERT_TRUE(std::get<1>(st.getValue().get()) ==               \
-                FTDCCompressor::CompressorState::kSchemaChanged); \
-    ASSERT_TRUE(st.getValue().is_initialized());
+#define ASSERT_SCHEMA_CHANGED(st)                   \
+    ASSERT_TRUE(st.isOK());                         \
+    ASSERT_TRUE(st.getValue().is_initialized());    \
+    ASSERT_TRUE(std::get<1>(st.getValue().get()) == \
+                FTDCCompressor::CompressorState::kSchemaChanged);
 
-#define ASSERT_FULL(st)                                            \
-    ASSERT_TRUE(st.isOK());                                        \
-    ASSERT_TRUE(std::get<1>(st.getValue().get()) ==                \
-                FTDCCompressor::CompressorState::kCompressorFull); \
-    ASSERT_TRUE(st.getValue().is_initialized());
+#define ASSERT_FULL(st)                             \
+    ASSERT_TRUE(st.isOK());                         \
+    ASSERT_TRUE(st.getValue().is_initialized());    \
+    ASSERT_TRUE(std::get<1>(st.getValue().get()) == \
+                FTDCCompressor::CompressorState::kCompressorFull);
+
+class FTDCCompressorTest : public FTDCTest {};
 
 // Sanity check
-TEST(FTDCCompressor, TestBasic) {
+TEST_F(FTDCCompressorTest, TestBasic) {
     FTDCConfig config;
     FTDCCompressor c(&config);
 
@@ -91,7 +93,7 @@ TEST(FTDCCompressor, TestBasic) {
 }
 
 // Test strings only
-TEST(FTDCCompressor, TestStrings) {
+TEST_F(FTDCCompressorTest, TestStrings) {
     FTDCConfig config;
     FTDCCompressor c(&config);
 
@@ -125,7 +127,8 @@ TEST(FTDCCompressor, TestStrings) {
  */
 class TestTie {
 public:
-    TestTie() : _compressor(&_config) {}
+    TestTie(FTDCValidationMode mode = FTDCValidationMode::kStrict)
+        : _compressor(&_config), _mode(mode) {}
 
     ~TestTie() {
         validate(boost::none);
@@ -169,7 +172,7 @@ public:
             list = sw.getValue();
         }
 
-        ValidateDocumentList(list, _docs);
+        ValidateDocumentList(list, _docs, _mode);
     }
 
 private:
@@ -177,10 +180,11 @@ private:
     FTDCConfig _config;
     FTDCCompressor _compressor;
     FTDCDecompressor _decompressor;
+    FTDCValidationMode _mode;
 };
 
 // Test various schema changes
-TEST(FTDCCompressor, TestSchemaChanges) {
+TEST_F(FTDCCompressorTest, TestSchemaChanges) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -340,8 +344,116 @@ TEST(FTDCCompressor, TestSchemaChanges) {
     ASSERT_SCHEMA_CHANGED(st);
 }
 
+// Test various schema changes with strings
+TEST_F(FTDCCompressorTest, TestStringSchemaChanges) {
+    TestTie c(FTDCValidationMode::kWeak);
+
+    auto st = c.addSample(BSON("str1"
+                               << "joe"
+                               << "int1"
+                               << 42));
+    ASSERT_HAS_SPACE(st);
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int1"
+                          << 45));
+    ASSERT_HAS_SPACE(st);
+
+    // Add string field
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "str2"
+                          << "smith"
+                          << "int1"
+                          << 47));
+    ASSERT_HAS_SPACE(st);
+
+    // Reset schema by renaming a int field
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "str2"
+                          << "smith"
+                          << "int2"
+                          << 48));
+    ASSERT_SCHEMA_CHANGED(st);
+
+    // Remove string field
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int2"
+                          << 49));
+    ASSERT_HAS_SPACE(st);
+
+
+    // Add string field as last element
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int2"
+                          << 50
+                          << "str3"
+                          << "bar"));
+    ASSERT_HAS_SPACE(st);
+
+    // Reset schema by renaming a int field
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int1"
+                          << 51
+                          << "str3"
+                          << "bar"));
+    ASSERT_SCHEMA_CHANGED(st);
+
+    // Remove string field as last element
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int1"
+                          << 52));
+    ASSERT_HAS_SPACE(st);
+
+
+    // Add 2 string fields
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "str2"
+                          << "smith"
+                          << "str3"
+                          << "foo"
+                          << "int1"
+                          << 53));
+    ASSERT_HAS_SPACE(st);
+
+    // Reset schema by renaming a int field
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "str2"
+                          << "smith"
+                          << "str3"
+                          << "foo"
+                          << "int2"
+                          << 54));
+    ASSERT_SCHEMA_CHANGED(st);
+
+    // Remove 2 string fields
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int2"
+                          << 55));
+    ASSERT_HAS_SPACE(st);
+
+    // Change string to number
+    st = c.addSample(BSON("str1" << 12 << "int1" << 56));
+    ASSERT_SCHEMA_CHANGED(st);
+
+    // Change number to string
+    st = c.addSample(BSON("str1"
+                          << "joe"
+                          << "int1"
+                          << 67));
+    ASSERT_SCHEMA_CHANGED(st);
+}
+
 // Ensure changing between the various number formats is considered compatible
-TEST(FTDCCompressor, TestNumbersCompat) {
+TEST_F(FTDCCompressorTest, TestNumbersCompat) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -368,7 +480,7 @@ TEST(FTDCCompressor, TestNumbersCompat) {
 }
 
 // Test various date time types
-TEST(AFTDCCompressor, TestDateTimeTypes) {
+TEST_F(FTDCCompressorTest, TestDateTimeTypes) {
     TestTie c;
     for (int i = 0; i < 10; i++) {
         BSONObjBuilder builder1;
@@ -382,7 +494,7 @@ TEST(AFTDCCompressor, TestDateTimeTypes) {
 }
 
 // Test all types
-TEST(FTDCCompressor, Types) {
+TEST_F(FTDCCompressorTest, Types) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -455,7 +567,7 @@ TEST(FTDCCompressor, Types) {
 }
 
 // Test a full buffer
-TEST(FTDCCompressor, TestFull) {
+TEST_F(FTDCCompressorTest, TestFull) {
     // Test a large numbers of zeros, and incremental numbers in a full buffer
     for (int j = 0; j < 2; j++) {
         TestTie c;
@@ -509,7 +621,7 @@ BSONObj generateSample(std::random_device& rd, T generator, size_t count) {
 }
 
 // Test many metrics
-TEST(ZFTDCCompressor, TestManyMetrics) {
+TEST_F(FTDCCompressorTest, TestManyMetrics) {
     std::random_device rd;
     std::mt19937 gen(rd());
 

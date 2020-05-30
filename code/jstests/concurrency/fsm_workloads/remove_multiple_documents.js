@@ -6,6 +6,11 @@
  * Each thread first inserts 200 documents, each containing the thread id and
  * a random float. Then on each iteration, each thread repeatedly removes some
  * of the documents it inserted.
+ *
+ * When the balancer is enabled, the nRemoved result may be inaccurate as
+ * a chunk migration may be active, causing the count function to assert.
+ *
+ * @tags: [assumes_balancer_off]
  */
 var $config = (function() {
 

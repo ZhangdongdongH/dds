@@ -38,11 +38,11 @@
 
 #include "mongo/base/init.h"
 #include "mongo/db/commands/server_status.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
-#include "mongo/transport/transport_layer.h"
+#include "mongo/transport/service_entry_point.h"
+#include "mongo/transport/thread_idle_callback.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/listen.h"
-#include "mongo/util/net/thread_idle_callback.h"
 
 namespace mongo {
 
@@ -55,13 +55,19 @@ const int kManyClients = 40;
 
 stdx::mutex tcmallocCleanupLock;
 
+MONGO_EXPORT_SERVER_PARAMETER(tcmallocEnableMarkThreadTemporarilyIdle, bool, false);
+
 /**
  *  Callback to allow TCMalloc to release freed memory to the central list at
  *  favorable times. Ideally would do some milder cleanup or scavenge...
  */
 void threadStateChange() {
-    if (getGlobalServiceContext()->getTransportLayer()->sessionStats().numOpenSessions <=
-        kManyClients)
+
+    if (!tcmallocEnableMarkThreadTemporarilyIdle.load()) {
+        return;
+    }
+
+    if (getGlobalServiceContext()->getServiceEntryPoint()->numOpenSessions() <= kManyClients)
         return;
 
 #if MONGO_HAVE_GPERFTOOLS_GET_THREAD_CACHE_SIZE
@@ -82,8 +88,7 @@ void threadStateChange() {
     // terrible runaway if we're not careful.
     stdx::lock_guard<stdx::mutex> lk(tcmallocCleanupLock);
 #endif
-    MallocExtension::instance()->MarkThreadIdle();
-    MallocExtension::instance()->MarkThreadBusy();
+    MallocExtension::instance()->MarkThreadTemporarilyIdle();
 }
 
 // Register threadStateChange callback
@@ -100,7 +105,8 @@ public:
         return true;
     }
 
-    virtual BSONObj generateSection(OperationContext* txn, const BSONElement& configElement) const {
+    virtual BSONObj generateSection(OperationContext* opCtx,
+                                    const BSONElement& configElement) const {
         long long verbosity = 1;
         if (configElement) {
             // Relies on the fact that safeNumberLong turns non-numbers into 0.
@@ -155,6 +161,25 @@ public:
                 sub, "thread_cache_free_bytes", "tcmalloc.thread_cache_free_bytes");
             appendNumericPropertyIfAvailable(
                 sub, "aggressive_memory_decommit", "tcmalloc.aggressive_memory_decommit");
+
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_committed_bytes", "tcmalloc.pageheap_committed_bytes");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_scavenge_count", "tcmalloc.pageheap_scavenge_count");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_commit_count", "tcmalloc.pageheap_commit_count");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_total_commit_bytes", "tcmalloc.pageheap_total_commit_bytes");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_decommit_count", "tcmalloc.pageheap_decommit_count");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_total_decommit_bytes", "tcmalloc.pageheap_total_decommit_bytes");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_reserve_count", "tcmalloc.pageheap_reserve_count");
+            appendNumericPropertyIfAvailable(
+                sub, "pageheap_total_reserve_bytes", "tcmalloc.pageheap_total_reserve_bytes");
+            appendNumericPropertyIfAvailable(
+                sub, "spinlock_total_delay_ns", "tcmalloc.spinlock_total_delay_ns");
 
 #if MONGO_HAVE_GPERFTOOLS_SIZE_CLASS_STATS
             if (verbosity >= 2) {

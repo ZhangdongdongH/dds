@@ -46,11 +46,21 @@ public:
 
     GetNextResult getNext() override;
     const char* getSourceName() const override;
-    Value serialize(bool explain = false) const override;
-    void dispose() override;
-    bool isValidInitialSource() const override {
-        return true;
+    Value serialize(
+        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const override;
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+        StageConstraints constraints(StreamType::kStreaming,
+                                     PositionRequirement::kFirst,
+                                     HostTypeRequirement::kNone,
+                                     DiskUseRequirement::kNoDiskUse,
+                                     FacetRequirement::kNotAllowed,
+                                     TransactionRequirement::kAllowed);
+
+        constraints.requiresInputDocSource = false;
+        return constraints;
     }
+
     BSONObjSet getOutputSorts() override {
         return sorts;
     }
@@ -79,10 +89,6 @@ public:
         return this;
     }
 
-    void doInjectExpressionContext() override {
-        isExpCtxInjected = true;
-    }
-
     // Return documents from front of queue.
     std::deque<GetNextResult> queue;
 
@@ -92,6 +98,9 @@ public:
     bool isExpCtxInjected = false;
 
     BSONObjSet sorts;
+
+protected:
+    void doDispose() override;
 };
 
 }  // namespace mongo

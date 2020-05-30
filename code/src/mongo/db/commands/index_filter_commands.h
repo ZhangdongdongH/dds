@@ -49,7 +49,7 @@ namespace mongo {
  * Defines common attributes for all index filter related commands
  * such as slaveOk.
  */
-class IndexFilterCommand : public Command {
+class IndexFilterCommand : public BasicCommand {
 public:
     IndexFilterCommand(const std::string& name, const std::string& helpText);
 
@@ -63,20 +63,16 @@ public:
      * implement plan cache command functionality.
      */
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result);
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;
 
-    virtual bool slaveOk() const;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override;
 
-    virtual bool slaveOverrideOk() const;
-
-    virtual void help(std::stringstream& ss) const;
+    std::string help() const override;
 
     /**
      * One action type defined for index filter commands:
@@ -84,7 +80,7 @@ public:
      */
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj);
+                                       const BSONObj& cmdObj) const;
 
     /**
      * Subset of command arguments used by index filter commands
@@ -92,9 +88,9 @@ public:
      * Should contain just enough logic to invoke run*Command() function
      * in query_settings.h
      */
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob) = 0;
 
 private:
@@ -111,9 +107,9 @@ class ListFilters : public IndexFilterCommand {
 public:
     ListFilters();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
@@ -133,9 +129,9 @@ class ClearFilters : public IndexFilterCommand {
 public:
     ClearFilters();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
@@ -144,7 +140,7 @@ public:
      * Namespace argument ns is ignored if we are clearing the entire cache.
      * Removes corresponding entries from plan cache.
      */
-    static Status clear(OperationContext* txn,
+    static Status clear(OperationContext* opCtx,
                         QuerySettings* querySettings,
                         PlanCache* planCache,
                         const std::string& ns,
@@ -167,16 +163,16 @@ class SetFilter : public IndexFilterCommand {
 public:
     SetFilter();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
      * Sets index filter for a query shape.
      * Removes entry for query shape from plan cache.
      */
-    static Status set(OperationContext* txn,
+    static Status set(OperationContext* opCtx,
                       QuerySettings* querySettings,
                       PlanCache* planCache,
                       const std::string& ns,

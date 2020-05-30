@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2018 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -129,7 +129,7 @@ class test_async02(wttest.WiredTigerTestCase, suite_subprocess):
     ])
 
     # Enable async for this test.
-    def conn_config(self, dir):
+    def conn_config(self):
         return 'async=(enabled=true,ops_max=%s,' % self.async_ops + \
             'threads=%s)' % self.async_threads
 

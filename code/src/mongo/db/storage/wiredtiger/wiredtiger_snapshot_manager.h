@@ -33,28 +33,24 @@
 #include <wiredtiger.h>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/storage/snapshot_manager.h"
-#include "mongo/db/storage/wiredtiger/wiredtiger_util.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
+
+class WiredTigerOplogManager;
 
 class WiredTigerSnapshotManager final : public SnapshotManager {
     MONGO_DISALLOW_COPYING(WiredTigerSnapshotManager);
 
 public:
-    explicit WiredTigerSnapshotManager(WT_CONNECTION* conn) {
-        invariantWTOK(conn->open_session(conn, NULL, NULL, &_session));
-    }
+    WiredTigerSnapshotManager() = default;
 
-    ~WiredTigerSnapshotManager() {
-        shutdown();
-    }
-
-    Status prepareForCreateSnapshot(OperationContext* txn) final;
-    Status createSnapshot(OperationContext* ru, const SnapshotName& name) final;
-    void setCommittedSnapshot(const SnapshotName& name) final;
-    void cleanupUnneededSnapshots() final;
+    void setCommittedSnapshot(const Timestamp& timestamp) final;
+    void setLocalSnapshot(const Timestamp& timestamp) final;
+    boost::optional<Timestamp> getLocalSnapshot() final;
     void dropAllSnapshots() final;
 
     //
@@ -62,16 +58,19 @@ public:
     //
 
     /**
-     * Prepares for a shutdown of the WT_CONNECTION.
-     */
-    void shutdown();
-
-    /**
      * Starts a transaction and returns the SnapshotName used.
      *
      * Throws if there is currently no committed snapshot.
      */
-    SnapshotName beginTransactionOnCommittedSnapshot(WT_SESSION* session) const;
+    Timestamp beginTransactionOnCommittedSnapshot(WT_SESSION* session) const;
+
+    /**
+     * Starts a transaction on the last stable local timestamp, set by setLocalSnapshot.
+     *
+     * Throws if no local snapshot has been set.
+     */
+    Timestamp beginTransactionOnLocalSnapshot(
+        WT_SESSION* session, WiredTigerBeginTxnBlock::IgnorePrepared ignorePrepared) const;
 
     /**
      * Returns lowest SnapshotName that could possibly be used by a future call to
@@ -81,11 +80,15 @@ public:
      * This should not be used for starting a transaction on this SnapshotName since the named
      * snapshot may be deleted by the time you start the transaction.
      */
-    boost::optional<SnapshotName> getMinSnapshotForNextCommittedRead() const;
+    boost::optional<Timestamp> getMinSnapshotForNextCommittedRead() const;
 
 private:
-    mutable stdx::mutex _mutex;  // Guards all members.
-    boost::optional<SnapshotName> _committedSnapshot;
-    WT_SESSION* _session;  // only used for dropping snapshots.
+    // Snapshot to use for reads at a commit timestamp.
+    mutable stdx::mutex _committedSnapshotMutex;  // Guards _committedSnapshot.
+    boost::optional<Timestamp> _committedSnapshot;
+
+    // Snapshot to use for reads at a local stable timestamp.
+    mutable stdx::mutex _localSnapshotMutex;  // Guards _localSnapshot.
+    boost::optional<Timestamp> _localSnapshot;
 };
 }

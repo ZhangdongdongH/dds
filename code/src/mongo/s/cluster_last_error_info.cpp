@@ -30,18 +30,21 @@
 
 #include "mongo/s/cluster_last_error_info.h"
 
+#include "mongo/client/connection_string.h"
 #include "mongo/db/lasterror.h"
 
 namespace mongo {
 
-const Client::Decoration<ClusterLastErrorInfo> ClusterLastErrorInfo::get =
-    Client::declareDecoration<ClusterLastErrorInfo>();
+const Client::Decoration<std::shared_ptr<ClusterLastErrorInfo>> ClusterLastErrorInfo::get =
+    Client::declareDecoration<std::shared_ptr<ClusterLastErrorInfo>>();
 
 void ClusterLastErrorInfo::addShardHost(const std::string& shardHost) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     _cur->shardHostsWritten.insert(shardHost);
 }
 
 void ClusterLastErrorInfo::addHostOpTime(ConnectionString connStr, HostOpTime stat) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     _cur->hostOpTimes[connStr] = stat;
 }
 
@@ -52,11 +55,13 @@ void ClusterLastErrorInfo::addHostOpTimes(const HostOpTimeMap& hostOpTimes) {
 }
 
 void ClusterLastErrorInfo::newRequest() {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     std::swap(_cur, _prev);
     _cur->clear();
 }
 
 void ClusterLastErrorInfo::disableForCommand() {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
     RequestInfo* temp = _cur;
     _cur = _prev;
     _prev = temp;

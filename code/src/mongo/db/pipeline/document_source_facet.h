@@ -43,7 +43,7 @@ namespace mongo {
 class BSONElement;
 class TeeBuffer;
 class DocumentSourceTeeConsumer;
-struct ExpressionContext;
+class ExpressionContext;
 class NamespaceString;
 
 /**
@@ -55,15 +55,14 @@ class NamespaceString;
  * stage which will produce a document like the following:
  * {facetA: [<all input documents except the first one>], facetB: [<the first document>]}.
  */
-class DocumentSourceFacet final : public DocumentSourceNeedsMongod,
-                                  public SplittableDocumentSource {
+class DocumentSourceFacet final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
     struct FacetPipeline {
-        FacetPipeline(std::string name, boost::intrusive_ptr<Pipeline> pipeline)
+        FacetPipeline(std::string name, std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
             : name(std::move(name)), pipeline(std::move(pipeline)) {}
 
         std::string name;
-        boost::intrusive_ptr<Pipeline> pipeline;
+        std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
     };
 
     class LiteParsed : public LiteParsedDocumentSource {
@@ -71,13 +70,19 @@ public:
         static std::unique_ptr<LiteParsed> parse(const AggregationRequest& request,
                                                  const BSONElement& spec);
 
+        LiteParsed(std::vector<LiteParsedPipeline> liteParsedPipelines, PrivilegeVector privileges)
+            : _liteParsedPipelines(std::move(liteParsedPipelines)),
+              _requiredPrivileges(std::move(privileges)) {}
+
+        PrivilegeVector requiredPrivileges(bool isMongos) const final {
+            return _requiredPrivileges;
+        }
+
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final;
 
     private:
-        LiteParsed(std::vector<LiteParsedPipeline> liteParsedPipelines)
-            : _liteParsedPipelines(std::move(liteParsedPipelines)) {}
-
         const std::vector<LiteParsedPipeline> _liteParsedPipelines;
+        const PrivilegeVector _requiredPrivileges;
     };
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
@@ -96,11 +101,6 @@ public:
      * Optimizes inner pipelines.
      */
     boost::intrusive_ptr<DocumentSource> optimize() final;
-
-    /**
-     * Injects the expression context into inner pipelines.
-     */
-    void doInjectExpressionContext() final;
 
     /**
      * Takes a union of all sub-pipelines, and adds them to 'deps'.
@@ -125,22 +125,28 @@ public:
     boost::intrusive_ptr<DocumentSource> getShardSource() final {
         return nullptr;
     }
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final {
-        return this;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final {
+        return {this};
+    }
+
+    const std::vector<FacetPipeline>& getFacetPipelines() const {
+        return _facets;
     }
 
     // The following are overridden just to forward calls to sub-pipelines.
     void addInvolvedCollections(std::vector<NamespaceString>* collections) const final;
-    void doInjectMongodInterface(std::shared_ptr<MongodInterface> mongod) final;
-    void doDetachFromOperationContext() final;
-    void doReattachToOperationContext(OperationContext* opCtx) final;
-    bool needsPrimaryShard() const final;
+    void detachFromOperationContext() final;
+    void reattachToOperationContext(OperationContext* opCtx) final;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+
+protected:
+    void doDispose() final;
 
 private:
     DocumentSourceFacet(std::vector<FacetPipeline> facetPipelines,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     boost::intrusive_ptr<TeeBuffer> _teeBuffer;
     std::vector<FacetPipeline> _facets;

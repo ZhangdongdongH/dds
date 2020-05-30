@@ -28,37 +28,19 @@
 
 #pragma once
 
-#include <utility>
-
-#include "mongo/db/service_context.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/service_context_d_test_fixture.h"
-#include "mongo/executor/network_test_env.h"
-#include "mongo/unittest/unittest.h"
-#include "mongo/util/net/message_port_mock.h"
+#include "mongo/s/sharding_test_fixture_common.h"
 
 namespace mongo {
 
-class BalancerConfiguration;
-class CatalogCache;
+class CatalogCacheLoader;
 class ConnectionString;
-class ClusterCursorManager;
 class DistLockCatalog;
 class DistLockManager;
-class NamespaceString;
 class RemoteCommandTargeterFactoryMock;
-class ShardingCatalogClient;
-class ShardingCatalogManager;
-class ShardRegistry;
-
-namespace executor {
-class NetworkInterfaceMock;
-class NetworkTestEnv;
-class TaskExecutor;
-class TaskExecutorPool;
-}  // namespace executor
 
 namespace repl {
-class ReplicationCoordinatorMock;
 class ReplSettings;
 }  // namespace repl
 
@@ -71,18 +53,11 @@ class ReplSettings;
  * components (including a NetworkInterface/TaskExecutor subsystem backed by the NetworkTestEnv),
  * but allows subclasses to replace any component with its real implementation, a mock, or nullptr.
  */
-class ShardingMongodTestFixture : public ServiceContextMongoDTest {
+class ShardingMongodTestFixture : public ServiceContextMongoDTest,
+                                  public ShardingTestFixtureCommon {
 public:
     ShardingMongodTestFixture();
     ~ShardingMongodTestFixture();
-
-    static const Seconds kFutureTimeout;
-
-    template <typename Lambda>
-    executor::NetworkTestEnv::FutureHandle<typename std::result_of<Lambda()>::type> launchAsync(
-        Lambda&& func) const {
-        return _networkTestEnv->launchAsync(std::forward<Lambda>(func));
-    }
 
     /**
      * Initializes sharding components according to the cluster role in
@@ -97,9 +72,11 @@ public:
     // Syntactic sugar for getting sharding components off the Grid, if they have been initialized.
 
     ShardingCatalogClient* catalogClient() const;
-    ShardingCatalogManager* catalogManager() const;
     CatalogCache* catalogCache() const;
     ShardRegistry* shardRegistry() const;
+    RemoteCommandTargeterFactoryMock* targeterFactory() const;
+    executor::TaskExecutor* executor() const;
+    DistLockManager* distLock() const;
     ClusterCursorManager* clusterCursorManager() const;
     executor::TaskExecutorPool* executorPool() const;
 
@@ -111,29 +88,12 @@ public:
      */
     void shutdownExecutorPool();
 
-    // Syntactic sugar for getting executor and networking components off the Grid's executor pool,
-    // if they have been initialized.
-
-    executor::TaskExecutor* executor() const;
-    executor::NetworkInterfaceMock* network() const;
-
     repl::ReplicationCoordinatorMock* replicationCoordinator() const;
 
     /**
      * Returns the stored raw pointer to the DistLockCatalog, if it has been initialized.
      */
     DistLockCatalog* distLockCatalog() const;
-
-    /**
-     * Returns the stored raw pointer to the DistLockManager, if it has been initialized.
-     */
-    DistLockManager* distLock() const;
-
-    /**
-     * Returns the stored raw pointer to the RemoteCommandTargeterFactoryMock, if it has been
-     * initialized.
-     */
-    RemoteCommandTargeterFactoryMock* targeterFactory() const;
 
     /**
      * Returns the stored raw pointer to the OperationContext.
@@ -162,13 +122,6 @@ protected:
      * components that have been initialized but not yet shut down and reset.
      */
     void tearDown() override;
-
-    // Allow subclasses to modify this node's hostname and port, set name, and replica set members.
-
-    const HostAndPort _host{"node1:12345"};
-    const std::string _setName = "mySet";
-    const std::vector<HostAndPort> _servers{
-        _host, HostAndPort("node2:12345"), HostAndPort("node3:12345")};
 
     // Methods for creating and returning sharding components. Some of these methods have been
     // implemented to return the real implementation of the component as the default, while others
@@ -200,7 +153,7 @@ protected:
     /**
      * Base class returns nullptr.
      */
-    virtual std::unique_ptr<DistLockCatalog> makeDistLockCatalog(ShardRegistry* shardRegistry);
+    virtual std::unique_ptr<DistLockCatalog> makeDistLockCatalog();
 
     /**
      * Base class returns nullptr.
@@ -223,17 +176,6 @@ protected:
     /**
      * Base class returns nullptr.
      */
-    virtual std::unique_ptr<ShardingCatalogManager> makeShardingCatalogManager(
-        ShardingCatalogClient* catalogClient);
-
-    /**
-     * Base class returns nullptr.
-     */
-    virtual std::unique_ptr<CatalogCache> makeCatalogCache();
-
-    /**
-     * Base class returns nullptr.
-     */
     virtual std::unique_ptr<ClusterCursorManager> makeClusterCursorManager();
 
     /**
@@ -242,15 +184,12 @@ protected:
     virtual std::unique_ptr<BalancerConfiguration> makeBalancerConfiguration();
 
 private:
-    ServiceContext::UniqueClient _client;
-    ServiceContext::UniqueOperationContext _opCtx;
+    const HostAndPort _host{"node1:12345"};
+    const std::string _setName = "mySet";
+    const std::vector<HostAndPort> _servers{
+        _host, HostAndPort("node2:12345"), HostAndPort("node3:12345")};
 
-    // Since a NetworkInterface is a private member of a TaskExecutor, we store a raw pointer to the
-    // fixed TaskExecutor's NetworkInterface here.
-    // TODO(esha): Currently, some fine-grained synchronization of the network and task executor is
-    // is outside of NetworkTestEnv's capabilities. If all control of the network is done through
-    // _networkTestEnv, storing this raw pointer is not necessary.
-    executor::NetworkInterfaceMock* _mockNetwork = nullptr;
+    ServiceContext::UniqueOperationContext _opCtx;
 
     // Since the RemoteCommandTargeterFactory is currently a private member of ShardFactory, we
     // store a raw pointer to it here.
@@ -265,9 +204,6 @@ private:
     DistLockManager* _distLockManager = nullptr;
 
     repl::ReplicationCoordinatorMock* _replCoord = nullptr;
-
-    // Allows for processing tasks through the NetworkInterfaceMock/ThreadPoolMock subsystem.
-    std::unique_ptr<executor::NetworkTestEnv> _networkTestEnv;
 
     // Records if a component has been shut down, so that it is only shut down once.
     bool _executorPoolShutDown = false;

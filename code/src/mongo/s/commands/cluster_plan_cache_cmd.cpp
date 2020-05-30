@@ -33,11 +33,11 @@
 #include "mongo/db/commands.h"
 #include "mongo/db/query/collation/collation_spec.h"
 #include "mongo/s/commands/strategy.h"
-#include "mongo/s/config.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/stale_exception.h"
 
 namespace mongo {
+namespace {
 
 using std::string;
 using std::stringstream;
@@ -48,33 +48,31 @@ using std::vector;
  * Cluster plan cache commands don't do much more than
  * forwarding the commands to all shards and combining the results.
  */
-class ClusterPlanCacheCmd : public Command {
+class ClusterPlanCacheCmd : public BasicCommand {
     MONGO_DISALLOW_COPYING(ClusterPlanCacheCmd);
 
 public:
     virtual ~ClusterPlanCacheCmd() {}
 
-    bool slaveOk() const {
-        return false;
-    }
-
-    bool slaveOverrideOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kOptIn;
     }
 
     bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    void help(stringstream& ss) const {
-        ss << _helpText;
+    std::string help() const override {
+        return _helpText;
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return parseNsCollectionRequired(dbname, cmdObj).ns();
+        return CommandHelpers::parseNsCollectionRequired(dbname, cmdObj).ns();
     }
 
-    Status checkAuthForCommand(Client* client, const std::string& dbname, const BSONObj& cmdObj) {
+    Status checkAuthForCommand(Client* client,
+                               const std::string& dbname,
+                               const BSONObj& cmdObj) const {
         AuthorizationSession* authzSession = AuthorizationSession::get(client);
         ResourcePattern pattern = parseResourcePattern(dbname, cmdObj);
 
@@ -86,11 +84,9 @@ public:
     }
 
     // Cluster plan cache command entry point.
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result);
 
 public:
@@ -99,7 +95,7 @@ public:
      * "helpText", and will require privilege "actionType" to run.
      */
     ClusterPlanCacheCmd(const std::string& name, const std::string& helpText, ActionType actionType)
-        : Command(name), _helpText(helpText), _actionType(actionType) {}
+        : BasicCommand(name), _helpText(helpText), _actionType(actionType) {}
 
 private:
     std::string _helpText;
@@ -110,21 +106,24 @@ private:
 // Cluster plan cache command implementation(s) below
 //
 
-bool ClusterPlanCacheCmd::run(OperationContext* txn,
+bool ClusterPlanCacheCmd::run(OperationContext* opCtx,
                               const std::string& dbName,
-                              BSONObj& cmdObj,
-                              int options,
-                              std::string& errMsg,
+                              const BSONObj& cmdObj,
                               BSONObjBuilder& result) {
-    const NamespaceString nss(parseNsCollectionRequired(dbName, cmdObj));
+    const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbName, cmdObj));
 
     // Dispatch command to all the shards.
     // Targeted shard commands are generally data-dependent but plan cache
     // commands are tied to query shape (data has no effect on query shape).
     vector<Strategy::CommandResult> results;
     const BSONObj query;
-    Strategy::commandOp(
-        txn, dbName, cmdObj, options, nss.ns(), query, CollationSpec::kSimpleSpec, &results);
+    Strategy::commandOp(opCtx,
+                        dbName,
+                        CommandHelpers::filterCommandRequestForPassthrough(cmdObj),
+                        nss.ns(),
+                        query,
+                        CollationSpec::kSimpleSpec,
+                        &results);
 
     // Set value of first shard result's "ok" field.
     bool clusterCmdResult = true;
@@ -136,7 +135,7 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
         // XXX: In absence of sensible aggregation strategy,
         //      promote first shard's result to top level.
         if (i == results.begin()) {
-            result.appendElements(cmdResult.result);
+            CommandHelpers::filterCommandReplyForPassthrough(cmdResult.result, &result);
             clusterCmdResult = cmdResult.result["ok"].trueValue();
         }
 
@@ -152,8 +151,6 @@ bool ClusterPlanCacheCmd::run(OperationContext* txn,
 //
 // Register plan cache commands at startup
 //
-
-namespace {
 
 MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
     // Leaked intentionally: a Command registers itself when constructed.
@@ -174,5 +171,4 @@ MONGO_INITIALIZER(RegisterPlanCacheCommands)(InitializerContext* context) {
 }
 
 }  // namespace
-
 }  // namespace mongo

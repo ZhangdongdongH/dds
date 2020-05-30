@@ -43,12 +43,12 @@ namespace repl {
 /**
  * Base class for repl set commands.
  */
-class ReplSetCommand : public Command {
+class ReplSetCommand : public BasicCommand {
 protected:
-    ReplSetCommand(const char* s, bool show = false) : Command(s, show) {}
+    ReplSetCommand(const char* s) : BasicCommand(s) {}
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -61,7 +61,7 @@ protected:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override;
+                               const BSONObj& cmdObj) const override;
 
     virtual ActionSet getAuthActionSet() const {
         return ActionSet{ActionType::internal};

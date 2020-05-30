@@ -50,6 +50,12 @@ void OrStage::addChild(PlanStage* child) {
     _children.emplace_back(child);
 }
 
+void OrStage::addChildren(Children childrenToAdd) {
+    _children.insert(_children.end(),
+                     std::make_move_iterator(childrenToAdd.begin()),
+                     std::make_move_iterator(childrenToAdd.end()));
+}
+
 bool OrStage::isEOF() {
     return _currentChild >= _children.size();
 }
@@ -101,16 +107,10 @@ PlanStage::StageState OrStage::doWork(WorkingSetID* out) {
             return PlanStage::NEED_TIME;
         }
     } else if (PlanStage::FAILURE == childStatus || PlanStage::DEAD == childStatus) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it
-        // failed, in which case 'id' is valid.  If ID is invalid, we
-        // create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            mongoutils::str::stream ss;
-            ss << "OR stage failed to read in results from child " << _currentChild;
-            Status status(ErrorCodes::InternalError, ss);
-            *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-        }
         return childStatus;
     } else if (PlanStage::NEED_YIELD == childStatus) {
         *out = id;
@@ -120,7 +120,7 @@ PlanStage::StageState OrStage::doWork(WorkingSetID* out) {
     return childStatus;
 }
 
-void OrStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void OrStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // TODO remove this since calling isEOF is illegal inside of doInvalidate().
     if (isEOF()) {
         return;
@@ -129,7 +129,7 @@ void OrStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalidati
     // If we see DL again it is not the same record as it once was so we still want to
     // return it.
     if (_dedup && INVALIDATION_DELETION == type) {
-        unordered_set<RecordId, RecordId::Hasher>::iterator it = _seen.find(dl);
+        stdx::unordered_set<RecordId, RecordId::Hasher>::iterator it = _seen.find(dl);
         if (_seen.end() != it) {
             ++_specificStats.recordIdsForgotten;
             _seen.erase(dl);

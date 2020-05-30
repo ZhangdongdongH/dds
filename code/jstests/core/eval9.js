@@ -1,3 +1,11 @@
+// @tags: [
+//   # Cannot implicitly shard accessed collections because unsupported use of sharded collection
+//   # from db.eval.
+//   assumes_unsharded_collection,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+// ]
+
 assert.writeOK(db.evalprep.insert({}), "db must exist for eval to succeed");
 db.evalprep.drop();
 

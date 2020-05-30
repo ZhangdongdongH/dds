@@ -38,9 +38,13 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/views/durable_view_catalog.h"
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog.h"
@@ -51,20 +55,22 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-// Stub to avoid including the server_options library.
-bool isMongos() {
-    return false;
-}
-
 namespace {
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersion34, ("EndStartupOptionStorage"))
-(InitializerContext* context) {
-    mongo::serverGlobalParams.featureCompatibility.version.store(
-        ServerGlobalParams::FeatureCompatibility::Version::k34);
-    return Status::OK();
-}
+constexpr auto kLargeString =
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+    "0000000000000000000000000000000000000000000000000000000";
+const auto kOneKiBMatchStage = BSON("$match" << BSON("data" << kLargeString));
+const auto kTinyMatchStage = BSON("$match" << BSONObj());
 
 class DurableViewCatalogDummy final : public DurableViewCatalog {
 public:
@@ -72,14 +78,14 @@ public:
     static const std::string name;
 
     using Callback = stdx::function<Status(const BSONObj& view)>;
-    virtual Status iterate(OperationContext* txn, Callback callback) {
+    virtual Status iterate(OperationContext* opCtx, Callback callback) {
         ++_iterateCount;
         return Status::OK();
     }
-    virtual void upsert(OperationContext* txn, const NamespaceString& name, const BSONObj& view) {
+    virtual void upsert(OperationContext* opCtx, const NamespaceString& name, const BSONObj& view) {
         ++_upsertCount;
     }
-    virtual void remove(OperationContext* txn, const NamespaceString& name) {}
+    virtual void remove(OperationContext* opCtx, const NamespaceString& name) {}
     virtual const std::string& getName() const {
         return name;
     };
@@ -110,11 +116,34 @@ private:
     std::unique_ptr<QueryTestServiceContext> _queryServiceContext;
 
 protected:
+    ServiceContext* getServiceContext() const {
+        return _queryServiceContext->getServiceContext();
+    }
+
     DurableViewCatalogDummy durableViewCatalog;
     ServiceContext::UniqueOperationContext opCtx;
     ViewCatalog viewCatalog;
     const BSONArray emptyPipeline;
     const BSONObj emptyCollation;
+};
+
+// For tests which need to run in a replica set context.
+class ReplViewCatalogFixture : public ViewCatalogFixture {
+public:
+    void setUp() override {
+        Test::setUp();
+        auto service = getServiceContext();
+        repl::ReplSettings settings;
+
+        settings.setReplSetString("viewCatalogTestSet/node1:12345");
+
+        repl::StorageInterface::set(service, stdx::make_unique<repl::StorageInterfaceMock>());
+        auto replCoord = stdx::make_unique<repl::ReplicationCoordinatorMock>(service, settings);
+
+        // Ensure that we are primary.
+        ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
+        repl::ReplicationCoordinator::set(service, std::move(replCoord));
+    }
 };
 
 TEST_F(ViewCatalogFixture, CreateExistingView) {
@@ -132,6 +161,82 @@ TEST_F(ViewCatalogFixture, CreateViewOnDifferentDatabase) {
 
     ASSERT_NOT_OK(
         viewCatalog.createView(opCtx.get(), viewName, viewOn, emptyPipeline, emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CanCreateViewWithExprPredicate) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(opCtx.get(),
+                                     NamespaceString("db.view1"),
+                                     viewOn,
+                                     BSON_ARRAY(BSON("$match" << BSON("$expr" << 1))),
+                                     emptyCollation));
+
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view2"),
+        viewOn,
+        BSON_ARRAY(
+            BSON("$facet" << BSON("output" << BSON_ARRAY(BSON("$match" << BSON("$expr" << 1)))))),
+        emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CanCreateViewWithJSONSchemaPredicate) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view1"),
+        viewOn,
+        BSON_ARRAY(BSON("$match" << BSON("$jsonSchema" << BSON("required" << BSON_ARRAY("x"))))),
+        emptyCollation));
+
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view2"),
+        viewOn,
+        BSON_ARRAY(BSON(
+            "$facet" << BSON(
+                "output" << BSON_ARRAY(BSON(
+                    "$match" << BSON("$jsonSchema" << BSON("required" << BSON_ARRAY("x")))))))),
+        emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CanCreateViewWithLookupUsingPipelineSyntax) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(opCtx.get(),
+                                     NamespaceString("db.view"),
+                                     viewOn,
+                                     BSON_ARRAY(BSON("$lookup" << BSON("from"
+                                                                       << "fcoll"
+                                                                       << "as"
+                                                                       << "as"
+                                                                       << "pipeline"
+                                                                       << BSONArray()))),
+                                     emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CreateViewWithPipelineFailsOnInvalidStageName) {
+    const NamespaceString viewName("db.view");
+    const NamespaceString viewOn("db.coll");
+
+    auto invalidPipeline = BSON_ARRAY(BSON("INVALID_STAGE_NAME" << 1));
+    ASSERT_THROWS(
+        viewCatalog.createView(opCtx.get(), viewName, viewOn, invalidPipeline, emptyCollation)
+            .transitional_ignore(),
+        AssertionException);
+}
+
+TEST_F(ReplViewCatalogFixture, CreateViewWithPipelineFailsOnIneligibleStage) {
+    const NamespaceString viewName("db.view");
+    const NamespaceString viewOn("db.coll");
+
+    // $changeStream cannot be used in a view definition pipeline.
+    auto invalidPipeline = BSON_ARRAY(BSON("$changeStream" << BSONObj()));
+
+    ASSERT_THROWS_CODE(
+        viewCatalog.createView(opCtx.get(), viewName, viewOn, invalidPipeline, emptyCollation)
+            .ignore(),
+        AssertionException,
+        ErrorCodes::OptionNotSupportedOnView);
 }
 
 TEST_F(ViewCatalogFixture, CreateViewOnInvalidCollectionName) {
@@ -210,17 +315,14 @@ TEST_F(ViewCatalogFixture, CreateViewCycles) {
     }
 }
 
-TEST_F(ViewCatalogFixture, CreateViewWithPipelineExactMaxSize) {
-    BSONArrayBuilder builder;
-    int objsize = BSON("$match" << BSON("x"
-                                        << "foobar"))
-                      .objsize();
+TEST_F(ViewCatalogFixture, CanSuccessfullyCreateViewWhosePipelineIsExactlyAtMaxSizeInBytes) {
+    ASSERT_EQ(ViewGraph::kMaxViewPipelineSizeBytes % kOneKiBMatchStage.objsize(), 0);
 
+    BSONArrayBuilder builder(ViewGraph::kMaxViewPipelineSizeBytes);
     int pipelineSize = 0;
-
-    for (; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes; pipelineSize += objsize) {
-        builder << BSON("$match" << BSON("x"
-                                         << "foobar"));
+    for (; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes;
+         pipelineSize += kOneKiBMatchStage.objsize()) {
+        builder << kOneKiBMatchStage;
     }
 
     ASSERT_EQ(pipelineSize, ViewGraph::kMaxViewPipelineSizeBytes);
@@ -229,53 +331,36 @@ TEST_F(ViewCatalogFixture, CreateViewWithPipelineExactMaxSize) {
     const NamespaceString viewOn("db.coll");
     const BSONObj collation;
 
-    auto pipeline = builder.arr();
-
-    ASSERT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, pipeline, collation));
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, builder.arr(), collation));
 }
 
-TEST_F(ViewCatalogFixture, CreateViewWithPipelineExceedingMaxSize) {
-    BSONArrayBuilder builder;
-
-    int objsize = BSON("$match" << BSON("x"
-                                        << "foo"))
-                      .objsize();
-
-    int pipelineSize = 0;
-
-    for (; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes + 1; pipelineSize += objsize) {
-        builder << BSON("$match" << BSON("x"
-                                         << "foo"));
+TEST_F(ViewCatalogFixture, CannotCreateViewWhosePipelineExceedsMaxSizeInBytes) {
+    // Fill the builder to exactly the maximum size, then push it just over the limit by adding an
+    // additional tiny match stage.
+    BSONArrayBuilder builder(ViewGraph::kMaxViewPipelineSizeBytes);
+    for (int pipelineSize = 0; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes;
+         pipelineSize += kOneKiBMatchStage.objsize()) {
+        builder << kOneKiBMatchStage;
     }
+    builder << kTinyMatchStage;
 
     const NamespaceString viewName("db.view");
     const NamespaceString viewOn("db.coll");
     const BSONObj collation;
 
-    auto pipeline = builder.arr();
-
-    ASSERT_NOT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, pipeline, collation));
+    ASSERT_NOT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, builder.arr(), collation));
 }
 
-TEST_F(ViewCatalogFixture, CreateViewWithCumulativePipelineExceedingMaxSize) {
+TEST_F(ViewCatalogFixture, CannotCreateViewIfItsFullyResolvedPipelineWouldExceedMaxSizeInBytes) {
     BSONArrayBuilder builder1;
     BSONArrayBuilder builder2;
 
-    int objsize = BSON("$match" << BSON("x"
-                                        << "foo"))
-                      .objsize();
-
-    int pipelineSize = 0;
-
-    for (; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes + 1; pipelineSize += objsize * 2) {
-        builder1 << BSON("$match" << BSON("x"
-                                          << "foo"));
-        builder2 << BSON("$match" << BSON("x"
-                                          << "foo"));
+    for (int pipelineSize = 0; pipelineSize < ViewGraph::kMaxViewPipelineSizeBytes;
+         pipelineSize += (kOneKiBMatchStage.objsize() * 2)) {
+        builder1 << kOneKiBMatchStage;
+        builder2 << kOneKiBMatchStage;
     }
-
-    auto pipeline1 = builder1.arr();
-    auto pipeline2 = builder2.arr();
+    builder2 << kTinyMatchStage;
 
     const NamespaceString view1("db.view1");
     const NamespaceString view2("db.view2");
@@ -283,8 +368,8 @@ TEST_F(ViewCatalogFixture, CreateViewWithCumulativePipelineExceedingMaxSize) {
     const BSONObj collation1;
     const BSONObj collation2;
 
-    ASSERT_OK(viewCatalog.createView(opCtx.get(), view1, viewOn, pipeline1, collation1));
-    ASSERT_NOT_OK(viewCatalog.createView(opCtx.get(), view2, view1, pipeline2, collation2));
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), view1, viewOn, builder1.arr(), collation1));
+    ASSERT_NOT_OK(viewCatalog.createView(opCtx.get(), view2, view1, builder2.arr(), collation2));
 }
 
 TEST_F(ViewCatalogFixture, DropMissingView) {
@@ -311,6 +396,23 @@ TEST_F(ViewCatalogFixture, ModifyViewOnInvalidCollectionName) {
     const NamespaceString viewOn("db.$coll");
 
     ASSERT_NOT_OK(viewCatalog.modifyView(opCtx.get(), viewName, viewOn, emptyPipeline));
+}
+
+TEST_F(ReplViewCatalogFixture, ModifyViewWithPipelineFailsOnIneligibleStage) {
+    const NamespaceString viewName("db.view");
+    const NamespaceString viewOn("db.coll");
+
+    auto validPipeline = BSON_ARRAY(BSON("$match" << BSON("_id" << 1)));
+    auto invalidPipeline = BSON_ARRAY(BSON("$changeStream" << BSONObj()));
+
+    // Create the initial, valid view.
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, validPipeline, emptyCollation));
+
+    // Now attempt to replace it with a pipeline containing $changeStream.
+    ASSERT_THROWS_CODE(
+        viewCatalog.modifyView(opCtx.get(), viewName, viewOn, invalidPipeline).ignore(),
+        AssertionException,
+        ErrorCodes::OptionNotSupportedOnView);
 }
 
 TEST_F(ViewCatalogFixture, LookupMissingView) {
@@ -410,6 +512,42 @@ TEST_F(ViewCatalogFixture, ResolveViewCorrectPipeline) {
     for (uint32_t i = 0; i < expected.size(); i++) {
         ASSERT(SimpleBSONObjComparator::kInstance.evaluate(expected[i] == result[i]));
     }
+}
+
+TEST_F(ViewCatalogFixture, ResolveViewCorrectlyExtractsDefaultCollation) {
+    const NamespaceString view1("db.view1");
+    const NamespaceString view2("db.view2");
+    const NamespaceString viewOn("db.coll");
+    BSONArrayBuilder pipeline1;
+    BSONArrayBuilder pipeline2;
+
+    pipeline1 << BSON("$match" << BSON("foo" << 1));
+    pipeline2 << BSON("$match" << BSON("foo" << 2));
+
+    BSONObj collation = BSON("locale"
+                             << "mock_reverse_string");
+
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), view1, viewOn, pipeline1.arr(), collation));
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), view2, view1, pipeline2.arr(), collation));
+
+    auto resolvedView = viewCatalog.resolveView(opCtx.get(), view2);
+    ASSERT(resolvedView.isOK());
+
+    ASSERT_EQ(resolvedView.getValue().getNamespace(), viewOn);
+
+    std::vector<BSONObj> expected = {BSON("$match" << BSON("foo" << 1)),
+                                     BSON("$match" << BSON("foo" << 2))};
+    std::vector<BSONObj> result = resolvedView.getValue().getPipeline();
+    ASSERT_EQ(expected.size(), result.size());
+    for (uint32_t i = 0; i < expected.size(); i++) {
+        ASSERT(SimpleBSONObjComparator::kInstance.evaluate(expected[i] == result[i]));
+    }
+
+    auto expectedCollation =
+        CollatorFactoryInterface::get(opCtx->getServiceContext())->makeFromBSON(collation);
+    ASSERT_OK(expectedCollation.getStatus());
+    ASSERT_BSONOBJ_EQ(resolvedView.getValue().getDefaultCollation(),
+                      expectedCollation.getValue()->getSpec().toBSON());
 }
 
 TEST_F(ViewCatalogFixture, InvalidateThenReload) {

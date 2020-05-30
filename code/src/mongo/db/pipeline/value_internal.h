@@ -29,7 +29,6 @@
 #pragma once
 
 #include <algorithm>
-#include <boost/config.hpp>
 #include <boost/intrusive_ptr.hpp>
 
 #include "mongo/base/static_assert.h"
@@ -76,7 +75,6 @@ public:
     const Decimal128 decimalValue;
 };
 
-#pragma pack(1)
 class ValueStorage {
 public:
     // Note: it is important the memory is zeroed out (by calling zero()) at the start of every
@@ -169,7 +167,7 @@ public:
         memcpyed();
     }
 
-    ValueStorage(ValueStorage&& rhs) BOOST_NOEXCEPT {
+    ValueStorage(ValueStorage&& rhs) noexcept {
         memcpy(this, &rhs, sizeof(*this));
         rhs.zero();  // Reset rhs to the missing state. TODO consider only doing this if refCounter.
     }
@@ -197,7 +195,7 @@ public:
         return *this;
     }
 
-    ValueStorage& operator=(ValueStorage&& rhs) BOOST_NOEXCEPT {
+    ValueStorage& operator=(ValueStorage&& rhs) noexcept {
         DEV verifyRefCountingIfShould();
         if (refCounter)
             intrusive_ptr_release(genericRCPtr);
@@ -311,6 +309,7 @@ public:
 
     // This data is public because this should only be used by Value which would be a friend
     union {
+#pragma pack(1)
         struct {
             // byte 1
             signed char type;
@@ -354,11 +353,16 @@ public:
                 };
             };
         };
+#pragma pack()
 
         // covers the whole ValueStorage
         long long i64[2];
+
+        // Forces the ValueStorage type to have at least pointer alignment. Can't use alignas on the
+        // type since that causes issues on MSVC.
+        void* forcePointerAlignment;
     };
 };
 MONGO_STATIC_ASSERT(sizeof(ValueStorage) == 16);
-#pragma pack()
+MONGO_STATIC_ASSERT(alignof(ValueStorage) >= alignof(void*));
 }

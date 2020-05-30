@@ -35,151 +35,127 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/matcher/expression_tree.h"
+#include "mongo/db/matcher/expression_type.h"
+#include "mongo/db/matcher/expression_with_placeholder.h"
 #include "mongo/db/matcher/extensions_callback.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/matcher/schema/expression_internal_schema_allowed_properties.h"
+#include "mongo/db/pipeline/expression.h"
+#include "mongo/db/pipeline/expression_context.h"
 #include "mongo/stdx/functional.h"
 
 namespace mongo {
 
-class CollatorInterface;
 class OperationContext;
+
+enum class PathAcceptingKeyword {
+    ALL,
+    BITS_ALL_CLEAR,
+    BITS_ALL_SET,
+    BITS_ANY_CLEAR,
+    BITS_ANY_SET,
+    ELEM_MATCH,
+    EQUALITY,
+    EXISTS,
+    GEO_INTERSECTS,
+    GEO_NEAR,
+    GREATER_THAN,
+    GREATER_THAN_OR_EQUAL,
+    INTERNAL_EXPR_EQ,
+    INTERNAL_SCHEMA_ALL_ELEM_MATCH_FROM_INDEX,
+    INTERNAL_SCHEMA_EQ,
+    INTERNAL_SCHEMA_FMOD,
+    INTERNAL_SCHEMA_MATCH_ARRAY_INDEX,
+    INTERNAL_SCHEMA_MAX_ITEMS,
+    INTERNAL_SCHEMA_MAX_LENGTH,
+    INTERNAL_SCHEMA_MIN_ITEMS,
+    INTERNAL_SCHEMA_MIN_LENGTH,
+    INTERNAL_SCHEMA_OBJECT_MATCH,
+    INTERNAL_SCHEMA_TYPE,
+    INTERNAL_SCHEMA_UNIQUE_ITEMS,
+    IN_EXPR,
+    LESS_THAN,
+    LESS_THAN_OR_EQUAL,
+    MOD,
+    NOT_EQUAL,
+    NOT_IN,
+    OPTIONS,
+    REGEX,
+    SIZE,
+    TYPE,
+    WITHIN,
+};
 
 class MatchExpressionParser {
 public:
     /**
-     * caller has to maintain ownership obj
-     * the tree has views (BSONElement) into obj
+     * Features allowed in match expression parsing.
      */
-    static StatusWithMatchExpression parse(const BSONObj& obj,
-                                           const ExtensionsCallback& extensionsCallback,
-                                           const CollatorInterface* collator) {
-        // The 0 initializes the match expression tree depth.
-        return MatchExpressionParser(&extensionsCallback)._parse(obj, collator, 0);
-    }
-
-private:
-    MatchExpressionParser(const ExtensionsCallback* extensionsCallback)
-        : _extensionsCallback(extensionsCallback) {}
+    enum AllowedFeatures {
+        kText = 1,
+        kGeoNear = 1 << 1,
+        kJavascript = 1 << 2,
+        kExpr = 1 << 3,
+        kJSONSchema = 1 << 4,
+    };
+    using AllowedFeatureSet = unsigned long long;
+    static constexpr AllowedFeatureSet kBanAllSpecialFeatures = 0;
+    static constexpr AllowedFeatureSet kAllowAllSpecialFeatures =
+        std::numeric_limits<unsigned long long>::max();
+    static constexpr AllowedFeatureSet kDefaultSpecialFeatures =
+        AllowedFeatures::kExpr | AllowedFeatures::kJSONSchema;
 
     /**
-     * 5 = false
-     * { a : 5 } = false
-     * { $lt : 5 } = true
-     * { $ref: "s", $id: "x" } = false
-     * { $ref: "s", $id: "x", $db: "mydb" } = false
-     * { $ref : "s" } = false (if incomplete DBRef is allowed)
-     * { $id : "x" } = false (if incomplete DBRef is allowed)
-     * { $db : "mydb" } = false (if incomplete DBRef is allowed)
+     * Constant double representation of 2^63.
      */
-    bool _isExpressionDocument(const BSONElement& e, bool allowIncompleteDBRef);
+    static const double kLongLongMaxPlusOneAsDouble;
 
     /**
-     * { $ref: "s", $id: "x" } = true
-     * { $ref : "s" } = true (if incomplete DBRef is allowed)
-     * { $id : "x" } = true (if incomplete DBRef is allowed)
-     * { $db : "x" } = true (if incomplete DBRef is allowed)
+     * Parses PathAcceptingKeyword from 'typeElem'. Returns 'defaultKeyword' if 'typeElem'
+     * doesn't represent a known type, or represents PathAcceptingKeyword::EQUALITY which is not
+     * handled by this parser (see SERVER-19565).
      */
-    bool _isDBRefDocument(const BSONObj& obj, bool allowIncompleteDBRef);
+    static boost::optional<PathAcceptingKeyword> parsePathAcceptingKeyword(
+        BSONElement typeElem, boost::optional<PathAcceptingKeyword> defaultKeyword = boost::none);
 
     /**
-     * Parse 'obj' and return either a MatchExpression or an error.
+     * Caller has to maintain ownership of 'obj'.
+     * The tree has views (BSONElement) into 'obj'.
+     */
+    static StatusWithMatchExpression parse(
+        const BSONObj& obj,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallbackNoop(),
+        AllowedFeatureSet allowedFeatures = kDefaultSpecialFeatures);
+
+    /**
+     * Parses a BSONElement of any numeric type into a positive long long, failing if the value
+     * is any of the following:
      *
-     * 'collator' is the collator that constructed collation-aware MatchExpressions will use.  It
-     * must outlive the returned MatchExpression and any clones made of it.
+     * - NaN.
+     * - Negative.
+     * - A floating point number which is not integral.
+     * - Too large to fit within a 64-bit signed integer.
+     */
+    static StatusWith<long long> parseIntegerElementToNonNegativeLong(BSONElement elem);
+
+    /**
+     * Parses a BSONElement of any numeric type into a long long, failing if the value
+     * is any of the following:
      *
-     * 'level' tracks the current depth of the tree across recursive calls to this
-     * function. Used in order to apply special logic at the top-level and to return an
-     * error if the tree exceeds the maximum allowed depth.
+     * - NaN.
+     * - A floating point number which is not integral.
+     * - Too large in the positive or negative direction to fit within a 64-bit signed integer.
      */
-    StatusWithMatchExpression _parse(const BSONObj& obj,
-                                     const CollatorInterface* collator,
-                                     int level);
+    static StatusWith<long long> parseIntegerElementToLong(BSONElement elem);
 
     /**
-     * parses a field in a sub expression
-     * if the query is { x : { $gt : 5, $lt : 8 } }
-     * e is { $gt : 5, $lt : 8 }
+     * Parses a BSONElement of any numeric type into an integer, failing if the value is:
+     *
+     * - NaN
+     * - a non-integral number
+     * - too large in the positive or negative direction to fit in an int
      */
-    Status _parseSub(const char* name,
-                     const BSONObj& obj,
-                     AndMatchExpression* root,
-                     const CollatorInterface* collator,
-                     int level);
-
-    /**
-     * parses a single field in a sub expression
-     * if the query is { x : { $gt : 5, $lt : 8 } }
-     * e is $gt : 5
-     */
-    StatusWithMatchExpression _parseSubField(const BSONObj& context,
-                                             const AndMatchExpression* andSoFar,
-                                             const char* name,
-                                             const BSONElement& e,
-                                             const CollatorInterface* collator,
-                                             int level);
-
-    StatusWithMatchExpression _parseComparison(const char* name,
-                                               ComparisonMatchExpression* cmp,
-                                               const BSONElement& e,
-                                               const CollatorInterface* collator);
-
-    StatusWithMatchExpression _parseMOD(const char* name, const BSONElement& e);
-
-    StatusWithMatchExpression _parseRegexElement(const char* name, const BSONElement& e);
-
-    StatusWithMatchExpression _parseRegexDocument(const char* name, const BSONObj& doc);
-
-
-    Status _parseInExpression(InMatchExpression* entries,
-                              const BSONObj& theArray,
-                              const CollatorInterface* collator);
-
-    StatusWithMatchExpression _parseType(const char* name, const BSONElement& elt);
-
-    // arrays
-
-    StatusWithMatchExpression _parseElemMatch(const char* name,
-                                              const BSONElement& e,
-                                              const CollatorInterface* collator,
-                                              int level);
-
-    StatusWithMatchExpression _parseAll(const char* name,
-                                        const BSONElement& e,
-                                        const CollatorInterface* collator,
-                                        int level);
-
-    // tree
-
-    Status _parseTreeList(const BSONObj& arr,
-                          ListOfMatchExpression* out,
-                          const CollatorInterface* collator,
-                          int level);
-
-    StatusWithMatchExpression _parseNot(const char* name,
-                                        const BSONElement& e,
-                                        const CollatorInterface* collator,
-                                        int level);
-
-    /**
-     * Parses 'e' into a BitTestMatchExpression.
-     */
-    template <class T>
-    StatusWithMatchExpression _parseBitTest(const char* name, const BSONElement& e);
-
-    /**
-     * Converts 'theArray', a BSONArray of integers, into a std::vector of integers.
-     */
-    StatusWith<std::vector<uint32_t>> _parseBitPositionsArray(const BSONObj& theArray);
-
-    // The maximum allowed depth of a query tree. Just to guard against stack overflow.
-    static const int kMaximumTreeDepth;
-
-    // Performs parsing for the match extensions. We do not own this pointer - it has to live
-    // as long as the parser is active.
-    const ExtensionsCallback* _extensionsCallback;
+    static StatusWith<int> parseIntegerElementToInt(BSONElement elem);
 };
-
-typedef stdx::function<StatusWithMatchExpression(
-    const char* name, int type, const BSONObj& section)>
-    MatchExpressionParserGeoCallback;
-extern MatchExpressionParserGeoCallback expressionParserGeoCallback;
-}
+}  // namespace mongo

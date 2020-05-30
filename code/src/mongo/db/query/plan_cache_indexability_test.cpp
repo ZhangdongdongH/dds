@@ -30,7 +30,7 @@
 
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/plan_cache_indexability.h"
@@ -41,8 +41,9 @@ namespace {
 
 std::unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj,
                                                       const CollatorInterface* collator = nullptr) {
-    StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    expCtx->setCollator(collator);
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj, std::move(expCtx));
     if (!status.isOK()) {
         FAIL(str::stream() << "failed to parse query: " << obj.toString() << ". Reason: "
                            << status.getStatus().toString());
@@ -69,6 +70,12 @@ TEST(PlanCacheIndexabilityTest, SparseIndexSimple) {
     ASSERT_EQ(true, disc.isMatchCompatibleWithIndex(parseMatchExpression(BSON("a" << 1)).get()));
     ASSERT_EQ(false,
               disc.isMatchCompatibleWithIndex(parseMatchExpression(BSON("a" << BSONNULL)).get()));
+    ASSERT_EQ(true,
+              disc.isMatchCompatibleWithIndex(
+                  parseMatchExpression(BSON("a" << BSON("$_internalExprEq" << 1))).get()));
+    ASSERT_EQ(true,
+              disc.isMatchCompatibleWithIndex(
+                  parseMatchExpression(BSON("a" << BSON("$_internalExprEq" << BSONNULL))).get()));
     ASSERT_EQ(true,
               disc.isMatchCompatibleWithIndex(
                   parseMatchExpression(BSON("a" << BSON("$in" << BSON_ARRAY(1)))).get()));
@@ -328,8 +335,13 @@ TEST(PlanCacheIndexabilityTest, DiscriminatorForCollationIndicatesWhenCollations
     ASSERT_EQ(true,
               disc.isMatchCompatibleWithIndex(
                   parseMatchExpression(fromjson("{a: {$in: ['abc', 'xyz']}}"), &collator).get()));
+    ASSERT_EQ(
+        true,
+        disc.isMatchCompatibleWithIndex(
+            parseMatchExpression(fromjson("{a: {$_internalExprEq: 'abc'}}}"), &collator).get()));
 
-    // Expression is not a ComparisonMatchExpression or InMatchExpression.
+    // Expression is not a ComparisonMatchExpression, InternalExprEqMatchExpression or
+    // InMatchExpression.
     ASSERT_EQ(true,
               disc.isMatchCompatibleWithIndex(
                   parseMatchExpression(fromjson("{a: {$exists: true}}"), nullptr).get()));
@@ -347,6 +359,18 @@ TEST(PlanCacheIndexabilityTest, DiscriminatorForCollationIndicatesWhenCollations
     ASSERT_EQ(false,
               disc.isMatchCompatibleWithIndex(
                   parseMatchExpression(fromjson("{a: ['abc', 'xyz']}"), nullptr).get()));
+
+    // Expression is an InternalExprEqMatchExpression with non-matching collator.
+    ASSERT_EQ(true,
+              disc.isMatchCompatibleWithIndex(
+                  parseMatchExpression(fromjson("{a: {$_internalExprEq:  5}}"), nullptr).get()));
+    ASSERT_EQ(false,
+              disc.isMatchCompatibleWithIndex(
+                  parseMatchExpression(fromjson("{a: {$_internalExprEq: 'abc'}}"), nullptr).get()));
+    ASSERT_EQ(
+        false,
+        disc.isMatchCompatibleWithIndex(
+            parseMatchExpression(fromjson("{a: {$_internalExprEq: {b: 'abc'}}}"), nullptr).get()));
 
     // Expression is an InMatchExpression with non-matching collator.
     ASSERT_EQ(true,

@@ -54,9 +54,6 @@ const char kSecondaryOnly[] = "secondary";
 const char kSecondaryPreferred[] = "secondaryPreferred";
 const char kNearest[] = "nearest";
 
-// Avoid overflow errors when converting from seconds to milliseconds
-const auto kMaximalMaxStalenessSecondsValue(durationCount<Seconds>(Milliseconds::max()));
-
 StringData readPreferenceName(ReadPreference pref) {
     switch (pref) {
         case ReadPreference::PrimaryOnly:
@@ -120,7 +117,18 @@ TagSet defaultTagSetForMode(ReadPreference mode) {
 /**
  * Replica set refresh period on the task executor.
  */
-const Milliseconds ReadPreferenceSetting::kMinimalMaxStalenessValue(60000);
+const Seconds ReadPreferenceSetting::kMinimalMaxStalenessValue(90);
+
+const OperationContext::Decoration<ReadPreferenceSetting> ReadPreferenceSetting::get =
+    OperationContext::declareDecoration<ReadPreferenceSetting>();
+
+const BSONObj& ReadPreferenceSetting::secondaryPreferredMetadata() {
+    // This is a static method rather than a static member only because it is used by another TU
+    // during dynamic init.
+    static const auto bson =
+        ReadPreferenceSetting(ReadPreference::SecondaryPreferred).toContainingBSON();
+    return bson;
+}
 
 TagSet::TagSet() : _tags(BSON_ARRAY(BSONObj())) {}
 
@@ -130,11 +138,13 @@ TagSet TagSet::primaryOnly() {
 
 ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref,
                                              TagSet tags,
-                                             Milliseconds maxStalenessMS)
-    : pref(std::move(pref)), tags(std::move(tags)), maxStalenessMS(std::move(maxStalenessMS)) {}
+                                             Seconds maxStalenessSeconds)
+    : pref(std::move(pref)),
+      tags(std::move(tags)),
+      maxStalenessSeconds(std::move(maxStalenessSeconds)) {}
 
-ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, Milliseconds maxStalenessMS)
-    : ReadPreferenceSetting(pref, defaultTagSetForMode(pref), maxStalenessMS) {}
+ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, Seconds maxStalenessSeconds)
+    : ReadPreferenceSetting(pref, defaultTagSetForMode(pref), maxStalenessSeconds) {}
 
 ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, TagSet tags)
     : pref(std::move(pref)), tags(std::move(tags)) {}
@@ -142,7 +152,7 @@ ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref, TagSet tags)
 ReadPreferenceSetting::ReadPreferenceSetting(ReadPreference pref)
     : ReadPreferenceSetting(pref, defaultTagSetForMode(pref)) {}
 
-StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromBSON(const BSONObj& readPrefObj) {
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSONObj& readPrefObj) {
     std::string modeStr;
     auto modeExtractStatus = bsonExtractStringField(readPrefObj, kModeFieldName, &modeStr);
     if (!modeExtractStatus.isOK()) {
@@ -185,74 +195,73 @@ StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromBSON(const BSONObj&
         return tagExtractStatus;
     }
 
-    double maxStalenessSecondsValue;
+    long long maxStalenessSecondsValue;
+    auto maxStalenessSecondsExtractStatus = bsonExtractIntegerFieldWithDefault(
+        readPrefObj, kMaxStalenessSecondsFieldName, 0, &maxStalenessSecondsValue);
 
-    Status maxStalenessSecondsExtractStatus = bsonExtractDoubleField(
-        readPrefObj, kMaxStalenessSecondsFieldName, &maxStalenessSecondsValue);
-
-    if (maxStalenessSecondsExtractStatus == ErrorCodes::NoSuchKey) {
-        return ReadPreferenceSetting(mode, tags);
-    } else if (!maxStalenessSecondsExtractStatus.isOK()) {
+    if (!maxStalenessSecondsExtractStatus.isOK()) {
         return maxStalenessSecondsExtractStatus;
     }
 
-    if (maxStalenessSecondsValue < 0.0) {
-        return {ErrorCodes::BadValue,
-                str::stream() << kMaxStalenessSecondsFieldName << " value can not be negative"};
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue < 0) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " must be a non-negative integer");
     }
 
-    if (maxStalenessSecondsValue > kMaximalMaxStalenessSecondsValue) {
-        return {ErrorCodes::MaxStalenessOutOfRange,
-                str::stream() << kMaxStalenessSecondsFieldName << " value can not exceed "
-                              << kMaximalMaxStalenessSecondsValue};
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue >= Seconds::max().count()) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName << " value can not exceed "
+                                    << Seconds::max().count());
     }
 
-    if (maxStalenessSecondsValue == 0.0) {
-        return ReadPreferenceSetting(mode, tags);
+    if (maxStalenessSecondsValue && maxStalenessSecondsValue < kMinimalMaxStalenessValue.count()) {
+        return Status(ErrorCodes::MaxStalenessOutOfRange,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " value can not be less than "
+                                    << kMinimalMaxStalenessValue.count());
     }
 
-    // Use a lambda to do the double seconds to integer milliseconds conversion in order to
-    // encapsulate the usage of helper variables
-    const Milliseconds requestedMaxStalenessMS = [maxStalenessSecondsValue] {
-        double integerPart;
-        const double fractionalPart = std::modf(maxStalenessSecondsValue, &integerPart);
-
-        return Seconds(static_cast<long long>(integerPart)) +
-            Milliseconds(static_cast<long long>(fractionalPart *
-                                                durationCount<Milliseconds>(Seconds(1))));
-    }();
-
-    if (requestedMaxStalenessMS < kMinimalMaxStalenessValue) {
-        return {ErrorCodes::MaxStalenessOutOfRange,
-                str::stream() << kMaxStalenessSecondsFieldName << " value can not be less than "
-                              << kMinimalMaxStalenessValue};
+    if ((mode == ReadPreference::PrimaryOnly) && maxStalenessSecondsValue) {
+        return Status(ErrorCodes::BadValue,
+                      str::stream() << kMaxStalenessSecondsFieldName
+                                    << " can not be set for the primary mode");
     }
 
-    if (mode == ReadPreference::PrimaryOnly) {
-        return {ErrorCodes::BadValue,
-                str::stream() << kMaxStalenessSecondsFieldName
-                              << " can not be set for the primary mode"};
-    }
-
-    return ReadPreferenceSetting(mode, tags, requestedMaxStalenessMS);
+    return ReadPreferenceSetting(mode, tags, Seconds(maxStalenessSecondsValue));
 }
 
-BSONObj ReadPreferenceSetting::toBSON() const {
-    BSONObjBuilder bob;
-    bob.append(kModeFieldName, readPreferenceName(pref));
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromInnerBSON(const BSONElement& elem) {
+    if (elem.type() != mongo::Object) {
+        return Status(ErrorCodes::TypeMismatch,
+                      str::stream() << "$readPreference has incorrect type: expected "
+                                    << mongo::Object
+                                    << " but got "
+                                    << elem.type());
+    }
+    return fromInnerBSON(elem.Obj());
+}
+
+StatusWith<ReadPreferenceSetting> ReadPreferenceSetting::fromContainingBSON(
+    const BSONObj& obj, ReadPreference defaultReadPref) {
+    if (auto elem = obj["$readPreference"]) {
+        return fromInnerBSON(elem);
+    }
+    return ReadPreferenceSetting(defaultReadPref);
+}
+
+void ReadPreferenceSetting::toInnerBSON(BSONObjBuilder* bob) const {
+    bob->append(kModeFieldName, readPreferenceName(pref));
     if (tags != defaultTagSetForMode(pref)) {
-        bob.append(kTagsFieldName, tags.getTagBSON());
+        bob->append(kTagsFieldName, tags.getTagBSON());
     }
-    if (maxStalenessMS.count() > 0) {
-        bob.append(kMaxStalenessSecondsFieldName,
-                   static_cast<double>(maxStalenessMS.count()) /
-                       durationCount<Milliseconds>(Seconds(1)));
+    if (maxStalenessSeconds.count() > 0) {
+        bob->append(kMaxStalenessSecondsFieldName, maxStalenessSeconds.count());
     }
-    return bob.obj();
 }
 
 std::string ReadPreferenceSetting::toString() const {
-    return toBSON().toString();
+    return toInnerBSON().toString();
 }
 
 }  // namespace mongo

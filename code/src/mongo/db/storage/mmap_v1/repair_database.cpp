@@ -41,6 +41,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/catalog/index_create.h"
+#include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/index/index_descriptor.h"
@@ -49,6 +50,7 @@
 #include "mongo/db/storage/mmap_v1/mmap.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_database_catalog_entry.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
+#include "mongo/db/storage/mmap_v1/repair_database_interface.h"
 #include "mongo/util/file.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
@@ -236,11 +238,11 @@ void _applyOpToDataFiles(const string& database,
 
 class RepairFileDeleter {
 public:
-    RepairFileDeleter(OperationContext* txn,
+    RepairFileDeleter(OperationContext* opCtx,
                       const string& dbName,
                       const string& pathString,
                       const Path& path)
-        : _txn(txn), _dbName(dbName), _pathString(pathString), _path(path), _success(false) {}
+        : _opCtx(opCtx), _dbName(dbName), _pathString(pathString), _path(path), _success(false) {}
 
     ~RepairFileDeleter() {
         if (_success)
@@ -250,10 +252,10 @@ public:
               << "db: " << _dbName << " path: " << _pathString;
 
         try {
-            getDur().syncDataAndTruncateJournal(_txn);
+            getDur().syncDataAndTruncateJournal(_opCtx);
 
             // need both in case journaling is disabled
-            MongoFile::flushAll(true);
+            MongoFile::flushAll(_opCtx, true);
 
             MONGO_ASSERT_ON_EXCEPTION(boost::filesystem::remove_all(_path));
         } catch (DBException& e) {
@@ -268,21 +270,21 @@ public:
     }
 
 private:
-    OperationContext* _txn;
+    OperationContext* _opCtx;
     string _dbName;
     string _pathString;
     Path _path;
     bool _success;
 };
 
-Status MMAPV1Engine::repairDatabase(OperationContext* txn,
+Status MMAPV1Engine::repairDatabase(OperationContext* opCtx,
                                     const std::string& dbName,
                                     bool preserveClonedFilesOnFailure,
                                     bool backupOriginalFiles) {
     unique_ptr<RepairFileDeleter> repairFileDeleter;
 
     // Must be done before and after repair
-    getDur().syncDataAndTruncateJournal(txn);
+    getDur().syncDataAndTruncateJournal(opCtx);
 
     intmax_t totalSize = dbSize(dbName);
     intmax_t freeSize = File::freeSpace(storageGlobalParams.repairpath);
@@ -296,7 +298,7 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
                                     << " (bytes)");
     }
 
-    txn->checkForInterrupt();
+    opCtx->checkForInterrupt();
 
     Path reservedPath = uniqueReservedPath(
         (preserveClonedFilesOnFailure || backupOriginalFiles) ? "backup" : "_tmp");
@@ -307,10 +309,10 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
 
     if (!preserveClonedFilesOnFailure)
         repairFileDeleter.reset(
-            new RepairFileDeleter(txn, dbName, reservedPathString, reservedPath));
+            new RepairFileDeleter(opCtx, dbName, reservedPathString, reservedPath));
 
     {
-        Database* originalDatabase = dbHolder().openDb(txn, dbName);
+        Database* originalDatabase = DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName);
         if (originalDatabase == NULL) {
             return Status(ErrorCodes::NamespaceNotFound, "database does not exist to repair");
         }
@@ -319,27 +321,31 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
         unique_ptr<Database> tempDatabase;
 
         // Must call this before MMAPV1DatabaseCatalogEntry's destructor closes the DB files
-        ON_BLOCK_EXIT(&dur::DurableInterface::syncDataAndTruncateJournal, &getDur(), txn);
+        ON_BLOCK_EXIT([&dbEntry, &opCtx, &tempDatabase] {
+            getDur().syncDataAndTruncateJournal(opCtx);
+            UUIDCatalog::get(opCtx).onCloseDatabase(tempDatabase.get());
+            dbEntry->close(opCtx);
+        });
 
         {
             dbEntry.reset(new MMAPV1DatabaseCatalogEntry(
-                txn,
+                opCtx,
                 dbName,
                 reservedPathString,
                 storageGlobalParams.directoryperdb,
                 true,
                 _extentManagerFactory->create(
                     dbName, reservedPathString, storageGlobalParams.directoryperdb)));
-            tempDatabase.reset(new Database(txn, dbName, dbEntry.get()));
+            tempDatabase.reset(new Database(opCtx, dbName, dbEntry.get()));
         }
 
         map<string, CollectionOptions> namespacesToCopy;
         {
-            string ns = dbName + ".system.namespaces";
-            OldClientContext ctx(txn, ns);
-            Collection* coll = originalDatabase->getCollection(ns);
+            NamespaceString nss(dbName, "system.namespaces");
+            OldClientContext ctx(opCtx, nss.ns());
+            Collection* coll = originalDatabase->getCollection(opCtx, nss);
             if (coll) {
-                auto cursor = coll->getCursor(txn);
+                auto cursor = coll->getCursor(opCtx);
                 while (auto record = cursor->next()) {
                     BSONObj obj = record->data.releaseToBson();
 
@@ -358,7 +364,8 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
 
                     CollectionOptions options;
                     if (obj["options"].isABSONObj()) {
-                        Status status = options.parse(obj["options"].Obj());
+                        Status status =
+                            options.parse(obj["options"].Obj(), CollectionOptions::parseForStorage);
                         if (!status.isOK())
                             return status;
                     }
@@ -371,27 +378,31 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
              i != namespacesToCopy.end();
              ++i) {
             string ns = i->first;
+            NamespaceString nss(ns);
             CollectionOptions options = i->second;
 
             Collection* tempCollection = NULL;
             {
-                WriteUnitOfWork wunit(txn);
-                tempCollection = tempDatabase->createCollection(txn, ns, options, false);
+                WriteUnitOfWork wunit(opCtx);
+                if (options.uuid) {
+                    UUIDCatalog::get(opCtx).onDropCollection(opCtx, options.uuid.get());
+                }
+                tempCollection = tempDatabase->createCollection(opCtx, ns, options, false);
                 wunit.commit();
             }
 
-            OldClientContext readContext(txn, ns, originalDatabase);
-            Collection* originalCollection = originalDatabase->getCollection(ns);
+            OldClientContext readContext(opCtx, ns, originalDatabase);
+            Collection* originalCollection = originalDatabase->getCollection(opCtx, nss);
             invariant(originalCollection);
 
             // data
 
             // TODO SERVER-14812 add a mode that drops duplicates rather than failing
-            MultiIndexBlock indexer(txn, tempCollection);
+            MultiIndexBlock indexer(opCtx, tempCollection);
             {
                 vector<BSONObj> indexes;
                 IndexCatalog::IndexIterator ii =
-                    originalCollection->getIndexCatalog()->getIndexIterator(txn, false);
+                    originalCollection->getIndexCatalog()->getIndexIterator(opCtx, false);
                 while (ii.more()) {
                     IndexDescriptor* desc = ii.next();
                     indexes.push_back(desc->infoObj());
@@ -404,17 +415,17 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
             }
 
             std::vector<MultiIndexBlock*> indexers{&indexer};
-            auto cursor = originalCollection->getCursor(txn);
+            auto cursor = originalCollection->getCursor(opCtx);
             while (auto record = cursor->next()) {
                 BSONObj doc = record->data.releaseToBson();
 
-                WriteUnitOfWork wunit(txn);
-                Status status = tempCollection->insertDocument(txn, doc, indexers, false);
+                WriteUnitOfWork wunit(opCtx);
+                Status status = tempCollection->insertDocument(opCtx, doc, indexers, false);
                 if (!status.isOK())
                     return status;
 
                 wunit.commit();
-                txn->checkForInterrupt();
+                opCtx->checkForInterrupt();
             }
 
             Status status = indexer.doneInserting();
@@ -422,18 +433,18 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
                 return status;
 
             {
-                WriteUnitOfWork wunit(txn);
+                WriteUnitOfWork wunit(opCtx);
                 indexer.commit();
                 wunit.commit();
             }
         }
 
-        getDur().syncDataAndTruncateJournal(txn);
+        getDur().syncDataAndTruncateJournal(opCtx);
 
         // need both in case journaling is disabled
-        MongoFile::flushAll(true);
+        MongoFile::flushAll(opCtx, true);
 
-        txn->checkForInterrupt();
+        opCtx->checkForInterrupt();
     }
 
     // at this point if we abort, we don't want to delete new files
@@ -443,7 +454,7 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
         repairFileDeleter->success();
 
     // Close the database so we can rename/delete the original data files
-    dbHolder().close(txn, dbName);
+    DatabaseHolder::getDatabaseHolder().close(opCtx, dbName, "database closed for repair");
 
     if (backupOriginalFiles) {
         _renameForBackup(dbName, reservedPath);
@@ -469,8 +480,20 @@ Status MMAPV1Engine::repairDatabase(OperationContext* txn,
     }
 
     // Reopen the database so it's discoverable
-    dbHolder().openDb(txn, dbName);
+    DatabaseHolder::getDatabaseHolder().openDb(opCtx, dbName);
 
+    return Status::OK();
+}
+
+MONGO_INITIALIZER(RepairDatabaseMMapV1)(InitializerContext* context) {
+    setRepairDatabaseMmapv1Impl([](StorageEngine* engine,
+                                   OperationContext* opCtx,
+                                   const std::string& dbName,
+                                   bool preserveClonedFilesOnFailure,
+                                   bool backupOriginalFiles) {
+        return static_cast<MMAPV1Engine*>(engine)->repairDatabase(
+            opCtx, dbName, preserveClonedFilesOnFailure, backupOriginalFiles);
+    });
     return Status::OK();
 }
 }

@@ -25,6 +25,8 @@
  *    then also delete it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
 #include "mongo/dbtests/mock/mock_dbclient_connection.h"
 
 #include "mongo/dbtests/mock/mock_dbclient_cursor.h"
@@ -58,38 +60,19 @@ bool MockDBClientConnection::connect(const char* hostName,
     return false;
 }
 
-bool MockDBClientConnection::runCommand(const string& dbname,
-                                        const BSONObj& cmdObj,
-                                        BSONObj& info,
-                                        int options) {
+std::pair<rpc::UniqueReply, DBClientBase*> MockDBClientConnection::runCommandWithTarget(
+    OpMsgRequest request) {
+
     checkConnection();
 
     try {
-        return _remoteServer->runCommand(_remoteServerInstanceID, dbname, cmdObj, info, options);
-    } catch (const mongo::SocketException&) {
+        return {_remoteServer->runCommand(_remoteServerInstanceID, request), this};
+    } catch (const mongo::DBException&) {
         _isFailed = true;
         throw;
     }
-
-    return false;
 }
 
-rpc::UniqueReply MockDBClientConnection::runCommandWithMetadata(StringData database,
-                                                                StringData command,
-                                                                const BSONObj& metadata,
-                                                                const BSONObj& commandArgs) {
-    checkConnection();
-
-    try {
-        return _remoteServer->runCommandWithMetadata(
-            _remoteServerInstanceID, database, command, metadata, commandArgs);
-    } catch (const mongo::SocketException&) {
-        _isFailed = true;
-        throw;
-    }
-
-    MONGO_UNREACHABLE;
-}
 
 std::unique_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const string& ns,
                                                                      mongo::Query query,
@@ -113,7 +96,7 @@ std::unique_ptr<mongo::DBClientCursor> MockDBClientConnection::query(const strin
         std::unique_ptr<mongo::DBClientCursor> cursor;
         cursor.reset(new MockDBClientCursor(this, result));
         return cursor;
-    } catch (const mongo::SocketException&) {
+    } catch (const mongo::DBException&) {
         _isFailed = true;
         throw;
     }
@@ -175,7 +158,7 @@ void MockDBClientConnection::remove(const string& ns, Query query, int flags) {
     _remoteServer->remove(ns, query, flags);
 }
 
-void MockDBClientConnection::killCursor(long long cursorID) {
+void MockDBClientConnection::killCursor(const NamespaceString& ns, long long cursorID) {
     verify(false);  // unimplemented
 }
 

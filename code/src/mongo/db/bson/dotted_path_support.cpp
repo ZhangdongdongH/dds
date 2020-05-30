@@ -86,7 +86,6 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
                                                  depth + 1,
                                                  arrayComponents);
                 } else {
-                    size_t nArrElems = 0;
                     BSONObjIterator i(e.embeddedObject());
                     while (i.more()) {
                         BSONElement e2 = i.next();
@@ -97,9 +96,8 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
                                                          expandArrayOnTrailingField,
                                                          depth + 1,
                                                          arrayComponents);
-                        ++nArrElems;
                     }
-                    if (arrayComponents && nArrElems > 1) {
+                    if (arrayComponents) {
                         arrayComponents->insert(depth);
                     }
                 }
@@ -109,13 +107,11 @@ void _extractAllElementsAlongPath(const BSONObj& obj,
         }
     } else {
         if (e.type() == Array && expandArrayOnTrailingField) {
-            size_t nArrElems = 0;
             BSONObjIterator i(e.embeddedObject());
             while (i.more()) {
                 elements.insert(i.next());
-                ++nArrElems;
             }
-            if (arrayComponents && nArrElems > 1) {
+            if (arrayComponents) {
                 arrayComponents->insert(depth);
             }
         } else {
@@ -176,7 +172,7 @@ void extractAllElementsAlongPath(const BSONObj& obj,
 
 void extractAllElementsAlongPath(const BSONObj& obj,
                                  StringData path,
-                                 BSONElementMSet& elements,
+                                 BSONElementMultiSet& elements,
                                  bool expandArrayOnTrailingField,
                                  std::set<size_t>* arrayComponents) {
     const size_t initialDepth = 0;
@@ -194,11 +190,13 @@ BSONObj extractElementsBasedOnTemplate(const BSONObj& obj,
         BSONElement e = i.next();
         if (e.eoo())
             break;
-        BSONElement x = extractElementAtPath(obj, e.fieldName());
+
+        const auto name = e.fieldNameStringData();
+        BSONElement x = extractElementAtPath(obj, name);
         if (!x.eoo())
-            b.appendAs(x, e.fieldName());
+            b.appendAs(x, name);
         else if (useNullIfMissing)
-            b.appendNull(e.fieldName());
+            b.appendNull(name);
     }
     return b.obj();
 }
@@ -220,12 +218,13 @@ int compareObjectsAccordingToSort(const BSONObj& firstObj,
         if (f.eoo())
             return 0;
 
-        BSONElement l = assumeDottedPaths ? extractElementAtPath(firstObj, f.fieldName())
-                                          : firstObj.getField(f.fieldName());
+        const auto name = f.fieldNameStringData();
+        BSONElement l =
+            assumeDottedPaths ? extractElementAtPath(firstObj, name) : firstObj.getField(name);
         if (l.eoo())
             l = kNullElt;
-        BSONElement r = assumeDottedPaths ? extractElementAtPath(secondObj, f.fieldName())
-                                          : secondObj.getField(f.fieldName());
+        BSONElement r =
+            assumeDottedPaths ? extractElementAtPath(secondObj, name) : secondObj.getField(name);
         if (r.eoo())
             r = kNullElt;
 

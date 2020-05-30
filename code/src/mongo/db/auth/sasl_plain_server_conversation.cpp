@@ -26,32 +26,62 @@
  *    it in the license file.
  */
 
+#include "mongo/platform/basic.h"
+
+#include <string>
+
 #include "mongo/db/auth/sasl_plain_server_conversation.h"
 
-#include "mongo/base/secure_allocator.h"
+#include "mongo/base/init.h"
+#include "mongo/base/status.h"
+#include "mongo/base/string_data.h"
 #include "mongo/crypto/mechanism_scram.h"
-#include "mongo/db/auth/sasl_authentication_session.h"
+#include "mongo/db/auth/sasl_mechanism_registry.h"
+#include "mongo/db/auth/user.h"
 #include "mongo/util/base64.h"
 #include "mongo/util/password_digest.h"
 #include "mongo/util/text.h"
 
 namespace mongo {
+namespace {
+template <typename HashBlock>
+StatusWith<bool> trySCRAM(const User::CredentialData& credentials, StringData pwd) {
+    const auto scram = credentials.scram<HashBlock>();
+    if (!scram.isValid()) {
+        // No stored credentials available.
+        return false;
+    }
 
-SaslPLAINServerConversation::SaslPLAINServerConversation(SaslAuthenticationSession* saslAuthSession)
-    : SaslServerConversation(saslAuthSession) {}
+    const auto decodedSalt = base64::decode(scram.salt);
+    scram::Secrets<HashBlock> secrets(scram::Presecrets<HashBlock>(
+        pwd.toString(),
+        std::vector<std::uint8_t>(reinterpret_cast<const std::uint8_t*>(decodedSalt.c_str()),
+                                  reinterpret_cast<const std::uint8_t*>(decodedSalt.c_str()) +
+                                      decodedSalt.size()),
+        scram.iterationCount));
+    if (scram.storedKey != base64::encode(reinterpret_cast<const char*>(secrets.storedKey().data()),
+                                          secrets.storedKey().size())) {
+        return Status(ErrorCodes::AuthenticationFailed,
+                      str::stream() << "Incorrect user name or password");
+    }
 
-SaslPLAINServerConversation::~SaslPLAINServerConversation(){};
+    return true;
+}
+}  // namespace
 
-StatusWith<bool> SaslPLAINServerConversation::step(StringData inputData, std::string* outputData) {
-    if (_saslAuthSession->getAuthenticationDatabase() == "$external") {
+StatusWith<std::tuple<bool, std::string>> SASLPlainServerMechanism::stepImpl(
+    OperationContext* opCtx, StringData inputData) {
+    if (_authenticationDatabase == "$external") {
         return Status(ErrorCodes::AuthenticationFailed,
                       "PLAIN mechanism must be used with internal users");
     }
 
+    AuthorizationManager* authManager = AuthorizationManager::get(opCtx->getServiceContext());
+
     // Expecting user input on the form: [authz-id]\0authn-id\0pwd
     std::string input = inputData.toString();
 
-    SecureString pwd = "";
+    SecureAllocatorAuthDomain::SecureString pwd = "";
     try {
         size_t firstNull = inputData.find('\0');
         if (firstNull == std::string::npos) {
@@ -69,72 +99,65 @@ StatusWith<bool> SaslPLAINServerConversation::step(StringData inputData, std::st
         }
 
         std::string authorizationIdentity = input.substr(0, firstNull);
-        _user = input.substr(firstNull + 1, (secondNull - firstNull) - 1);
-        if (_user.empty()) {
+        ServerMechanismBase::_principalName =
+            input.substr(firstNull + 1, (secondNull - firstNull) - 1);
+        if (ServerMechanismBase::_principalName.empty()) {
             return Status(ErrorCodes::AuthenticationFailed,
                           str::stream()
                               << "Incorrectly formatted PLAIN client message, empty username");
-        } else if (!authorizationIdentity.empty() && authorizationIdentity != _user) {
+        } else if (!authorizationIdentity.empty() &&
+                   authorizationIdentity != ServerMechanismBase::_principalName) {
             return Status(ErrorCodes::AuthenticationFailed,
                           str::stream()
                               << "SASL authorization identity must match authentication identity");
         }
-        pwd = SecureString(input.substr(secondNull + 1).c_str());
+        pwd = SecureAllocatorAuthDomain::SecureString(input.substr(secondNull + 1).c_str());
         if (pwd->empty()) {
             return Status(ErrorCodes::AuthenticationFailed,
                           str::stream()
                               << "Incorrectly formatted PLAIN client message, empty password");
         }
-    } catch (std::out_of_range& exception) {
+    } catch (std::out_of_range&) {
         return Status(ErrorCodes::AuthenticationFailed,
                       mongoutils::str::stream() << "Incorrectly formatted PLAIN client message");
     }
 
     User* userObj;
     // The authentication database is also the source database for the user.
-    Status status =
-        _saslAuthSession->getAuthorizationSession()->getAuthorizationManager().acquireUser(
-            _saslAuthSession->getOpCtxt(),
-            UserName(_user, _saslAuthSession->getAuthenticationDatabase()),
-            &userObj);
+    Status status = authManager->acquireUser(
+        opCtx, UserName(ServerMechanismBase::_principalName, _authenticationDatabase), &userObj);
 
     if (!status.isOK()) {
-        return StatusWith<bool>(status);
+        return status;
     }
 
-    const User::CredentialData creds = userObj->getCredentials();
-    _saslAuthSession->getAuthorizationSession()->getAuthorizationManager().releaseUser(userObj);
+    const auto creds = userObj->getCredentials();
+    authManager->releaseUser(userObj);
 
-    std::string authDigest = createPasswordDigest(_user, pwd->c_str());
-
-    if (!creds.password.empty()) {
-        // Handle schemaVersion26Final (MONGODB-CR/SCRAM mixed mode)
-        if (authDigest != creds.password) {
-            return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
-                                    mongoutils::str::stream() << "Incorrect user name or password");
-        }
-    } else {
-        // Handle schemaVersion28SCRAM (SCRAM only mode)
-        unsigned char storedKey[scram::hashSize];
-        unsigned char serverKey[scram::hashSize];
-
-        scram::generateSecrets(
-            authDigest,
-            reinterpret_cast<const unsigned char*>(base64::decode(creds.scram.salt).c_str()),
-            16,
-            creds.scram.iterationCount,
-            storedKey,
-            serverKey);
-        if (creds.scram.storedKey !=
-            base64::encode(reinterpret_cast<const char*>(storedKey), scram::hashSize)) {
-            return StatusWith<bool>(ErrorCodes::AuthenticationFailed,
-                                    mongoutils::str::stream() << "Incorrect user name or password");
-        }
+    const auto sha256Status = trySCRAM<SHA256Block>(creds, pwd->c_str());
+    if (!sha256Status.isOK()) {
+        return sha256Status.getStatus();
+    }
+    if (sha256Status.getValue()) {
+        return std::make_tuple(true, std::string());
     }
 
-    *outputData = "";
+    const auto authDigest = createPasswordDigest(ServerMechanismBase::_principalName, pwd->c_str());
+    const auto sha1Status = trySCRAM<SHA1Block>(creds, authDigest);
+    if (!sha1Status.isOK()) {
+        return sha1Status.getStatus();
+    }
+    if (sha1Status.getValue()) {
+        return std::make_tuple(true, std::string());
+    }
 
-    return StatusWith<bool>(true);
+    return Status(ErrorCodes::AuthenticationFailed, str::stream() << "No credentials available.");
+
+
+    return std::make_tuple(true, std::string());
 }
 
+namespace {
+GlobalSASLMechanismRegisterer<PLAINServerFactory> plainRegisterer;
+}  // namespace
 }  // namespace mongo

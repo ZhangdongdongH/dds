@@ -34,9 +34,9 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/db/operation_context.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/service_context.h"
-#include "mongo/s/migration_secondary_throttle_options.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -50,8 +50,8 @@ const WriteConcernOptions kWriteConcernLocal(1,
                                              WriteConcernOptions::SyncMode::NONE,
                                              WriteConcernOptions::kNoTimeout);
 
-WriteConcernOptions getDefaultWriteConcernForMigration() {
-    repl::ReplicationCoordinator* replCoordinator = repl::getGlobalReplicationCoordinator();
+WriteConcernOptions getDefaultWriteConcernForMigration(OperationContext* opCtx) {
+    repl::ReplicationCoordinator* replCoordinator = repl::ReplicationCoordinator::get(opCtx);
     if (replCoordinator->getReplicationMode() == mongo::repl::ReplicationCoordinator::modeReplSet) {
         Status status =
             replCoordinator->checkIfWriteConcernCanBeSatisfied(kDefaultWriteConcernForMigration);
@@ -66,10 +66,10 @@ WriteConcernOptions getDefaultWriteConcernForMigration() {
 }  // namespace
 
 StatusWith<WriteConcernOptions> ChunkMoveWriteConcernOptions::getEffectiveWriteConcern(
-    OperationContext* txn, const MigrationSecondaryThrottleOptions& options) {
+    OperationContext* opCtx, const MigrationSecondaryThrottleOptions& options) {
     auto secondaryThrottle = options.getSecondaryThrottle();
     if (secondaryThrottle == MigrationSecondaryThrottleOptions::kDefault) {
-        if (txn->getServiceContext()->getGlobalStorageEngine()->supportsDocLocking()) {
+        if (opCtx->getServiceContext()->getStorageEngine()->supportsDocLocking()) {
             secondaryThrottle = MigrationSecondaryThrottleOptions::kOff;
         } else {
             secondaryThrottle = MigrationSecondaryThrottleOptions::kOn;
@@ -85,22 +85,14 @@ StatusWith<WriteConcernOptions> ChunkMoveWriteConcernOptions::getEffectiveWriteC
     if (options.isWriteConcernSpecified()) {
         writeConcern = options.getWriteConcern();
 
-        repl::ReplicationCoordinator* replCoordinator = repl::getGlobalReplicationCoordinator();
-
-        if (replCoordinator->getReplicationMode() ==
-                repl::ReplicationCoordinator::modeMasterSlave &&
-            writeConcern.shouldWaitForOtherNodes()) {
-            warning() << "moveChunk cannot check if secondary throttle setting "
-                      << writeConcern.toBSON()
-                      << " can be enforced in a master slave configuration";
-        }
+        repl::ReplicationCoordinator* replCoordinator = repl::ReplicationCoordinator::get(opCtx);
 
         Status status = replCoordinator->checkIfWriteConcernCanBeSatisfied(writeConcern);
         if (!status.isOK() && status != ErrorCodes::NoReplicationEnabled) {
             return status;
         }
     } else {
-        writeConcern = getDefaultWriteConcernForMigration();
+        writeConcern = getDefaultWriteConcernForMigration(opCtx);
     }
 
     if (writeConcern.shouldWaitForOtherNodes() &&

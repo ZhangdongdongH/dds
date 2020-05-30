@@ -17,7 +17,6 @@ ToolTest.prototype.startDB = function(coll) {
     var options = {
         port: this.port,
         dbpath: this.dbpath,
-        nohttpinterface: "",
         noprealloc: "",
         smallfiles: "",
         bind_ip: "127.0.0.1"
@@ -69,110 +68,6 @@ ToolTest.prototype.runTool = function() {
     return runMongoProgram.apply(null, a);
 };
 
-ReplTest = function(name, ports) {
-    this.name = name;
-    this.ports = ports || allocatePorts(2);
-};
-
-ReplTest.prototype.getPort = function(master) {
-    if (master)
-        return this.ports[0];
-    return this.ports[1];
-};
-
-ReplTest.prototype.getPath = function(master) {
-    var p = MongoRunner.dataPath + this.name + "-";
-    if (master)
-        p += "master";
-    else
-        p += "slave";
-    return p;
-};
-
-ReplTest.prototype.getOptions = function(master, extra, putBinaryFirst, norepl) {
-
-    if (!extra)
-        extra = {};
-
-    if (!extra.oplogSize)
-        extra.oplogSize = "40";
-
-    var a = [];
-    if (putBinaryFirst)
-        a.push("mongod");
-    a.push("--nohttpinterface", "--noprealloc", "--bind_ip", "127.0.0.1", "--smallfiles");
-
-    a.push("--port");
-    a.push(this.getPort(master));
-
-    a.push("--dbpath");
-    a.push(this.getPath(master));
-
-    if (jsTestOptions().noJournal && !('journal' in extra))
-        a.push("--nojournal");
-    if (jsTestOptions().noJournalPrealloc)
-        a.push("--nopreallocj");
-    if (jsTestOptions().keyFile) {
-        a.push("--keyFile");
-        a.push(jsTestOptions().keyFile);
-    }
-
-    if (!norepl) {
-        if (master) {
-            a.push("--master");
-        } else {
-            a.push("--slave");
-            a.push("--source");
-            a.push("127.0.0.1:" + this.ports[0]);
-        }
-    }
-
-    for (var k in extra) {
-        var v = extra[k];
-        if (k in MongoRunner.logicalOptions)
-            continue;
-        a.push("--" + k);
-        if (v != null && v !== "")
-            a.push(v);
-    }
-
-    return a;
-};
-
-ReplTest.prototype.start = function(master, options, restart, norepl) {
-    var lockFile = this.getPath(master) + "/mongod.lock";
-    removeFile(lockFile);
-    var o = this.getOptions(master, options, restart, norepl);
-
-    if (restart) {
-        var conn = startMongoProgram.apply(null, o);
-        if (!master) {
-            conn.setSlaveOk();
-        }
-        return conn;
-    } else {
-        var conn = _startMongod.apply(null, o);
-        if (jsTestOptions().keyFile || jsTestOptions().auth) {
-            jsTest.authenticate(conn);
-        }
-        if (!master) {
-            conn.setSlaveOk();
-        }
-        return conn;
-    }
-};
-
-ReplTest.prototype.stop = function(master, signal) {
-    if (arguments.length == 0) {
-        this.stop(true);
-        this.stop(false);
-        return;
-    }
-
-    print('*** ' + this.name + " completed successfully ***");
-    return _stopMongoProgram(this.getPort(master), signal || 15);
-};
-
 /**
  * Returns a port number that has not been given out to any other caller from the same mongo shell.
  */
@@ -210,14 +105,25 @@ allocatePorts = function(numPorts) {
 };
 
 function startParallelShell(jsCode, port, noConnect) {
-    var args = ["mongo"];
+    var shellPath = MongoRunner.mongoShellPath;
+    var args = [shellPath];
 
     if (typeof db == "object") {
-        var hostAndPort = db.getMongo().host.split(':');
-        var host = hostAndPort[0];
-        args.push("--host", host);
-        if (!port && hostAndPort.length >= 2) {
-            var port = hostAndPort[1];
+        if (!port) {
+            // If no port override specified, just passthrough connect string.
+            args.push("--host", db.getMongo().host);
+        } else {
+            // Strip port numbers from connect string.
+            const uri = new MongoURI(db.getMongo().host);
+            var connString = uri.servers
+                                 .map(function(server) {
+                                     return server.host;
+                                 })
+                                 .join(',');
+            if (uri.setName.length > 0) {
+                connString = uri.setName + '/' + connString;
+            }
+            args.push("--host", connString);
         }
     }
     if (port) {

@@ -1,5 +1,3 @@
-// mmap_posix.cpp
-
 /*    Copyright 2009 10gen Inc.
  *
  *    This program is free software: you can redistribute it and/or  modify
@@ -52,27 +50,49 @@ using std::vector;
 
 using namespace mongoutils;
 
+namespace mongo {
+
+namespace {
+void printMemInfo() {
+    LogstreamBuilder out = log();
+    out << "mem info: ";
+
+    ProcessInfo pi;
+    if (!pi.supported()) {
+        out << " not supported";
+        return;
+    }
+
+    out << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize()
+        << " mapped: " << MemoryMappedFile::totalMappedLengthInMB();
+}
+}  // namespace
+}  // namespace mongo
+
+std::size_t mongo::getMinOSPageSizeBytes() {
+    static const std::size_t cachedSize = [] {
+        std::size_t minOSPageSizeBytes = sysconf(_SC_PAGESIZE);
+        minOSPageSizeBytesTest(minOSPageSizeBytes);
+        return minOSPageSizeBytes;
+    }();
+    return cachedSize;
+}
 
 namespace mongo {
-static size_t fetchMinOSPageSizeBytes() {
-    size_t minOSPageSizeBytes = sysconf(_SC_PAGESIZE);
-    minOSPageSizeBytesTest(minOSPageSizeBytes);
-    return minOSPageSizeBytes;
-}
-const size_t g_minOSPageSizeBytes = fetchMinOSPageSizeBytes();
 
-
-void MemoryMappedFile::close() {
-    LockMongoFilesShared::assertExclusivelyLocked();
+void MemoryMappedFile::close(OperationContext* opCtx) {
     for (vector<void*>::iterator i = views.begin(); i != views.end(); i++) {
         munmap(*i, len);
     }
     views.clear();
+    totalMappedLength.fetchAndSubtract(len);
+    len = 0;
 
-    if (fd)
+    if (fd) {
         ::close(fd);
-    fd = 0;
-    destroyed();  // cleans up from the master list of mmaps
+        fd = 0;
+    }
+    destroyed(opCtx);  // cleans up from the master list of mmaps
 }
 
 #ifndef O_NOATIME
@@ -85,21 +105,21 @@ void MemoryMappedFile::close() {
 
 namespace {
 void* _pageAlign(void* p) {
-    return (void*)((int64_t)p & ~(g_minOSPageSizeBytes - 1));
+    return (void*)((int64_t)p & ~(getMinOSPageSizeBytes() - 1));
 }
 
 class PageAlignTest : public StartupTest {
 public:
     void run() {
         {
-            int64_t x = g_minOSPageSizeBytes + 123;
+            int64_t x = getMinOSPageSizeBytes() + 123;
             void* y = _pageAlign(reinterpret_cast<void*>(x));
-            invariant(g_minOSPageSizeBytes == reinterpret_cast<size_t>(y));
+            invariant(getMinOSPageSizeBytes() == reinterpret_cast<size_t>(y));
         }
         {
             int64_t a = static_cast<uint64_t>(numeric_limits<int>::max());
-            a = a / g_minOSPageSizeBytes;
-            a = a * g_minOSPageSizeBytes;
+            a = a / getMinOSPageSizeBytes();
+            a = a * getMinOSPageSizeBytes();
             // a should now be page aligned
 
             // b is not page aligned
@@ -140,11 +160,12 @@ MAdvise::~MAdvise() {
 }
 #endif
 
-void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
+void* MemoryMappedFile::map(OperationContext* opCtx,
+                            const char* filename,
+                            unsigned long long& length) {
     // length may be updated by callee.
-    setFilename(filename);
+    setFilename(opCtx, filename);
     FileAllocator::get()->allocateAsap(filename, length);
-    len = length;
 
     const bool readOnly = isOptionSet(READONLY);
 
@@ -154,31 +175,31 @@ void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
     const int posixOpenOpts = O_NOATIME | (readOnly ? O_RDONLY : O_RDWR);
     fd = ::open(filename, posixOpenOpts);
     if (fd <= 0) {
-        log() << "couldn't open " << filename << ' ' << errnoWithDescription() << endl;
+        severe() << "couldn't open " << filename << ' ' << errnoWithDescription() << endl;
         fd = 0;  // our sentinel for not opened
         return 0;
     }
 
     unsigned long long filelen = lseek(fd, 0, SEEK_END);
-    uassert(10447,
-            str::stream() << "map file alloc failed, wanted: " << length << " filelen: " << filelen
-                          << ' '
-                          << sizeof(size_t),
-            filelen == length);
+    if (filelen != length) {
+        severe() << "map file alloc failed, wanted: " << length << " filelen: " << filelen << ' '
+                 << sizeof(size_t);
+        fassertFailed(16330);
+    }
     lseek(fd, 0, SEEK_SET);
 
     const int mmapProtectionOpts = readOnly ? PROT_READ : (PROT_READ | PROT_WRITE);
     void* view = mmap(NULL, length, mmapProtectionOpts, MAP_SHARED, fd, 0);
     if (view == MAP_FAILED) {
-        error() << "  mmap() failed for " << filename << " len:" << length << " "
-                << errnoWithDescription() << endl;
+        severe() << "  mmap() failed for " << filename << " len:" << length << " "
+                 << errnoWithDescription() << endl;
         if (errno == ENOMEM) {
             if (sizeof(void*) == 4)
-                error() << "mmap failed with out of memory. You are using a 32-bit build and "
-                           "probably need to upgrade to 64"
-                        << endl;
+                severe() << "mmap failed with out of memory. You are using a 32-bit build and "
+                            "probably need to upgrade to 64"
+                         << endl;
             else
-                error() << "mmap failed with out of memory. (64 bit build)" << endl;
+                severe() << "mmap failed with out of memory. (64 bit build)" << endl;
         }
         return 0;
     }
@@ -193,6 +214,10 @@ void* MemoryMappedFile::map(const char* filename, unsigned long long& length) {
     }
 #endif
 
+    // MemoryMappedFile successfully created, now update state.
+    len = length;
+    MemoryMappedFile::totalMappedLength.fetchAndAdd(len);
+
     views.push_back(view);
 
     return view;
@@ -203,14 +228,14 @@ void* MemoryMappedFile::createPrivateMap() {
     if (x == MAP_FAILED) {
         if (errno == ENOMEM) {
             if (sizeof(void*) == 4) {
-                error() << "mmap private failed with out of memory. You are using a 32-bit build "
-                           "and probably need to upgrade to 64"
-                        << endl;
+                severe() << "mmap private failed with out of memory. You are using a 32-bit build "
+                            "and probably need to upgrade to 64"
+                         << endl;
             } else {
-                error() << "mmap private failed with out of memory. (64 bit build)" << endl;
+                severe() << "mmap private failed with out of memory. (64 bit build)" << endl;
             }
         } else {
-            error() << "mmap private failed " << errnoWithDescription() << endl;
+            severe() << "mmap private failed " << errnoWithDescription() << endl;
         }
         return 0;
     }
@@ -219,9 +244,9 @@ void* MemoryMappedFile::createPrivateMap() {
     return x;
 }
 
-void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
+void* MemoryMappedFile::remapPrivateView(OperationContext* opCtx, void* oldPrivateAddr) {
 #if defined(__sun)  // SERVER-8795
-    LockMongoFilesExclusive lockMongoFiles;
+    LockMongoFilesExclusive lockMongoFiles(opCtx);
 #endif
 
     // don't unmap, just mmap over the old region
@@ -233,8 +258,7 @@ void* MemoryMappedFile::remapPrivateView(void* oldPrivateAddr) {
                    0);
     if (x == MAP_FAILED) {
         int err = errno;
-        error() << "13601 Couldn't remap private view: " << errnoWithDescription(err) << endl;
-        log() << "aborting" << endl;
+        severe() << "13601 Couldn't remap private view: " << errnoWithDescription(err) << endl;
         printMemInfo();
         abort();
     }
@@ -256,12 +280,16 @@ void MemoryMappedFile::flush(bool sync) {
     }
 }
 
+bool MemoryMappedFile::isClosed() {
+    return !len && !fd && !views.size();
+}
+
 class PosixFlushable : public MemoryMappedFile::Flushable {
 public:
     PosixFlushable(MemoryMappedFile* theFile, void* view, HANDLE fd, long len)
         : _theFile(theFile), _view(view), _fd(fd), _len(len), _id(_theFile->getUniqueId()) {}
 
-    void flush() {
+    void flush(OperationContext* opCtx) {
         if (_view == NULL || _fd == 0)
             return;
 
@@ -276,7 +304,7 @@ public:
         }
 
         // some error, lets see if we're supposed to exist
-        LockMongoFilesShared mmfilesLock;
+        LockMongoFilesShared mmfilesLock(opCtx);
         std::set<MongoFile*> mmfs = MongoFile::getAllFiles();
         std::set<MongoFile*>::const_iterator it = mmfs.find(_theFile);
         if ((it == mmfs.end()) || ((*it)->getUniqueId() != _id)) {
@@ -301,6 +329,5 @@ public:
 MemoryMappedFile::Flushable* MemoryMappedFile::prepareFlush() {
     return new PosixFlushable(this, viewForFlushing(), fd, len);
 }
-
 
 }  // namespace mongo

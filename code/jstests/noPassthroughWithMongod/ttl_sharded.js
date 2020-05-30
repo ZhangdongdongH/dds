@@ -4,6 +4,7 @@
  *  - Checks that both shards have TTL index, and docs get deleted on both shards.
  *  - Run the collMod command to update the expireAfterSeconds field. Check that more docs get
  *    deleted.
+ *  @tags: [requires_sharding]
  */
 
 // start up a new sharded cluster
@@ -16,7 +17,7 @@ t = s.getDB(dbname).getCollection(coll);
 
 // enable sharding of the collection. Only 1 chunk initially
 s.adminCommand({enablesharding: dbname});
-s.ensurePrimaryShard(dbname, 'shard0001');
+s.ensurePrimaryShard(dbname, s.shard1.shardName);
 s.adminCommand({shardcollection: ns, key: {_id: 1}});
 
 // insert 24 docs, with timestamps at one hour intervals
@@ -36,15 +37,14 @@ t.ensureIndex({x: 1}, {expireAfterSeconds: 20000});
 s.adminCommand({split: ns, middle: {_id: 12}});
 s.adminCommand({moveChunk: ns, find: {_id: 0}, to: s.getOther(s.getPrimaryShard(dbname)).name});
 
-// one shard will lose 12/12 docs, the other 6/12, so count will go
-// from 24 -> 18 or 12 -> 6
-assert.soon(function() {
-    return t.count() < 7;
-}, "TTL index on x didn't delete enough", 70 * 1000);
-
-// ensure that count ultimately ends up at 6
-assert.eq(0, t.find({x: {$lt: new Date(now - 20000000)}}).count());
-assert.eq(6, t.count());
+// Check that all expired documents are deleted.
+assert.soon(
+    function() {
+        return t.count() === 6 && t.find({x: {$lt: new Date(now - 20000000)}}).count() === 0;
+    },
+    "TTL index did not successfully delete expired documents, all documents: " +
+        tojson(t.find().toArray()),
+    70 * 1000);
 
 // now lets check things explicily on each shard
 var shard0 = s._connections[0].getDB(dbname);
@@ -73,10 +73,13 @@ s.getDB(dbname).runCommand({collMod: coll, index: {keyPattern: {x: 1}, expireAft
 assert.eq(10000, getTTLTime(shard0.getCollection(coll), {x: 1}));
 assert.eq(10000, getTTLTime(shard1.getCollection(coll), {x: 1}));
 
-assert.soon(function() {
-    return t.count() < 6;
-}, "new expireAfterSeconds value not taking effect", 70 * 1000);
-assert.eq(0, t.find({x: {$lt: new Date(now - 10000000)}}).count());
-assert.eq(3, t.count());
+// Check that all expired documents are deleted.
+assert.soon(
+    function() {
+        return t.count() === 3 && t.find({x: {$lt: new Date(now - 10000000)}}).count() === 0;
+    },
+    "new expireAfterSeconds did not successfully delete expired documents, all documents: " +
+        tojson(t.find().toArray()),
+    70 * 1000);
 
 s.stop();

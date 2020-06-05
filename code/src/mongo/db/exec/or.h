@@ -33,6 +33,7 @@
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/record_id.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/db/stats/counters.h"
 
 namespace mongo {
 
@@ -46,6 +47,10 @@ namespace mongo {
 class OrStage final : public PlanStage {
 public:
     OrStage(OperationContext* opCtx, WorkingSet* ws, bool dedup, const MatchExpression* filter);
+
+    ~OrStage(){
+        decStageObjAndMem(STAGE_OR);
+    }
 
     void addChild(PlanStage* child);
 

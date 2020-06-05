@@ -6,8 +6,8 @@ var conn = MongoRunner.runMongod({
     sslPEMKeyFile: "jstests/libs/server.pem",
     sslCAFile: "jstests/libs/ca.pem"
 });
-conn.getDB('admin').createUser({user: "root", pwd: "pass", roles: ["root"]});
-conn.getDB('admin').auth("root", "pass");
+conn.getDB('admin').createUser({user: "admin", pwd: "Password@a1b", roles: ["root"], "passwordDigestor" : "server"});
+conn.getDB('admin').auth("admin", "Password@a1b");
 var cmdOut = conn.getDB('admin').runCommand({getParameter: 1, authenticationMechanisms: 1});
 if (cmdOut.ok) {
     TestData.authMechanism = "MONGODB-X509,SCRAM-SHA-1";  // SERVER-10353
@@ -37,7 +37,7 @@ function authAndTest(mongo) {
     // It should be impossible to create users with names recognized as cluster members
     assert.throws(function() {
         external.createUser(
-            {user: INTERNAL_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}]});
+            {user: INTERNAL_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     }, [], "Created user which would be recognized as a cluster member");
 
     // Add user using localhost exception
@@ -52,7 +52,7 @@ function authAndTest(mongo) {
     // It should be impossible to create users with an internal name
     assert.throws(function() {
         external.createUser(
-            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}]});
+            {user: SERVER_USER, roles: [{'role': 'userAdminAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     });
 
     // Localhost exception should not be in place anymore
@@ -73,7 +73,7 @@ function authAndTest(mongo) {
 
     // Check that we can add a user and read data
     test.createUser(
-        {user: "test", pwd: "test", roles: [{'role': 'readWriteAnyDatabase', 'db': 'admin'}]});
+        {user: "test", pwd: "Password@a1b", roles: [{'role': 'readWriteAnyDatabase', 'db': 'admin'}], "passwordDigestor" : "server"});
     test.foo.findOne();
 
     external.logout();
@@ -92,7 +92,6 @@ MongoRunner.stopMongod(mongo);
 
 print("2. Testing x.509 auth to mongos");
 
-// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     shards: 1,
     mongos: 1,
@@ -102,7 +101,6 @@ var st = new ShardingTest({
         mongosOptions: x509_options,
         shardOptions: x509_options,
         useHostname: false,
-        shardAsReplicaSet: false
     }
 });
 

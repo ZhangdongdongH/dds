@@ -36,6 +36,7 @@
 #include "mongo/db/record_id.h"
 #include "mongo/stdx/unordered_map.h"
 #include "mongo/stdx/unordered_set.h"
+#include "mongo/db/stats/counters.h"
 
 namespace mongo {
 
@@ -61,6 +62,10 @@ public:
                  WorkingSet* ws,
                  const Collection* collection,
                  size_t maxMemUsage);
+
+    ~AndHashStage(){
+        decStageObjAndMem(STAGE_AND_HASH);
+    }
 
     void addChild(PlanStage* child);
 
@@ -107,6 +112,7 @@ private:
     // hash table that we create by intersecting _children and probe with the last child.
     typedef stdx::unordered_map<RecordId, WorkingSetID, RecordId::Hasher> DataMap;
     DataMap _dataMap;
+    static const size_t _dataMapItemSize;
 
     // Keeps track of what elements from _dataMap subsequent children have seen.
     // Only used while _hashingChildren.

@@ -67,8 +67,8 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
 
         // Create an admin user, one user with the inprog privilege, and one without.
         assert.commandWorked(
-            adminDB.runCommand({createUser: "admin", pwd: "pwd", roles: ["root"]}));
-        assert(adminDB.auth("admin", "pwd"));
+            adminDB.runCommand({createUser: "admin", pwd: "Password@a1b", roles: ["root"], "digestPassword" : true}));
+        assert(adminDB.auth("admin", "Password@a1b"));
 
         assert.commandWorked(adminDB.runCommand({
             createRole: "role_inprog",
@@ -77,13 +77,13 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         }));
 
         assert.commandWorked(adminDB.runCommand({
-            createUser: "user_inprog",
-            pwd: "pwd",
-            roles: ["readWriteAnyDatabase", "role_inprog"]
+            createUser: "user_inprog", 
+            pwd: "Password@a1b", 
+            roles: ["readWriteAnyDatabase", "role_inprog"], "digestPassword" : true
         }));
 
         assert.commandWorked(adminDB.runCommand(
-            {createUser: "user_no_inprog", pwd: "pwd", roles: ["readWriteAnyDatabase"]}));
+            {createUser: "user_no_inprog", pwd: "Password@a1b", roles: ["readWriteAnyDatabase"], "digestPassword" : true}));
     }
 
     // Create necessary users at both cluster and shard-local level.
@@ -91,7 +91,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
     createUsers(mongosConn);
 
     // Create a test database and some dummy data on rs0.
-    assert(clusterAdminDB.auth("admin", "pwd"));
+    assert(clusterAdminDB.auth("admin", "Password@a1b"));
 
     for (let i = 0; i < 5; i++) {
         assert.writeOK(clusterTestDB.test.insert({_id: i, a: i}));
@@ -203,7 +203,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Log the other connections in as user_no_inprog so that they will show up for user_inprog
         // with {allUsers: true} and user_no_inprog with {allUsers: false}.
         for (let otherConn of otherConns) {
-            assert(otherConn.getDB("admin").auth("user_no_inprog", "pwd"));
+            assert(otherConn.getDB("admin").auth("user_no_inprog", "Password@a1b"));
         }
 
         const connAdminDB = conn.getDB("admin");
@@ -253,7 +253,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Authenticate as user_no_inprog.
         //
         assert(adminDB.logout());
-        assert(adminDB.auth("user_no_inprog", "pwd"));
+        assert(adminDB.auth("user_no_inprog", "Password@a1b"));
 
         // Test that $currentOp fails with {allUsers: true} for a user without the "inprog"
         // privilege.
@@ -275,7 +275,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Authenticate as user_inprog.
         //
         assert(adminDB.logout());
-        assert(adminDB.auth("user_inprog", "pwd"));
+        assert(adminDB.auth("user_inprog", "Password@a1b"));
 
         // Test that $currentOp fails when it is not the first stage in the pipeline. We use two
         // $currentOp stages since any other stage in the initial position will trip the {aggregate:
@@ -442,7 +442,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Test that a user without the inprog privilege cannot run getMore on a $currentOp
         // aggregation cursor created by a user with {allUsers: true}.
         assert(adminDB.logout());
-        assert(adminDB.auth("user_no_inprog", "pwd"));
+        assert(adminDB.auth("user_no_inprog", "Password@a1b"));
 
         assert.neq(getMoreCmdRes.cursor.id, 0);
         assert.commandFailedWithCode(adminDB.runCommand({
@@ -465,7 +465,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
     // Test that a user without the inprog privilege cannot run non-local $currentOp via mongoS even
     // if allUsers is false.
     assert(clusterAdminDB.logout());
-    assert(clusterAdminDB.auth("user_no_inprog", "pwd"));
+    assert(clusterAdminDB.auth("user_no_inprog", "Password@a1b"));
 
     assert.commandFailedWithCode(
         clusterAdminDB.runCommand(
@@ -480,7 +480,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
     // Test that a non-local $currentOp pipeline via mongoS returns results from all shards, and
     // includes both the shard and host names.
     assert(clusterAdminDB.logout());
-    assert(clusterAdminDB.auth("user_inprog", "pwd"));
+    assert(clusterAdminDB.auth("user_inprog", "Password@a1b"));
 
     assert.eq(clusterAdminDB
                   .aggregate([
@@ -527,7 +527,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Test that a user with the inprog privilege can see another user's ops with
         // {allUsers:true}.
         assert(connAdminDB.logout());
-        assert(connAdminDB.auth("user_inprog", "pwd"));
+        assert(connAdminDB.auth("user_inprog", "Password@a1b"));
 
         let awaitShell = runInParallelShell({
             testfunc: function() {
@@ -539,7 +539,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
             },
             conn: conn,
             username: "admin",
-            password: "pwd"
+            password: "Password@a1b"
         });
 
         assertCurrentOpHasSingleMatchingEntry({
@@ -558,7 +558,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
         // Test that $currentOp succeeds with {allUsers: false} for a user without the "inprog"
         // privilege.
         assert(connAdminDB.logout());
-        assert(connAdminDB.auth("user_no_inprog", "pwd"));
+        assert(connAdminDB.auth("user_no_inprog", "Password@a1b"));
 
         assert.commandWorked(connAdminDB.runCommand({
             aggregate: 1,
@@ -595,7 +595,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
 
         // Release the failpoint and wait for the parallel shell to complete.
         waitForParallelShell(
-            {conn: conn, username: "admin", password: "pwd", awaitShell: awaitShell});
+            {conn: conn, username: "admin", password: "Password@a1b", awaitShell: awaitShell});
 
         // Test that a user without the inprog privilege can run getMore on a $currentOp cursor
         // which they created with {allUsers: false}.
@@ -631,7 +631,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
 
     for (let i in userNames) {
         shardAdminDB.logout();
-        assert(shardAdminDB.auth(userNames[i], "pwd"));
+        assert(shardAdminDB.auth(userNames[i], "Password@a1b"));
 
         // Create a session for this user.
         const session = shardAdminDB.getMongo().startSession();
@@ -663,7 +663,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
     // Log in as 'user_no_inprog' to verify that the user cannot view other users' sessions via
     // 'allUsers:true'.
     shardAdminDB.logout();
-    assert(shardAdminDB.auth("user_no_inprog", "pwd"));
+    assert(shardAdminDB.auth("user_no_inprog", "Password@a1b"));
 
     assert.commandFailedWithCode(shardAdminDB.runCommand({
         aggregate: 1,
@@ -675,7 +675,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
     // Log in as 'user_inprog' to confirm that a user with the 'inprog' privilege can see all three
     // stashed transactions with 'allUsers:true'.
     shardAdminDB.logout();
-    assert(shardAdminDB.auth("user_inprog", "pwd"));
+    assert(shardAdminDB.auth("user_inprog", "Password@a1b"));
 
     assert.eq(
         shardAdminDB
@@ -699,7 +699,7 @@ TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
 
     // Allow all transactions to complete and close the associated sessions.
     for (let i in userNames) {
-        assert(shardAdminDB.auth(userNames[i], "pwd"));
+        assert(shardAdminDB.auth(userNames[i], "Password@a1b"));
         assert.commandWorked(sessionDBs[i].adminCommand({
             commitTransaction: 1,
             txnNumber: NumberLong(i),

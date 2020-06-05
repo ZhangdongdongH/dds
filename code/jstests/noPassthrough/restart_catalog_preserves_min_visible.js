@@ -18,9 +18,14 @@
     replSet.startSet();
     replSet.initiate();
 
+    var fpName = "WTPreserveSnapshotHistoryIndefinitely";
+    if (jsTest.options().storageEngine == "rocksdb") {
+        fpName = "RocksPreserveSnapshotHistoryIndefinitely";
+    }
+
     let prim = replSet.getPrimary();
     let beforeIndexBuild = assert.commandWorked(prim.adminCommand(
-        {configureFailPoint: "WTPreserveSnapshotHistoryIndefinitely",
+        {configureFailPoint: fpName,
          mode: "alwaysOn"}))["operationTime"];
     assert.commandWorked(prim.getDB("test").coll.insert({c: 1}));
     assert.commandWorked(prim.getDB("test").coll.createIndex({c: 1}));

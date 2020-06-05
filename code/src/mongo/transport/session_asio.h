@@ -100,7 +100,7 @@ public:
     }
 
     ~ASIOSession() {
-        end();
+    	end();
     }
 
     TransportLayer* getTransportLayer() const override {
@@ -115,7 +115,7 @@ public:
         return _local;
     }
 
-    void end() override {
+    void end() override { 
         if (getSocket().is_open()) {
             std::error_code ec;
             cancelAsyncOperations();
@@ -709,6 +709,10 @@ private:
 #endif
 
     TransportLayerASIO* const _tl;
+
+
+
+
     bool _isIngressSession;
 };
 

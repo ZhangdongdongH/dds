@@ -60,10 +60,10 @@ private:
     UserSet::iterator _curr;
     UserSet::iterator _end;
 };
-}  // namespace
+} //namespace
 
-UserSet::UserSet() : _users(), _usersEnd(_users.end()) {}
-UserSet::~UserSet() {}
+// UserSet::UserSet() : _users(), _usersEnd(_users.end()) {}
+// UserSet::~UserSet() {}
 
 User* UserSet::add(User* user) {
     for (mutable_iterator it = mbegin(); it != mend(); ++it) {

@@ -41,6 +41,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/record_id.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/db/stats/counters.h"
 
 namespace mongo {
 
@@ -185,6 +186,7 @@ private:
     // May need to track disklocs from the child stage to do our own deduping, also to do
     // invalidation of buffered results.
     stdx::unordered_map<RecordId, WorkingSetID, RecordId::Hasher> _seenDocuments;
+    static const size_t _seenDocItemSize;
 
     // Stats for the stage covering this interval
     // This is owned by _specificStats

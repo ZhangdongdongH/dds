@@ -44,6 +44,7 @@
 #include "mongo/util/net/hostname_canonicalization.h"
 #include "mongo/util/net/socket_utils.h"
 #include "mongo/util/version.h"
+#include "mongo/s/catalog_cache.h"
 
 namespace mongo {
 namespace {
@@ -117,6 +118,9 @@ void ShardingUptimeReporter::startPeriodicThread() {
                 if (!status.isOK()) {
                     warning() << "failed to refresh mongos settings" << causedBy(status);
                 }
+
+                Grid::get(opCtx.get())->catalogCache()->auditDatabaseCache(opCtx.get());
+
             }
 
             MONGO_IDLE_THREAD_BLOCK;

@@ -36,6 +36,7 @@
 #include <boost/algorithm/string/trim.hpp>
 #include <boost/filesystem.hpp>
 #include <boost/filesystem/operations.hpp>
+#include <boost/algorithm/string.hpp>
 #include <ios>
 #include <iostream>
 
@@ -140,6 +141,11 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
                                moe::String,
                                "full path to pidfile (if not set, no pidfile is created)");
 
+    options->addOptionChaining("security.allowCommands",
+                               "allowCommands",
+                               moe::String,
+                               "comma separated list of allow commands");
+
     options->addOptionChaining("processManagement.timeZoneInfo",
                                "timeZoneInfo",
                                moe::String,
@@ -156,6 +162,11 @@ Status addGeneralServerOptions(moe::OptionSection* options) {
         .incompatibleWith("keyFile")
         .incompatibleWith("transitionToAuth")
         .incompatibleWith("clusterAuthMode");
+
+    options->addOptionChaining("security.limitVerifyTimes",
+                               "limitverifytimes",
+                               moe::Switch,
+                               "enable limit verify times");
 
     options
         ->addOptionChaining(
@@ -526,6 +537,15 @@ Status storeServerOptions(const moe::Environment& params) {
     if (params.count("net.ipv6") && params["net.ipv6"].as<bool>() == true) {
         serverGlobalParams.enableIPv6 = true;
         enableIPv6();
+    }
+
+    if (params.count("security.limitVerifyTimes")) {
+        serverGlobalParams.limitVerifyTimes = params["security.limitVerifyTimes"].as<bool>();
+    }
+
+    if (params.count("security.allowCommands")) {
+        std::string allowcommands = params["security.allowCommands"].as<std::string>();
+        boost::split(serverGlobalParams.allowCommands,allowcommands, boost::is_any_of(", "));
     }
 
     if (params.count("net.listenBacklog")) {

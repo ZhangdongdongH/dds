@@ -95,6 +95,10 @@ public:
     std::vector<BuildInfoTuple> buildInfo() const final {
         return version::kBuildEnvironment;
     }
+    
+    StringData innerVersion() const noexcept final {
+        return version::kInnerVersion;
+    }
 
 } kInterpolatedVersionInfo{};
 

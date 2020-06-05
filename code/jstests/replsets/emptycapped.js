@@ -73,7 +73,7 @@
         roles: []
     }));
     assert.commandWorked(primaryAdminDB.runCommand(
-        {createUser: "root2", pwd: "pwd", roles: [{role: "root", db: "admin"}]}));
+        {createUser: "root2", pwd: "Password@a1b", roles: [{role: "root", db: "admin"}], "digestPassword" : true}));
 
     // TODO: Test system.backup_users & system.new_users.
 

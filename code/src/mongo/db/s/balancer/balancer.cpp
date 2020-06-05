@@ -41,6 +41,7 @@
 #include "mongo/db/client.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
+#include "mongo/db/server_options.h"
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy_impl.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/s/balancer_configuration.h"
@@ -354,7 +355,7 @@ void Balancer::_mainThread() {
                 continue;
             }
 
-            if (!balancerConfig->shouldBalance()) {
+            if (!balancerConfig->shouldBalance() || serverGlobalParams.readOnly) {
                 LOG(1) << "Skipping balancing round because balancing is disabled";
                 _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
                 continue;

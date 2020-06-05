@@ -20,8 +20,8 @@
         var adminSession = new Mongo("127.0.0.1:" + conn.port);
         var admin = adminSession.getDB("admin");
         assert.commandWorked(admin.runCommand(
-            {createUser: "admin", pwd: "admin", roles: [{role: "root", db: "admin"}]}));
-        assert(admin.auth("admin", "admin"));
+            {createUser: "admin", pwd: "Password@a1b", roles: [{role: "root", db: "admin"}], "digestPassword" : true}));
+        assert(admin.auth("admin", "Password@a1b"));
 
         // Create a strongly consistent session for consuming user data
         var db = conn.getDB("admin");
@@ -112,33 +112,33 @@
         print(
             "When a client on the loopback authenticates to a user with {clientSource: \"127.0.0.1\"}, it will succeed");
         assert.commandWorked(
-            admin.runCommand({createUser: "user6", pwd: "user", roles: ["role6"]}));
-        assert(db.auth("user6", "user"));
+            admin.runCommand({createUser: "user6", pwd: "Password@a1b", roles: ["role6"], "digestPassword" : true}));
+        assert(db.auth("user6", "Password@a1b"));
 
         print(
             "When a client on the loopback authenticates to a user with {serverAddress: \"127.0.0.1\"}, it will succeed");
         assert.commandWorked(
-            admin.runCommand({createUser: "user7", pwd: "user", roles: ["role7"]}));
-        assert(db.auth("user7", "user"));
+            admin.runCommand({createUser: "user7", pwd: "Password@a1b", roles: ["role7"], "digestPassword" : true}));
+        assert(db.auth("user7", "Password@a1b"));
 
         print(
             "When a client on the loopback authenticates to a user with {clientSource: \"127.0.0.1\", serverAddress: \"127.0.0.1\"}, it will succeed");
         assert.commandWorked(
-            admin.runCommand({createUser: "user8", pwd: "user", roles: ["role8"]}));
-        assert(db.auth("user8", "user"));
+            admin.runCommand({createUser: "user8", pwd: "Password@a1b", roles: ["role8"], "digestPassword" : true}));
+        assert(db.auth("user8", "Password@a1b"));
 
         print("=== Remote access tests");
         print(
             "When a client on the external interface authenticates to a user with {clientSource: \"127.0.0.1\"}, it will fail");
-        assert(!externalDb.auth("user6", "user"));
+        assert(!externalDb.auth("user6", "Password@a1b"));
 
         print(
             "When a client on the external interface authenticates to a user with {serverAddress: \"127.0.0.1\"}, it will fail");
-        assert(!externalDb.auth("user7", "user"));
+        assert(!externalDb.auth("user7", "Password@a1b"));
 
         print(
             "When a client on the external interface authenticates to a user with {clientSource: \"127.0.0.1\", serverAddress: \"127.0.0.1\"}, it will fail");
-        assert(!externalDb.auth("user8", "user"));
+        assert(!externalDb.auth("user8", "Password@a1b"));
 
         print("=== Invalidation tests");
         print(
@@ -151,11 +151,11 @@
                 [{clientSource: ["127.0.0.1"], serverAddress: ["127.0.0.1"]}]
         }));
         assert.commandWorked(
-            admin.runCommand({createUser: "user11", pwd: "user", roles: ["role11"]}));
-        assert(!externalDb.auth("user11", "user"));
+            admin.runCommand({createUser: "user11", pwd: "Password@a1b", roles: ["role11"], "digestPassword" : true}));
+        assert(!externalDb.auth("user11", "Password@a1b"));
         assert.commandWorked(
             admin.runCommand({updateRole: "role11", authenticationRestrictions: []}));
-        assert(externalDb.auth("user11", "user"));
+        assert(externalDb.auth("user11", "Password@a1b"));
 
         print(
             "When a client sets authenticationRestrictions on a role, authorization privileges are revoked");
@@ -166,11 +166,11 @@
             authenticationRestrictions: [{clientSource: ["127.0.0.1"]}]
         }));
         assert.commandWorked(
-            admin.runCommand({createUser: "user12", pwd: "user", roles: ["role12"]}));
-        assert(db.auth("user12", "user"));
+            admin.runCommand({createUser: "user12", pwd: "Password@a1b", roles: ["role12"], "digestPassword" : true}));
+        assert(db.auth("user12", "Password@a1b"));
         assert.commandWorked(db.getSiblingDB("test").runCommand({find: "foo", batchSize: 0}));
         sleepUntilUserDataPropagated();
-        assert(eventualDb.auth("user12", "user"));
+        assert(eventualDb.auth("user12", "Password@a1b"));
         assert.commandWorked(
             eventualDb.getSiblingDB("test").runCommand({find: "foo", batchSize: 0}));
         assert.commandWorked(admin.runCommand(
@@ -190,14 +190,14 @@
         }
 
         var admin = conn.getDB("admin");
-        assert(admin.auth("admin", "admin"));
+        assert(admin.auth("admin", "Password@a1b"));
 
-        assert.commandWorked(admin.runCommand({createUser: "user", pwd: "pwd", roles: []}));
+        assert.commandWorked(admin.runCommand({createUser: "user", pwd: "Password@a1b", roles: [], "digestPassword" : true}));
         assert.commandWorked(admin.runCommand({
             createUser: "restrictedUser",
-            pwd: "pwd",
+            pwd: "Password@a1b",
             roles: [],
-            authenticationRestrictions: [{clientSource: ["127.0.0.1"]}]
+            authenticationRestrictions: [{clientSource: ["127.0.0.1"]}], "digestPassword" : true
         }));
         assert.commandWorked(admin.runCommand({
             createRole: "restrictedRole",
@@ -206,12 +206,12 @@
             authenticationRestrictions: [{clientSource: ["127.0.0.2"]}]
         }));
         assert.commandWorked(admin.runCommand(
-            {createUser: "userWithRestrictedRole", pwd: "pwd", roles: ["restrictedRole"]}));
+            {createUser: "userWithRestrictedRole", pwd: "Password@a1b", roles: ["restrictedRole"], "digestPassword" : true}));
         assert.commandWorked(admin.runCommand({
             createUser: "restrictedUserWithRestrictedRole",
-            pwd: "pwd",
+            pwd: "Password@a1b",
             roles: ["restrictedRole"],
-            authenticationRestrictions: [{clientSource: ["127.0.0.1"]}]
+            authenticationRestrictions: [{clientSource: ["127.0.0.1"]}], "digestPassword" : true
         }));
 
         print(
@@ -311,7 +311,7 @@
         }
 
         var admin = conn.getDB("admin");
-        assert(admin.auth("admin", "admin"));
+        assert(admin.auth("admin", "Password@a1b"));
 
         assert.commandWorked(admin.runCommand({createRole: "role", roles: [], privileges: []}));
         // restrictedRole already created

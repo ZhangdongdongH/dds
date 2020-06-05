@@ -37,6 +37,8 @@
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/auth/authorization_session.h"
 
 namespace mongo {
 
@@ -212,6 +214,30 @@ StatusWith<ParsedDistinct> ParsedDistinct::parse(OperationContext* opCtx,
         return cq.getStatus();
     }
 
+    //begin for dds
+    BSONObj originQuery = (cq.getValue())->getQueryObj();
+
+    if (AuthorizationSession::get(opCtx->getClient())->isAuthWithCustomerOrNoAuthUser() || opCtx->isCustomerTxn()) {
+        if (nss.ns() == "admin.system.users" ) {
+            std::set<std::string> buildinUsers;
+            UserName::getBuildinUsers(buildinUsers);
+            BSONObj filterUsername = BSON(AuthorizationManager::USER_NAME_FIELD_NAME << NIN << buildinUsers);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj querynew = BSON("$and" << BSON_ARRAY(originQuery << filter));
+            (cq.getValue())->setQueryObj(querynew);
+        }
+        if (nss.ns() == "admin.system.roles" ) {
+            std::set<std::string> buildinRoles;
+            RoleName::getBuildinRoles(buildinRoles);
+            BSONObj filterUsername = BSON(AuthorizationManager::ROLE_NAME_FIELD_NAME << NIN << buildinRoles);
+            BSONObj filterdbname = BSON(AuthorizationManager::ROLE_DB_FIELD_NAME << NE << "admin");
+            BSONObj filter = BSON("$or" << BSON_ARRAY(filterUsername << filterdbname));
+            BSONObj querynew = BSON("$and" << BSON_ARRAY(originQuery << filter));
+            (cq.getValue())->setQueryObj(querynew);
+        }
+    }
+    //end for dds
     return ParsedDistinct(std::move(cq.getValue()), std::move(key));
 }
 

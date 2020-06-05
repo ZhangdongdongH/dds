@@ -32,6 +32,7 @@
 
 #include "mongo/base/status.h"
 #include "mongo/logger/log_domain.h"
+#include "mongo/logger/audit_log_domain.h"
 
 /*
  * Implementation of LogDomain<E>.  Include this in cpp files to instantiate new LogDomain types.
@@ -62,6 +63,17 @@ Status LogDomain<E>::append(const E& event) {
     }
     return Status::OK();
 }
+
+
+template <typename E>
+void LogDomain<E>::flush() {
+    for (auto& appender : _appenders) {
+        if (appender) {
+            appender->flush();
+        }
+    }
+}
+
 
 template <typename E>
 auto LogDomain<E>::attachAppender(std::unique_ptr<EventAppender> appender) -> AppenderHandle {

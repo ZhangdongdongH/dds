@@ -29,8 +29,8 @@
         }
     });
 
-    st.s.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
-    st.s.getDB('admin').auth('admin', 'pwd');
+    st.s.getDB('admin').createUser({user: 'admin', pwd: 'Password@a1b', roles: ['root'], "passwordDigestor" : "server"});
+    st.s.getDB('admin').auth('admin', 'Password@a1b');
 
     var coll = st.s.getCollection("test.foo");
 
@@ -73,7 +73,7 @@
     // Authenticate csrs so ReplSetTest.stopSet() can do db hash check.
     if (st.configRS) {
         st.configRS.nodes.forEach((node) => {
-            node.getDB('admin').auth('admin', 'pwd');
+            node.getDB('admin').auth('admin', 'Password@a1b');
         });
     }
     st.stop();

@@ -8,8 +8,8 @@
         const admin = conn.getDB("admin");
         const db = conn.getDB(dbName);
 
-        assert.commandWorked(admin.runCommand({createUser: "root", pwd: "root", roles: ["root"]}));
-        assert(admin.auth("root", "root"));
+        assert.commandWorked(admin.runCommand({createUser: "root", pwd: "Password@a1b", roles: ["root"]}));
+        assert(admin.auth("root", "Password@a1b"));
 
         assert.commandWorked(admin.runCommand({
             createRole: "roleWithExactNamespacePrivileges",
@@ -60,15 +60,15 @@
         admin.logout();
 
         function runTestOnRole(roleName) {
-            assert(admin.auth("root", "root"));
+            assert(admin.auth("root", "Password@a1b"));
             assert.commandWorked(db.dropDatabase());
 
             const userName = "user|" + roleName;
             assert.commandWorked(db.runCommand(
-                {createUser: userName, pwd: "pwd", roles: [{role: roleName, db: "admin"}]}));
+                {createUser: userName, pwd: "Password@a1b", roles: [{role: roleName, db: "admin"}]}));
             admin.logout();
 
-            assert(db.auth(userName, "pwd"));
+            assert(db.auth(userName, "Password@a1b"));
 
             let res;
 

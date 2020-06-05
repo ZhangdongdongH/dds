@@ -337,6 +337,8 @@ ExitCode runMongosServer(ServiceContext* serviceContext) {
     printShardingVersionInfo(false);
 
     initWireSpec();
+    
+    startAuditLogFlusher();
 
     serviceContext->setServiceEntryPoint(
         stdx::make_unique<ServiceEntryPointMongos>(serviceContext));

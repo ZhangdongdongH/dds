@@ -6,13 +6,13 @@
 var baseName = "auth_server-6591";
 var dbpath = MongoRunner.dataPath + baseName;
 var username = "foo";
-var password = "bar";
+var password = "Password@a1b";
 
 load("jstests/libs/host_ipaddr.js");
 
 var createUser = function(db) {
     print("============ adding a user.");
-    db.createUser({user: username, pwd: password, roles: jsTest.adminUserRoles});
+    db.createUser({user: username, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
 };
 
 var createRole = function(mongo) {
@@ -52,8 +52,9 @@ var assertCannotRunCommands = function(mongo) {
     // Additional commands not permitted
     // Create non-admin user
     assert.throws(function() {
-        mongo.getDB("test").createUser({user: username, pwd: password, roles: ['readWrite']});
+        mongo.getDB("test").createUser({user: username, pwd: password, roles: ['readWrite'], "passwordDigestor" : "server"});
     });
+
     // DB operations
     var authorizeErrorCode = 13;
     assert.commandFailedWithCode(
@@ -170,11 +171,11 @@ var runNonlocalTest = function(host) {
     assertCannotRunCommands(mongo);
     assert.throws(function() {
         mongo.getDB("admin").createUser(
-            {user: username, pwd: password, roles: jsTest.adminUserRoles});
+            {user: username, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     });
     assert.throws(function() {
         mongo.getDB("$external")
-            .createUser({user: username, pwd: password, roles: jsTest.adminUserRoles});
+            .createUser({user: username, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     });
     shutdown(conn);
 };

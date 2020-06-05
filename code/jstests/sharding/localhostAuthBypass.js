@@ -14,13 +14,13 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
     var replSetName = "replsets_server-6591";
     var keyfile = "jstests/libs/key1";
     var numShards = 2;
-    var username = "foo";
-    var password = "bar";
+    var username = "admin";
+    var password = "Password@a1b";
 
     var createUser = function(mongo) {
         print("============ adding a user.");
         mongo.getDB("admin").createUser(
-            {user: username, pwd: password, roles: jsTest.adminUserRoles});
+            {user: username, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
     };
 
     var addUsersToEachShard = function(st) {
@@ -28,7 +28,7 @@ TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
             print("============ adding a user to shard " + i);
             var d = st["shard" + i];
             d.getDB("admin").createUser(
-                {user: username, pwd: password, roles: jsTest.adminUserRoles});
+                {user: username, pwd: password, roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
         }
     };
 

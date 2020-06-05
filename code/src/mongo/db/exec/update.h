@@ -35,6 +35,7 @@
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/ops/update_result.h"
 #include "mongo/db/update/update_driver.h"
+#include "mongo/db/stats/counters.h"
 
 namespace mongo {
 
@@ -82,6 +83,9 @@ public:
                 WorkingSet* ws,
                 Collection* collection,
                 PlanStage* child);
+    ~UpdateStage(){
+        decStageObjAndMem(STAGE_UPDATE);
+    };
 
     bool isEOF() final;
     StageState doWork(WorkingSetID* out) final;

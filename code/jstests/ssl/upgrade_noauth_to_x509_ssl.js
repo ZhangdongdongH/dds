@@ -32,7 +32,7 @@ load('jstests/ssl/libs/ssl_helpers.js');
 
     // Create a user to login when auth is enabled later
     assert.commandWorked(rstConn1.adminCommand(
-        {createUser: 'root', pwd: 'root', roles: ['root'], writeConcern: {w: 3}}));
+        {createUser: 'admin', pwd: 'Password@a1b', roles: ['root'], "digestPassword" : true, writeConcern: {w: 3}}));
 
     assert.writeOK(testDB.a.insert({a: 1, str: 'TESTTESTTEST'}));
     assert.eq(1, testDB.a.count(), 'Error interacting with replSet');
@@ -47,7 +47,7 @@ load('jstests/ssl/libs/ssl_helpers.js');
     assert.eq(2, testDB.a.count(), 'Error interacting with replSet');
 
     print('=== UPGRADE transition to x509/preferSSL -> x509/requireSSL ===');
-    rst.upgradeSet(x509RequireSSL, 'root', 'root');
+    rst.upgradeSet(x509RequireSSL, 'admin', 'Password@a1b');
 
     // upgradeSet leaves its connections logged in as root
     testDB = rst.getPrimary().getDB(dbName);

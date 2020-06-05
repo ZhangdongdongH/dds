@@ -9,11 +9,16 @@
         const admin = mongod.getDB('admin');
         const test = mongod.getDB('test');
 
-        admin.createUser({user: 'admin', pwd: 'pass', roles: jsTest.adminUserRoles});
-        assert(admin.auth('admin', 'pass'));
+        admin.createUser({user: 'admin', pwd: 'Password@a1b', roles: jsTest.adminUserRoles, "passwordDigestor" : "server"});
+        assert(admin.auth('admin', 'Password@a1b'));
 
-        test.createUser({user: 'user', pwd: 'pass', roles: jsTest.basicUserRoles});
+        test.createUser({user: 'user', pwd: 'Password@a1b', roles: jsTest.basicUserRoles, "passwordDigestor" : "server"});
 
+        print("eharry 1: ")
+        admin.system.users.find().forEach(function(doc) {
+            print(tojson(doc));
+        });
+        print("eharry 1: ")
         // Give the test user an invalid set of SCRAM-SHA-1 credentials.
         assert.eq(admin.system.users
                       .update({_id: "test.user"}, {
@@ -29,13 +34,14 @@
                       .nModified,
                   1,
                   "Should have updated one document for user@test");
+        print("eharry 1: ")
+        admin.system.users.find().forEach(function(doc) {
+            print(tojson(doc));
+        });
+        print("eharry 1: ")
         admin.logout();
 
-        const error = assert.throws(function() {
-            test._authOrThrow({user: 'user', pwd: 'pass'});
-        });
-
-        assert.eq(error, "Error: credential document SCRAM-SHA-1 failed validation");
+        assert(!test.auth({user: 'user', pwd: 'Password@a1b'}));
     }
 
     const mongod = MongoRunner.runMongod({auth: "", useLogFiles: true});

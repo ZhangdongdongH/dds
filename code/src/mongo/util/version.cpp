@@ -95,6 +95,10 @@ public:
     std::vector<BuildInfoTuple> buildInfo() const final {
         return {};
     }
+    
+    StringData innerVersion() const noexcept final {
+        return "unknown";
+    }
 
 } kFallbackVersionInfo{};
 
@@ -238,6 +242,18 @@ std::string mongosVersion(const VersionInfoInterface& provider) {
 std::string mongodVersion(const VersionInfoInterface& provider) {
     std::stringstream ss;
     ss << "db version v" << provider.version();
+    return ss.str();
+}
+
+std::string innerMongodVersion(const VersionInfoInterface& provider) {
+    std::stringstream ss;
+    ss << "db version v" << provider.innerVersion();
+    return ss.str();
+}
+
+std::string innerMongosVersion(const VersionInfoInterface& provider) {
+    std::stringstream ss;
+    ss << "db version v" << provider.innerVersion();
     return ss.str();
 }
 

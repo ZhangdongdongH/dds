@@ -54,7 +54,7 @@ using std::string;
 
 namespace {
 
-void _appendUserInfo(const CurOp& c, BSONObjBuilder& builder, AuthorizationSession* authSession) {
+UserName _appendUserInfo(const CurOp& c, BSONObjBuilder& builder, AuthorizationSession* authSession) {
     UserNameIterator nameIter = authSession->getAuthenticatedUserNames();
 
     UserName bestUser;
@@ -77,6 +77,7 @@ void _appendUserInfo(const CurOp& c, BSONObjBuilder& builder, AuthorizationSessi
     allUsers.doneFast();
 
     builder.append("user", bestUser.getUser().empty() ? "" : bestUser.getFullName());
+    return bestUser;
 }
 
 }  // namespace
@@ -107,8 +108,10 @@ void profile(OperationContext* opCtx, NetworkOp op) {
     }
 
     AuthorizationSession* authSession = AuthorizationSession::get(opCtx->getClient());
-    _appendUserInfo(*CurOp::get(opCtx), b, authSession);
-
+    UserName bestUser = _appendUserInfo(*CurOp::get(opCtx), b, authSession);
+    if(bestUser.isBuildinUser()) {
+        return;
+    }
     const BSONObj p = b.done();
 
     const bool wasLocked = opCtx->lockState()->isLocked();
@@ -194,7 +197,7 @@ Status createProfileCollection(OperationContext* opCtx, Database* db) {
 
     CollectionOptions collectionOptions;
     collectionOptions.capped = true;
-    collectionOptions.cappedSize = 1024 * 1024;
+    collectionOptions.cappedSize = ((long long)serverGlobalParams.profileSizeMB) * 1024 * 1024;
 
     WriteUnitOfWork wunit(opCtx);
     repl::UnreplicatedWritesBlock uwb(opCtx);
